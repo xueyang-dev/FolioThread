@@ -308,6 +308,26 @@ def test_runtime_packet_projection_is_ephemeral_global_and_review_scoped():
 
 
 @pytest.mark.parametrize("field,value", [
+    ("advisory_terminology_context", "term -> different advisory target"),
+    ("target_language", "繁體中文"),
+])
+def test_runtime_packet_fingerprints_all_reviewer_context(field, value):
+    batch = [{"source": "term source", "target": "当前译文"}]
+    context = {
+        "target_language": "简体中文",
+        "style_constraints": "formal",
+        "advisory_terminology_context": "term -> advisory target",
+    }
+    packet = build_runtime_review_packet(
+        {"pairs": []}, batch, [0], [], review_context=context)
+    changed = dict(context)
+    changed[field] = value
+    changed_packet = build_runtime_review_packet(
+        {"pairs": []}, batch, [0], [], review_context=changed)
+    assert changed_packet["input_fingerprint"] != packet["input_fingerprint"]
+
+
+@pytest.mark.parametrize("field,value", [
     ("segment_id", 9), ("source", "different"), ("target", "different"),
 ])
 def test_runtime_review_packet_truth_mismatch_fails_closed(field, value):
@@ -430,3 +450,36 @@ def test_blind_reviewer_packet_view_hides_formal_audit_and_rationale():
     assert findings == [] and not failed and "CANDIDATE" in visible
     assert all(secret not in visible for secret in (
         "FORMAL_SECRET", "INITIAL_SECRET", "REPAIR_SECRET", "AUDIT_SECRET"))
+
+
+def test_packet_mode_has_no_unfingerprinted_legacy_prompt_context():
+    batch = [{"source": "source", "target": "target"}]
+    packet = build_runtime_review_packet(
+        {"pairs": []}, batch, [0], [], review_context={
+            "target_language": "中文",
+            "style_constraints": "TRACKED_STYLE",
+            "advisory_terminology_context": "TRACKED_ADVISORY",
+        })
+    packet_prompts = []
+    findings, failed, _ = review_translation_batch_with_evidence(
+        ["source"], ["target"], "UNTRACKED_SECRET", "UNTRACKED_STYLE", "中文",
+        "p", "k", "m", TranslationEvidenceIndex(["source"], batch, []),
+        call_llm=lambda *args, **kwargs: packet_prompts.append(args[3]) or "[]",
+        segment_ids=[0], translation_core_packet=packet,
+    )
+    assert findings == [] and not failed
+    packet_visible = packet_prompts[0]
+    assert "TRACKED_STYLE" in packet_visible and "TRACKED_ADVISORY" in packet_visible
+    assert "UNTRACKED_SECRET" not in packet_visible
+    assert "UNTRACKED_STYLE" not in packet_visible
+
+    legacy_prompts = []
+    findings, failed, _ = review_translation_batch_with_evidence(
+        ["source"], ["target"], "UNTRACKED_SECRET", "UNTRACKED_STYLE", "中文",
+        "p", "k", "m", TranslationEvidenceIndex(["source"], batch, []),
+        call_llm=lambda *args, **kwargs: legacy_prompts.append(args[3]) or "[]",
+        segment_ids=[0],
+    )
+    assert findings == [] and not failed
+    assert "UNTRACKED_SECRET" in legacy_prompts[0]
+    assert "UNTRACKED_STYLE" in legacy_prompts[0]

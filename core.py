@@ -1566,7 +1566,9 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                 if item.get("level") in {"human_accepted", "reviewed", "tm_approved"}
             ],
             "next_source_context": list(ctx_next),
+            "target_language": target_lang,
             "style_constraints": style_rules or "",
+            "advisory_terminology_context": glossary_text or "",
         }
         state.setdefault("context_packet_log", []).append({
             "batch": bi,

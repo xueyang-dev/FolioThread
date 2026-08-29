@@ -572,6 +572,8 @@ def review_translation_batch_with_evidence(
             _reviewer_packet_view(translation_core_packet),
             ensure_ascii=False, sort_keys=True,
         )
+    legacy_prompt_context = "" if translation_core_packet is not None else \
+        glossary_text + "\n" + style_rules
     system_prompt = (
         "你是一位独立的翻译审校专家，负责审查机器译文。"
         + ("这是盲审：不要提及修复候选或内部流程。" if blind else "")
@@ -595,7 +597,7 @@ def review_translation_batch_with_evidence(
         "\"recommendation\": \"建议人工如何检查或处理\", "
         "\"confidence\": 0.87, \"detector\": \"Semantic QA\", "
         "\"evidence_refs\": [\"E1\"]}。"
-        "若无问题 findings 必须为空数组。\n" + glossary_text + "\n" + style_rules
+        "若无问题 findings 必须为空数组。\n" + legacy_prompt_context
         + packet_prompt
     )
     base_prompt = f"待审校段落（目标语言：{target_lang}）：\n{numbered}"

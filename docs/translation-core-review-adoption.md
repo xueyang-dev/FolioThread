@@ -56,7 +56,11 @@ Project Memory.
 The packet fingerprints bounded factual context already available to the runtime:
 document and section profiles, document synopsis and section digest, neighboring
 source text, accepted or reviewed previous target context, next-source context, and
-current style constraints. It does not reuse an opaque generation prompt.
+current style constraints. The target language and the exact advisory terminology
+text—including provisional hints—also live in this fingerprinted review context.
+With a Translation Core packet, the packet view is the reviewer's sole data input;
+legacy `glossary_text` and `style_rules` arguments are not appended beside it. It
+does not reuse an opaque generation prompt.
 
 The initial packet contains no dynamically requested evidence. If the reviewer uses
 the existing evidence-request round, the adapter recomputes the final consumed-input
@@ -97,3 +101,8 @@ resume, delivery/release gates, academic reporting, MTI workflow, translation-me
 promotion, Workbench UI, HumanDecision integration, state migration, or persisted
 schema requirements. It adds no database, agent loop, workflow engine, retrieval
 subsystem, or persistence layer.
+
+Before HumanDecision runtime adoption, duplicate detectors must provide stable
+`location_key` or `occurrence_key` values. The current deterministic response-order
+fallback prevents collisions but is not a durable decision identity if a model
+reorders otherwise identical findings.
