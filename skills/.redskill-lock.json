@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "skills": {
+    "writing-dna-skill": {
+      "name": "writing-dna-skill",
+      "version": "1.0.1",
+      "source": "redskill",
+      "install_dir": "/Users/xueyang/Dev/TransPraxis/skills/writing-dna-skill",
+      "installed_at": "1787659270079",
+      "sha256": "2c7ba8cd4643efef0cdfd75204d4027a1d959a665b19b2c83f57e433f6547f5c"
+    }
+  }
+}
