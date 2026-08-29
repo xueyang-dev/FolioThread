@@ -74,17 +74,18 @@ def test_project_memory_contains_only_confirmed_existing_truth():
         ],
     )
 
-    assert memory["glossary_hash"] == models.glossary_hash(state["glossary"])
-    assert [item["glossary_entry_id"] for item in memory["terminology_refs"]] == [
+    knowledge = memory["knowledge"]
+    assert knowledge["glossary_hash"] == models.glossary_hash(state["glossary"])
+    assert [item["glossary_entry_id"] for item in knowledge["terminology_refs"]] == [
         models.normalize_glossary_entry(state["glossary"][0])["id"]
     ]
-    assert {(item["source"], item["target"]) for item in memory["translation_memory"]} == {
+    assert {(item["source"], item["target"]) for item in knowledge["translation_memory"]} == {
         ("Continuity matters.", "连续性很重要。"), ("TM confirmed", "已确认")
     }
-    assert [item["rule"] for item in memory["style_rules"]] == [
+    assert [item["rule"] for item in knowledge["style_rules"]] == [
         "Use formal register.", "Prefer active voice."
     ]
-    assert memory["human_decisions"] == [state["human_actions"][0]]
+    assert memory["audit_history"]["human_decisions"] == [state["human_actions"][0]]
     assert "knowledge_candidates" not in memory
 
 
@@ -98,7 +99,10 @@ def test_review_finding_identity_ignores_mutable_explanation_text():
     }
     first = normalize_finding({**base, "summary": "First wording"},
                               input_fingerprint=input_hash)
-    second = normalize_finding({**base, "summary": "Reworded"},
+    second = normalize_finding({
+        **base, "summary": "Reworded", "source_span": "changed source prose",
+        "target_span": "changed target prose",
+    },
                                input_fingerprint=input_hash)
 
     assert first["finding_id"] == second["finding_id"]
@@ -111,6 +115,13 @@ def test_review_finding_identity_ignores_mutable_explanation_text():
         {**base, "segment_id": 0}, input_fingerprint=input_hash,
     )
     assert segment_zero["subject_id"] == "0"
+    first_occurrence = normalize_finding(
+        {**base, "location_key": "paragraph-1"}, input_fingerprint=input_hash,
+    )
+    second_occurrence = normalize_finding(
+        {**base, "location_key": "paragraph-2"}, input_fingerprint=input_hash,
+    )
+    assert first_occurrence["finding_id"] != second_occurrence["finding_id"]
 
 
 def test_only_a_human_can_decide_an_open_human_required_finding():
@@ -120,38 +131,68 @@ def test_only_a_human_can_decide_an_open_human_required_finding():
         "status": "open", "segment_id": 1, "requires_human_confirmation": True,
     }, input_fingerprint=current)
     updated, decision = record_human_decision(
-        finding, "approved", "alice", actor_type="human",
-        note="Checked against the source.", decided_at="2026-08-29T12:00:00+00:00",
+        finding, "accept_resolution", "alice", actor_type="human",
         current_fingerprint=current,
+        note="Checked against the source.", decided_at="2026-08-29T12:00:00+00:00",
     )
 
     assert updated["status"] == "resolved"
     assert decision["finding_id"] == finding["finding_id"]
     assert decision["actor_type"] == "human" and decision["status"] == "current"
+    requested, request = record_human_decision(
+        finding, "request_revision", "alice", actor_type="human",
+        current_fingerprint=current,
+    )
+    assert requested["status"] == "open"
+    assert requested["latest_decision_id"] == request["decision_id"]
+    assert "resolution_decision_id" not in requested
+    dismissed, _ = record_human_decision(
+        finding, "dismiss", "alice", actor_type="human",
+        current_fingerprint=current,
+    )
+    assert dismissed["status"] == "dismissed"
     with pytest.raises(ValueError, match="human"):
-        record_human_decision(finding, "approved", "review-model", actor_type="model")
+        record_human_decision(
+            finding, "accept_resolution", "review-model", actor_type="model",
+            current_fingerprint=current,
+        )
     with pytest.raises(ValueError, match="open finding"):
         record_human_decision(
             {**finding, "requires_human_confirmation": False},
-            "approved", "alice", actor_type="human",
+            "accept_resolution", "alice", actor_type="human",
+            current_fingerprint=current,
         )
     with pytest.raises(ValueError, match="stale"):
         record_human_decision(
-            finding, "approved", "alice", actor_type="human",
+            finding, "accept_resolution", "alice", actor_type="human",
             current_fingerprint=fingerprint({"target": "v2"}),
+        )
+    with pytest.raises(TypeError, match="current_fingerprint"):
+        record_human_decision(  # type: ignore[call-arg]
+            finding, "accept_resolution", "alice", actor_type="human",
+        )
+    with pytest.raises(ValueError, match="finding_id"):
+        record_human_decision(
+            {**finding, "finding_id": ""}, "accept_resolution", "alice",
+            actor_type="human", current_fingerprint=current,
+        )
+    with pytest.raises(ValueError, match="invalid human decision"):
+        record_human_decision(
+            finding, "approved", "alice", actor_type="human",
+            current_fingerprint=current,
         )
 
 
 def test_review_freshness_changes_for_every_dependency_and_preserves_records():
     dependencies = {
         "source": ["source"], "target": ["target"], "glossary_hash": "g1",
-        "project_memory": {"style_rules": []}, "context": {"before": "x"},
+        "confirmed_knowledge": {"style_rules": []}, "context": {"before": "x"},
         "deterministic_checks": [{"code": "ok"}], "evidence": [{"id": "E1"}],
     }
     original = review_input_fingerprint(**dependencies)
     for key, replacement in {
         "source": ["changed"], "target": ["changed"], "glossary_hash": "g2",
-        "project_memory": {"style_rules": ["changed"]},
+        "confirmed_knowledge": {"style_rules": ["changed"]},
         "context": {"before": "changed"},
         "deterministic_checks": [{"code": "changed"}],
         "evidence": [{"id": "E2"}],
@@ -194,7 +235,23 @@ def test_review_packet_is_bounded_independent_and_v04_compatible():
     assert packet["glossary"]["glossary_hash"] == models.glossary_hash(state["glossary"])
     assert len(str(packet["context"])) < 100
     assert len(str(packet["evidence"])) < 120
-    assert packet["project_memory"]["terminology_refs"]
+    assert packet["project_memory"]["knowledge"]["terminology_refs"]
+
+    audit_changed = deepcopy(state)
+    audit_changed["human_actions"].append({
+        "action": "review_confirmation", "actor": "alice", "finding_id": "f-2",
+    })
+    after_decision = build_review_packet(
+        audit_changed, segment_ids=[0],
+        deterministic_checks=[{"code": "terminology", "status": "pass"}],
+        context={"previous": "x" * 100},
+        evidence=[{"evidence_id": "E1", "quote": "y" * 100}],
+        confirmed_style_rules=["Use formal register."],
+        context_char_limit=40,
+        evidence_char_limit=60,
+    )
+    assert after_decision["project_memory"] != packet["project_memory"]
+    assert after_decision["input_fingerprint"] == packet["input_fingerprint"]
 
     changed = deepcopy(state)
     changed["pairs"][0]["target"] = "改变。"

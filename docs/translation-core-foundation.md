@@ -7,16 +7,22 @@ translation execution path.
 
 ## Concepts adapted from Localize Anything
 
-- Project Memory is confirmed knowledge only. Generated terminology observations
-  remain candidates until an explicit human action promotes or rejects them.
-- Review findings have stable identities, explicit severity and lifecycle status,
-  evidence references, and a fingerprint of the inputs they reviewed.
+- Project Memory separates review-relevant confirmed knowledge from audit history.
+  Generated terminology observations remain candidates until an explicit human
+  action promotes or rejects them.
+- Review findings have stable identities based on code, subject, glossary entry,
+  and an optional explicit occurrence key—not mutable span prose. Severity,
+  lifecycle status, evidence references, and reviewed-input fingerprints remain
+  versioned separately.
 - Human decisions are separate audit records. They can resolve only open findings
-  that request human confirmation, and the decision actor must be human.
+  that request human confirmation, the decision actor must be human, and the
+  caller must supply the exact current fingerprint. `accept_resolution` resolves,
+  `dismiss` dismisses, and `request_revision` keeps the finding open.
 - Review packets are independent snapshots containing translation truth,
   deterministic checks, bounded context and evidence, Project Memory, and the
   glossary used for review. Generation rationale is intentionally excluded.
-- Derived review artifacts are bound to deterministic dependency fingerprints.
+- Derived review artifacts are bound to deterministic dependency fingerprints
+  over confirmed knowledge and review inputs, never review output or audit history.
   When a dependency changes, old findings and decisions are retained and marked
   stale rather than deleted.
 
@@ -43,9 +49,9 @@ workflow, project adapters, repair loop, or `.localize-anything` state layout.
 
 ## Initial package boundary
 
-- `memory.py`: build a confirmed-only Project Memory view from existing state,
-  canonical glossary entries, reviewed TM records, confirmed style rules, and
-  auditable human actions.
+- `memory.py`: build a Project Memory view with confirmed terminology, reviewed TM,
+  and confirmed style rules under `knowledge`, and legacy-compatible human actions
+  under the separate `audit_history` branch.
 - `findings.py`: normalize the unified Review Finding contract and generate stable
   identities from the finding's logical location, not mutable prose.
 - `decisions.py`: record human-only decisions against eligible open findings.
