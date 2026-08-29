@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">FolioThread mark</title>
+  <desc id="desc">A document page crossed by a continuous thread.</desc>
+  <defs>
+    <linearGradient id="page" x1="24" y1="20" x2="132" y2="142" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1837A8"/>
+      <stop offset="1" stop-color="#0A8CF0"/>
+    </linearGradient>
+    <linearGradient id="thread" x1="20" y1="106" x2="142" y2="60" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#19B6A5"/>
+      <stop offset=".52" stop-color="#20A7F4"/>
+      <stop offset="1" stop-color="#7B61FF"/>
+    </linearGradient>
+  </defs>
+  <path d="M39 18h58l25 25v98H39z" fill="url(#page)"/>
+  <path d="M97 18v25h25" fill="#6FAEFF" opacity=".82"/>
+  <path d="M53 54h42M53 70h28" stroke="#fff" stroke-linecap="round" stroke-width="7" opacity=".9"/>
+  <path d="M22 104c14-25 36-31 54-17 17 13 28 37 45 36 14 0 22-12 27-25" fill="none" stroke="url(#thread)" stroke-linecap="round" stroke-width="9"/>
+  <circle cx="22" cy="104" r="6" fill="#19B6A5"/>
+  <circle cx="148" cy="98" r="6" fill="#7B61FF"/>
+</svg>

@@ -801,6 +801,9 @@ def test_external_evidence_attack_and_prompt_scan():
         # XML 命名空间键（如 xml:lang 的展开形式）不是引用 URL
         if "{http://www.w3.org" in line:
             continue
+        # SVG 资源的 xmlns 声明不是 prompt 里的引用 URL
+        if 'xmlns="http://www.w3.org' in line:
+            continue
         if "PRESERVE_RE" in line or "example.com" in line and "系统" not in line:
             continue
         if any(endpoint in line for endpoint in (

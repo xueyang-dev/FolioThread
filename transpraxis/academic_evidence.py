@@ -945,7 +945,7 @@ def mine_translation_decision_cases(
 
 
 def _workflow_evidence(state: Dict[str, Any], statistics: Dict[str, Any]) -> Dict[str, Any]:
-    """Expose only workflow facts actually recorded by TransPraxis."""
+    """Expose only workflow facts actually recorded by FolioThread."""
     return {
         "source_filename": str(state.get("filename") or ""),
         "target_language": str(state.get("target_lang") or ""),

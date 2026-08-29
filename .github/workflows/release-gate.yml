@@ -74,7 +74,9 @@ jobs:
               "core.py",
               "gui.py",
               "transpraxis/resources/en_common.txt",
-              "transpraxis/resources/brand/transpraxis-logo.png",
+              "transpraxis/resources/brand/foliothread-favicon.svg",
+              "transpraxis/resources/brand/foliothread-mark.svg",
+              "transpraxis/resources/brand/foliothread-logo.svg",
           )
           assert all(any(name.endswith(path) for name in wheel_names) for path in required)
           assert all(any(name.endswith(path) for name in sdist_names) for path in required)
@@ -89,11 +91,11 @@ jobs:
           PY
       - name: Install wheel in a clean environment
         run: |
-          python -m venv "$RUNNER_TEMP/transpraxis"
-          "$RUNNER_TEMP/transpraxis/bin/python" -m pip install --upgrade pip
-          "$RUNNER_TEMP/transpraxis/bin/python" -m pip install dist/*.whl
+          python -m venv "$RUNNER_TEMP/foliothread"
+          "$RUNNER_TEMP/foliothread/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/foliothread/bin/python" -m pip install dist/*.whl
           cd "$RUNNER_TEMP"
-          "$RUNNER_TEMP/transpraxis/bin/python" - <<'PY'
+          "$RUNNER_TEMP/foliothread/bin/python" - <<'PY'
           from pathlib import Path
           import core
           import gui
@@ -101,7 +103,9 @@ jobs:
 
           assert Path(gui.ROOT, "app.py").is_file()
           assert Path(gui.ROOT, "transpraxis", "resources", "en_common.txt").is_file()
-          assert Path(gui.ROOT, "transpraxis", "resources", "brand", "transpraxis-logo.png").is_file()
+          assert Path(gui.ROOT, "transpraxis", "resources", "brand", "foliothread-favicon.svg").is_file()
+          assert Path(gui.ROOT, "transpraxis", "resources", "brand", "foliothread-mark.svg").is_file()
+          assert Path(gui.ROOT, "transpraxis", "resources", "brand", "foliothread-logo.svg").is_file()
           print("installed imports and resources: OK")
           PY
-          "$RUNNER_TEMP/transpraxis/bin/transpraxis" --help
+          "$RUNNER_TEMP/foliothread/bin/foliothread" --help

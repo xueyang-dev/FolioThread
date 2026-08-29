@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">FolioThread</title>
+  <rect width="512" height="512" rx="112" fill="#F7F8FC"/>
+  <path d="M139 74h186l80 80v284H139z" fill="#1837A8"/>
+  <path d="M325 74v80h80" fill="#6FAEFF"/>
+  <path d="M183 192h130M183 237h90" stroke="#fff" stroke-linecap="round" stroke-width="24" opacity=".9"/>
+  <path d="M77 337c45-79 116-98 174-54 55 42 91 117 146 114 45-2 70-38 82-79" fill="none" stroke="#20A7F4" stroke-linecap="round" stroke-width="30"/>
+  <circle cx="77" cy="337" r="20" fill="#19B6A5"/>
+  <circle cx="479" cy="318" r="20" fill="#7B61FF"/>
+</svg>

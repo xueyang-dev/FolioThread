@@ -1,8 +1,14 @@
 # Changelog
 
-本文件记录 TransPraxis / 译践 的用户可见变更。`v0.4.0` 已达到发布候选状态；本轮 UX closure 已完成并冻结，发布仍以人工签发为准。
+本文件记录 FolioThread 的用户可见变更。历史条目中的 TransPraxis / 译践 是此前产品名；`v0.4.0` 已达到发布候选状态。
 
 ## [Unreleased]
+
+### Phase 1：Product Reframing & Rebrand
+
+- 将公共产品品牌、页面标题、启动器、发布元数据、仓库链接和 logo/favicon 占位统一为 FolioThread。
+- 将产品一级定位明确为长文档翻译工作空间；MTI、论文、案例和翻译实践报告降为可选的研究与报告专用能力。
+- 增加 v0.4 基础设施、MTI legacy/specialized 能力和 v0.5 Project Memory / Agentic Context / Human Decision / Delivery 的边界记录；本阶段不改变核心 runtime 行为。
 
 ### MTI 终稿基线
 

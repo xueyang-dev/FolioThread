@@ -57,9 +57,9 @@ def build_tbx(glossary: List[models.GlossaryEntry],
     header = ET.SubElement(root, "martifHeader")
     filedesc = ET.SubElement(header, "fileDesc")
     srcd = ET.SubElement(filedesc, "sourceDesc")
-    ET.SubElement(srcd, "p").text = "TransPraxis / 译践 glossary export"
+    ET.SubElement(srcd, "p").text = "FolioThread glossary export"
     enc = ET.SubElement(header, "encodingDesc")
-    ET.SubElement(enc, "p", {"type": "XCSURI"}).text = "TransPraxis / 译践 default XCS"
+    ET.SubElement(enc, "p", {"type": "XCSURI"}).text = "FolioThread default XCS"
     text = ET.SubElement(root, "text")
     body = ET.SubElement(text, "body")
 
@@ -155,7 +155,7 @@ def build_tmx(state: Dict[str, Any],
     """双语对照 -> TMX 1.4 风格 XML（仅合格段落）。"""
     root = ET.Element("tmx", {"version": "1.4"})
     header = ET.SubElement(root, "header", {
-        "creationtool": "TransPraxis / 译践",
+        "creationtool": "FolioThread",
         "segtype": "paragraph",
         "adminlang": "en",
         "srclang": src_lang,

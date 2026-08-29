@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="500" viewBox="0 0 1440 500" role="img" aria-labelledby="title desc">
-  <title id="title">TransPraxis 长文档翻译工作流程</title>
-  <desc id="desc">PDF 或 DOCX 文档依次经过文档解析、术语管理、上下文翻译、独立审校、交付资产和翻译实践报告六个阶段。</desc>
+  <title id="title">FolioThread 长文档翻译工作流程</title>
+  <desc id="desc">PDF 或 DOCX 文档依次经过文档解析、上下文与术语、翻译、审校、交付和可选研究资产六个阶段。</desc>
   <rect width="1440" height="500" rx="28" fill="#F7F8FC"/>
   <text x="72" y="76" fill="#152036" font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="30" font-weight="700">长文档翻译工作流程</text>
-  <text x="72" y="112" fill="#69758A" font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="17">从原始文档到可交付的翻译资产与实践材料</text>
+  <text x="72" y="112" fill="#69758A" font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="17">从原始文档到可追溯的翻译资产；研究与报告是可选专用能力</text>
 
   <g fill="none" stroke="#B4BECD" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
     <path d="M270 288H294"/><path d="M286 280L294 288 286 296"/>
@@ -75,8 +75,8 @@
     <g transform="translate(73 47)" fill="none" stroke="#52657C" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
       <path d="M4 5H39L55 21V72H4Z"/><path d="M39 5V21H55M17 38H43M17 53H43"/><path d="M16 65L43 65"/>
     </g>
-    <text x="99" y="149" text-anchor="middle" fill="#26324A" font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="21" font-weight="700">实践报告</text>
-    <text x="99" y="181" text-anchor="middle" fill="#69758A" font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="15">案例与证据</text>
-    <text x="99" y="204" text-anchor="middle" fill="#69758A" font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="15">报告草稿</text>
+    <text x="99" y="149" text-anchor="middle" fill="#26324A" font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="20" font-weight="700">研究资产</text>
+    <text x="99" y="181" text-anchor="middle" fill="#69758A" font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="15">可选专用能力</text>
+    <text x="99" y="204" text-anchor="middle" fill="#69758A" font-family="PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif" font-size="15">案例 · 证据 · 报告</text>
   </g>
 </svg>

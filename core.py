@@ -1,4 +1,4 @@
-"""TransPraxis / 译践 —— 核心逻辑层（与 Streamlit UI 解耦，便于测试）。
+"""FolioThread 核心逻辑层（与 Streamlit UI 解耦，便于测试）。
 
 职责：大模型路由、文档清洗、术语抽取、双语翻译、报告生成、任务进度持久化。
 """
@@ -5093,7 +5093,7 @@ def review_knowledge_candidate(job_id, candidate_id, decision, actor="user"):
                 "note": "由人工从翻译流知识候选提升为项目术语",
                 "evidence": [{
                     "evidence_type": "user",
-                    "source_name": "TransPraxis 知识候选",
+                    "source_name": "FolioThread 知识候选",
                     "note": f"来自第 {(context['first_observed_segment'] + 1) if context['first_observed_segment'] is not None else '?'} 段的人工确认",
                     "quote": context["source_context"],
                     "url": "",

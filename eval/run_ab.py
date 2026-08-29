@@ -1,4 +1,4 @@
-"""受控 A/B/C/D 评测编排器（TransPraxis / 译践 Evaluation Harness 入口）。
+"""受控 A/B/C/D 评测编排器（FolioThread Evaluation Harness 入口）。
 
 实验矩阵（Governance × Reviewed TM）：
     A = baseline                            + 无 reviewed TM
@@ -287,7 +287,7 @@ def _finalize(out_dir: Path, states: Dict[str, Dict[str, Any]],
 # ---------------- 主流程 ----------------
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="TransPraxis / 译践 受控 A/B/C/D 评测")
+    ap = argparse.ArgumentParser(description="FolioThread 受控 A/B/C/D 评测")
     ap.add_argument("--config", default=None)
     ap.add_argument("--arms", default=None, help="如 ABCD 或 AB")
     ap.add_argument("--segments", default=None, help="如 0:300 或 all")

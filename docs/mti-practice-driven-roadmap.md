@@ -1,4 +1,6 @@
-# TransPraxis：由真实 MTI 论文实践驱动的开发路线
+# FolioThread：由 MTI 论文实践驱动的专用能力路线
+
+> 本路线是 FolioThread 的 legacy / specialized 研究与报告能力，不是长文档翻译主产品的默认入口。整体边界见[架构边界说明](architecture-boundaries.md)。
 
 ## 产品边界
 
@@ -23,7 +25,7 @@ Translation Truth
 
 ## 当前基础判断
 
-TransPraxis 已经有增量构建系统的基础，不需要另建工作流框架：
+FolioThread 已经有增量构建系统的基础，不需要另建工作流框架：
 
 - `academic_state.artifacts` 已记录 `content_hash`、`dependency_hash`、`version` 和 `updated_at`；
 - `academic-sections.json` 中的 section 已有独立 dependency hash 和复用逻辑；

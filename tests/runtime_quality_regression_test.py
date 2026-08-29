@@ -38,7 +38,7 @@ def _make_layout_pdf():
     document = fitz.open()
     for page_number in range(2):
         page = document.new_page(width=612, height=792)
-        page.insert_text((72, 30), "TransPraxis running header", fontsize=9)
+        page.insert_text((72, 30), "FolioThread running header", fontsize=9)
         page.insert_text((72, 100), "The winds, temperature, and", fontsize=11)
         if page_number == 0:
             page.insert_image(fitz.Rect(72, 115, 500, 250), stream=image)

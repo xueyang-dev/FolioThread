@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# TransPraxis / 译践 —— macOS / Linux 一键启动（HTML GUI）
+# FolioThread —— macOS / Linux 一键启动（HTML GUI）
 set -e
 cd "$(dirname "$0")"
 
 echo "=========================================="
-echo "    TransPraxis / 译践 正在启动..."
+echo "    FolioThread 正在启动..."
 echo "=========================================="
 echo
 

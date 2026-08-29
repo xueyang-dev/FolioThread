@@ -1,4 +1,6 @@
-# 学术写作子系统架构
+# FolioThread 研究与报告专用能力架构
+
+> 本文描述 FolioThread 的 legacy / specialized 研究下游，不代表产品的一级定位。产品与 v0.4/v0.5 边界见[架构边界说明](architecture-boundaries.md)。
 
 ## 概述
 

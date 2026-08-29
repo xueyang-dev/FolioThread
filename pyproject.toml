@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "transpraxis"
+name = "foliothread"
 version = "0.4.0"
-description = "TransPraxis / 译践 — Translation & Report Copilot"
+description = "FolioThread — Long-document Translation Workspace"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -15,11 +15,18 @@ authors = [
   {name = "Xue Yang"}
 ]
 
+[project.urls]
+Homepage = "https://github.com/xueyang-dev/FolioThread"
+Repository = "https://github.com/xueyang-dev/FolioThread"
+Issues = "https://github.com/xueyang-dev/FolioThread/issues"
+
 [project.optional-dependencies]
 desktop = ["pywebview>=5.0"]
 test = ["pytest>=8,<9"]
 
 [project.scripts]
+foliothread = "gui:main"
+# Legacy v0.4 command; the public product command is `foliothread`.
 transpraxis = "gui:main"
 
 [tool.setuptools]
@@ -33,4 +40,4 @@ include = ["transpraxis*"]
 dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools.package-data]
-transpraxis = ["resources/*.txt", "resources/brand/*.png"]
+transpraxis = ["resources/*.txt", "resources/brand/*.svg"]

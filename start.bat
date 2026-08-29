@@ -2,11 +2,11 @@
 :: 切换终端编码为 UTF-8，彻底解决中文乱码
 chcp 65001 >nul
 
-title TransPraxis / 译践 - 启动器
+title FolioThread - 启动器
 color 0b
 
 echo ==========================================
-echo       TransPraxis / 译践 正在启动...
+echo       FolioThread 正在启动...
 echo ==========================================
 echo.
 

@@ -9,7 +9,7 @@ import gui
 
 
 def test_brand_title():
-    assert gui.APP_TITLE == "TransPraxis / 译践"
+    assert gui.APP_TITLE == "FolioThread · 长文档翻译工作空间"
     print("  ✓ 桌面窗口品牌标题")
 
 

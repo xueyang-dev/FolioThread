@@ -1,4 +1,4 @@
-# TransPraxis Evaluation Harness
+# FolioThread Evaluation Harness
 
 评测工具用于比较术语治理、翻译记忆、审校和交付流程的可观测差异。仓库只包含工具代码与合成 fixture；本地任务、源文、译文、翻译记忆和盲评映射均不得提交。
 

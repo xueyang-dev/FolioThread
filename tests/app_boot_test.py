@@ -71,9 +71,9 @@ def main():
         assert at.session_state["app_view"] == "new" \
             and not at.session_state["workspace_mode"], \
             "打开应用时应进入新建任务初始页，未完成任务从历史任务进入"
-        assert any("TransPraxis" in m.value and "译践" in m.value
+        assert any("FolioThread" in m.value and "Long-document Translation Workspace" in m.value
                    for m in at.sidebar.markdown), \
-            "侧栏应显示 TransPraxis / 译践 品牌锁定"
+            "侧栏应显示 FolioThread 长文档翻译工作空间品牌"
         assert any("tp-provider is-unverified" in m.value for m in at.sidebar.markdown), \
             "未经连接测试的 Provider 不应显示绿色已连接状态"
         assert any("新建翻译任务" in m.value for m in at.markdown), \

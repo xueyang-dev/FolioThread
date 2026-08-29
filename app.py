@@ -1,7 +1,7 @@
-"""TransPraxis / 译践 Streamlit 界面层。
+"""FolioThread Streamlit 界面层。
 
 信息架构：左侧产品导航 + 四步任务创建 + 运行后任务工作台。AI Provider
-与翻译记忆属于全局设置；学术报告属于翻译后的下游工作流，不占据文档首屏。
+与翻译记忆属于全局设置；研究与报告属于翻译后的专用下游工作流，不占据文档首屏。
 """
 import base64
 import inspect
@@ -39,12 +39,13 @@ _PERSIST_STATE = (
 # ================= 页面全局设置 =================
 _APP_ROOT = Path(__file__).resolve().parent
 _BRAND_DIR = Path(_assets.__file__).resolve().parent / "resources" / "brand"
-_BRAND_MARK = _BRAND_DIR / "transpraxis-mark.png"
-_BRAND_FAVICON = _BRAND_DIR / "transpraxis-favicon.png"
-_BRAND_MARK_URI = "data:image/png;base64," + base64.b64encode(
+_BRAND_MARK = _BRAND_DIR / "foliothread-mark.svg"
+_BRAND_FAVICON = _BRAND_DIR / "foliothread-favicon.svg"
+_BRAND_MARK_URI = "data:image/svg+xml;base64," + base64.b64encode(
     _BRAND_MARK.read_bytes()).decode("ascii")
 
-st.set_page_config(page_title="TransPraxis / 译践", page_icon=_BRAND_FAVICON, layout="wide",
+st.set_page_config(page_title="FolioThread · 长文档翻译工作空间",
+                   page_icon=_BRAND_FAVICON, layout="wide",
                    initial_sidebar_state="expanded")
 
 if "doc_states" not in st.session_state:
@@ -88,7 +89,7 @@ if _saved_provider_cfg:
         st.session_state.reviewer_model = _saved_reviewer.get("model", "")
         st.session_state.reviewer_api_key = _saved_reviewer.get("api_key", "")
         st.session_state.reviewer_base_url = _saved_reviewer.get("base_url", "")
-# ================= 设计系统（TransPraxis Research IDE） =================
+# ================= 设计系统（FolioThread Long-document Workspace） =================
 _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
 
@@ -1912,6 +1913,12 @@ _PRESET_OUTPUTS = {
     "学术增强": {**_default_output_config(), "enable_report": True},
 }
 
+_PRESET_DISPLAY_NAMES = {
+    "快速": "快速",
+    "标准": "标准",
+    "学术增强": "研究与报告（专用）",
+}
+
 
 def _apply_preset(label):
     for key in ("strategy_auto_term", "strategy_use_tm", "strategy_review",
@@ -2268,11 +2275,11 @@ def _render_report_template_input():
         return
 
     uploaded = st.file_uploader(
-        "论文 / 翻译实践报告模板（DOCX，可选但推荐）",
+        "报告结构模板（DOCX，可选）",
         type=["docx"],
         key=f"report_template_uploader_"
             f"{st.session_state.get('report_template_uploader_generation', 0)}",
-        help="模板会固定报告章节、标题层级、前后置部分和 Word 样式；未上传时使用通用 DOCX。",
+        help="需要研究与报告专用能力时，可用模板固定章节、标题层级、前后置部分和 Word 样式。",
     )
     if uploaded:
         raw = uploaded.getvalue()
@@ -2409,13 +2416,14 @@ def _source_file_html(task_files):
 
 
 def _preset_card_html(label):
+    display_label = _PRESET_DISPLAY_NAMES.get(label, label)
     cards = {
         "快速": ("快速生成可读初稿", "翻译 → 基础检查", ("最快", "成本最低")),
         "标准": ("兼顾质量与效率", "全文理解 → 术语增强 → 翻译 → 基础检查",
                  ("术语更一致", "成本适中")),
-        "学术增强": ("适合需要完整过程证据的任务",
-                 "全文理解 → 术语治理 → 翻译 → 独立审校 → 学术证据",
-                 ("证据最完整", "耗时较长")),
+        "学术增强": ("适合需要研究过程材料的任务",
+                 "全文理解 → 术语治理 → 翻译 → 独立审校 → 研究证据",
+                 ("专用能力", "耗时较长")),
     }
     purpose, workflow, tags = cards[label]
     badge = '<span class="tp-preset-badge">推荐</span>' if label == "标准" else ""
@@ -2427,7 +2435,7 @@ def _preset_card_html(label):
         '<div class="tp-preset-card">'
         '<div class="tp-preset-head">'
         f'<span class="material-symbols-rounded" aria-hidden="true">{icon}</span>'
-        f'<strong>{label}</strong>{badge}</div>'
+        f'<strong>{display_label}</strong>{badge}</div>'
         f'<p class="tp-preset-purpose">{purpose}</p>'
         f'<p class="tp-preset-flow">{workflow}</p>'
         f'<div class="tp-preset-tags">{tag_html}</div></div>'
@@ -2457,7 +2465,8 @@ def _summary_html(filename, target_lang, preset_label, glossary_name,
                   style_source=""):
     filename = escape(str(filename))
     target_lang = escape(str(target_lang))
-    preset_label = escape(str(preset_label))
+    preset_key = str(preset_label)
+    preset_label = escape(_PRESET_DISPLAY_NAMES.get(preset_key, preset_key))
     glossary_name = escape(str(glossary_name))
     workflow = []
     if strategy_config.get("enable_understanding"):
@@ -2472,10 +2481,10 @@ def _summary_html(filename, target_lang, preset_label, glossary_name,
     if output_config["enable_annotate"]:
         workflow.append("重点标注")
     if output_config["enable_report"]:
-        workflow.extend(["学术证据", "实践报告"])
+        workflow.extend(["研究证据", "翻译实践报告（专用）"])
     mode_label = preset_label
-    if _strategy_is_adjusted(preset_label, strategy_config) \
-            or _output_is_adjusted(preset_label, output_config):
+    if _strategy_is_adjusted(preset_key, strategy_config) \
+            or _output_is_adjusted(preset_key, output_config):
         mode_label += " · 已调整"
     artifacts = []
     if output_config.get("deliver_plain_docx"):
@@ -2495,7 +2504,7 @@ def _summary_html(filename, target_lang, preset_label, glossary_name,
         artifacts.append(("ink_highlighter", "重点标注版",
                           "标出生僻词、专业术语和翻译难点句", "DOCX"))
     if output_config["enable_report"]:
-        artifacts.append(("article", "翻译实践报告",
+        artifacts.append(("article", "翻译实践报告（专用）",
                           "基于翻译过程证据生成", "DOCX / MD"))
         if output_config.get("deliver_review_report"):
             artifacts.append(("fact_check", "审校报告",
@@ -3763,7 +3772,7 @@ def _render_workspace_topbar(job_id, state):
     st.markdown(
         '<div class="tp-workspace-shell"></div>'
         '<div class="tp-workspace-topbar">'
-        '<div><div class="tp-workspace-eyebrow">TransPraxis · Translation Practice Workspace</div>'
+        '<div><div class="tp-workspace-eyebrow">FolioThread · Long-document Translation Workspace</div>'
         f'<h1>{escape(project_title)}</h1>'
         f'<div class="tp-workspace-meta">{escape(part_label)} · '
         f'{len(state.get("paras") or []):,} 段 · {term_count:,} 个术语 · 最近保存 {escape(saved_at)}</div></div>'
@@ -3817,9 +3826,9 @@ def _render_workspace_nav(section, state, job_id=""):
         "cases": ((f"{case_pending} 项", "attention", f"还有 {case_pending} 个案例未完成人工确认") if case_pending else
                   ("", "done", "案例均已完成人工确认") if case_views else
                   ("", "pending", "案例选择产物尚未生成")),
-        "report": (("", "done", "报告稿已生成") if state.get("p3_done") else
-                   ("1 项", "attention", "报告仍需完成") if state.get("report_enabled") else
-                   ("", "neutral", "当前任务未启用实践报告")),
+        "report": (("", "done", "研究报告稿已生成") if state.get("p3_done") else
+                   ("1 项", "attention", "研究报告仍需完成") if state.get("report_enabled") else
+                   ("", "neutral", "当前任务未启用研究报告")),
         "qa": ((f"{qa_attention_count} 项", "attention", f"合规与最终 QA 还有 {qa_attention_count} 项需要处理")
                if qa_attention_count else
                ("", "done", "合规与最终 QA 已完成") if qa_required else
@@ -3827,8 +3836,13 @@ def _render_workspace_nav(section, state, job_id=""):
         "delivery": delivery_nav,
     }
     labels = [("overview", "概览"), ("translation", "翻译"),
-              ("terms", "术语"), ("review", "审校"), ("cases", "案例"),
-              ("report", "报告"), ("qa", "合规与 QA"), ("delivery", "交付")]
+              ("terms", "术语"), ("review", "审校")]
+    research_enabled = bool(state.get("report_enabled") or state.get("p3_done")
+                            or case_views or state.get("academic_state"))
+    if research_enabled:
+        labels.extend([("cases", "案例"), ("report", "研究报告"),
+                       ("qa", "合规与 QA")])
+    labels.append(("delivery", "交付"))
     with st.container(key="workspace_nav"):
         for value, label in labels:
             active = value == section
@@ -4983,7 +4997,7 @@ def _render_workspace_qa(job_id, state):
         "reference_template_mapped": "已登记匿名参考模板",
     }.get(profile.get("authority_mapping_status"), "院校特殊要求需人工确认")
     st.markdown(
-        '<div class="tp-qa-profile"><strong>MTI 翻译实践报告</strong>'
+        '<div class="tp-qa-profile"><strong>研究与报告（专用能力）</strong>'
         f'<span>{escape(str(profile.get("display_name") or "默认 MTI 实践报告规范"))} · {escape(source_mapping_label)}</span>'
         f'<b>通过 {counts.get("pass", 0)} · 失败 {counts.get("fail", 0)} · 人工复核 {counts.get("manual_review", 0)} · 未检查 {counts.get("not_checked", 0)}</b>'
         '</div>', unsafe_allow_html=True)
@@ -6137,7 +6151,7 @@ def _render_workspace_report(job_id, state):
         f'<span class="tp-report-meta-chip">{escape(label)} <strong>{escape(value)}</strong></span>'
         for label, value in chips)
     st.markdown(
-        '<div class="tp-report-page-head"><div class="tp-section-kicker">报告工作区</div>'
+        '<div class="tp-report-page-head"><div class="tp-section-kicker">研究与报告 · 专用能力</div>'
         '<h2>报告</h2>'
         '<p class="tp-report-page-lead">先判断报告状态，再处理真正阻止交付的问题。</p>'
         f'<div class="tp-report-meta-chips">{chip_html}</div></div>',
@@ -6619,10 +6633,10 @@ workspace_mode = st.session_state.get("workspace_mode", False)
 
 with st.sidebar:
     st.markdown(
-                '<div class="tp-brand" aria-label="TransPraxis 译践">'
+                '<div class="tp-brand" aria-label="FolioThread 长文档翻译工作空间">'
                 f'<img class="tp-brand-mark" src="{_BRAND_MARK_URI}" alt="">'
-                '<div class="tp-brand-copy"><strong>TransPraxis</strong><b>译践</b></div>'
-                '<span>Translation Practice Workspace</span></div>',
+                '<div class="tp-brand-copy"><strong>FolioThread</strong><b>长文档</b></div>'
+                '<span>Long-document Translation Workspace</span></div>',
                 unsafe_allow_html=True)
     with st.container(key="new_task_action"):
         if st.button("新建任务", icon=":material/add:", width="stretch"):
@@ -6944,7 +6958,7 @@ with setup_placeholder.container():
             (st.success if ok else st.error)(msg)
 
     elif app_view == "new" and not workspace_mode:
-        _page_title("新建翻译任务", "上传文档并配置翻译工作流")
+        _page_title("新建翻译任务", "围绕长文档建立可恢复的翻译工作流")
         step = st.session_state.task_step
         if not core.is_onboarded() \
                 and not st.session_state.get("onboarding_dismissed") \
@@ -6955,7 +6969,7 @@ with setup_placeholder.container():
                     '<div class="tp-onboard-card">'
                     '<div class="tp-style-card-head">'
                     '<span class="material-symbols-rounded" aria-hidden="true">rocket_launch</span>'
-                    '<strong>首次使用 TransPraxis</strong></div>'
+                    '<strong>首次使用 FolioThread</strong></div>'
                     '<p>配置 AI 引擎后即可开始翻译。三步完成：</p>'
                     '<ol><li>选择服务商（DeepSeek / OpenAI / Gemini / 中转站…）</li>'
                     '<li>填写 API 密钥并选择模型</li>'
@@ -7077,16 +7091,18 @@ with setup_placeholder.container():
                     state = "selected" if label == preset_label else "idle"
                     with column.container(key=f"preset_card_{label}_{state}"):
                         st.markdown(_preset_card_html(label), unsafe_allow_html=True)
-                        if st.button(f"选择{label}预设", key=f"choose_preset_{label}"):
+                        display_label = _PRESET_DISPLAY_NAMES.get(label, label)
+                        if st.button(f"选择{display_label}预设", key=f"choose_preset_{label}"):
                             _apply_preset(label)
-                            st.toast(f"已恢复“{label}”预设")
+                            st.toast(f"已恢复“{display_label}”预设")
                             st.rerun()
             strategy_config = st.session_state.strategy_config
             adjusted = _strategy_is_adjusted(preset_label, strategy_config)
             with st.container(key="strategy_advanced"):
                 advanced_open = st.session_state.get("strategy_advanced_open", False)
-                state_text = f'<strong>{preset_label} · 已调整</strong>' if adjusted \
-                    else f'当前使用「{preset_label}」默认配置'
+                display_preset_label = _PRESET_DISPLAY_NAMES.get(preset_label, preset_label)
+                state_text = f'<strong>{display_preset_label} · 已调整</strong>' if adjusted \
+                    else f'当前使用「{display_preset_label}」默认配置'
                 trigger_icon = "expand_less" if advanced_open else "chevron_right"
                 st.markdown(
                     '<div class="tp-advanced-trigger">'
@@ -7193,13 +7209,13 @@ with setup_placeholder.container():
                         help="双语段落 JSONL，便于后续处理", **_PERSIST_STATE)
             enable_annotate = output_config["enable_annotate"]
             with st.container(key="deliver_academic"):
-                st.markdown('<div class="tp-output-section-head"><strong>研究资产</strong>'
-                            '<span>学术增强模式的过程证据与写作产物</span></div>',
+                st.markdown('<div class="tp-output-section-head"><strong>研究资产（专用能力）</strong>'
+                            '<span>可选的过程证据、案例与报告产物</span></div>',
                             unsafe_allow_html=True)
                 st.toggle("生成实践报告", value=output_config["enable_report"],
                           key="output_report", on_change=_set_output_option,
                           args=("enable_report", "output_report"),
-                          help="启动证据约束的学术写作工作流",
+                          help="启动研究与报告专用工作流",
                           **_PERSIST_STATE)
                 st.caption("仅使用可追溯案例、项目数据与已导入文献证据")
                 enable_report = output_config["enable_report"]
@@ -7230,7 +7246,7 @@ with setup_placeholder.container():
                     with st.container(key="literature_inputs"):
                         st.markdown(
                             '<div class="tp-output-section-head"><strong>参考文献与理论资料</strong>'
-                            '<span>上传与本次翻译实践相关的论文、专著或研究资料</span></div>',
+                            '<span>上传与本次研究或报告相关的专著、论文或资料</span></div>',
                             unsafe_allow_html=True)
                         st.caption(
                             "系统将从文献中提取可核验的理论依据，并仅在证据充分时用于实践报告。")
@@ -7638,7 +7654,7 @@ if app_view == "workspace":
 # switch so delivery controls are not constructed while the academic surface
 # is active.
 workspace_surface = st.radio(
-    "当前工作区", ["资产与交付", "文档上下文", "实践报告"], horizontal=True,
+    "当前工作区", ["资产与交付", "文档上下文", "研究报告（专用）"], horizontal=True,
     key="workspace_surface")
 
 

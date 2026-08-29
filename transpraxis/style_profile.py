@@ -1,6 +1,6 @@
 """预定义 Style Profiles + Quick Profiling 结构化推荐。
 
-设计约束（TransPraxis 工程原则）：
+设计约束（FolioThread 工程原则）：
 - LLM 不做"自由发明风格"，只在预定义 profile 集合中选择，并允许少量参数微调；
 - 推荐结果必须是结构化 JSON，归一化后成为可版本化 artifact（style_profile_id）；
 - 失败时确定性降级（general + 0 置信度 + warning），绝不静默伪造推荐；

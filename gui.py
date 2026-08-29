@@ -1,4 +1,4 @@
-"""TransPraxis / 译践 跨平台 HTML GUI 启动器。
+"""FolioThread 跨平台 HTML GUI 启动器。
 
 把 Streamlit 的 HTML 界面包装成可直接使用的形式，Windows / macOS / Linux
 三平台同一入口：
@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PORT = 8501
-APP_TITLE = "TransPraxis / 译践"
+APP_TITLE = "FolioThread · 长文档翻译工作空间"
 
 
 def pick_port(preferred: int = DEFAULT_PORT) -> int:
@@ -105,7 +105,7 @@ def _check_streamlit() -> bool:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog=Path(sys.argv[0]).name,
-        description="TransPraxis / 译践 跨平台 HTML GUI 启动器")
+        description="FolioThread 跨平台 HTML GUI 启动器")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help="服务端口（默认 8501，被占用时自动顺延）")
     parser.add_argument("--lan", action="store_true",

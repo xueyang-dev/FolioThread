@@ -1,1 +1,1 @@
-"""TransPraxis / 译践 terminology governance and delivery package."""
+"""FolioThread v0.4 terminology governance and delivery package."""
