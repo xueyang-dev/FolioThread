@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from .. import models, terminology
@@ -74,6 +75,7 @@ def build_review_packet(
     evidence: Any = None,
     translation_memory: Any = None,
     confirmed_style_rules: Iterable[Any] = (),
+    project_memory: Mapping[str, Any] | None = None,
     context_char_limit: int = 12_000,
     evidence_char_limit: int = 16_000,
 ) -> Dict[str, Any]:
@@ -87,11 +89,14 @@ def build_review_packet(
     bounded_context = _bounded(context or {}, max(0, context_char_limit))
     bounded_evidence = _bounded(evidence or [], max(0, evidence_char_limit))
     bounded_checks = _bounded(deterministic_checks or [], max(0, evidence_char_limit))
-    memory = project_memory_from_state(
-        state,
-        translation_memory=translation_memory,
-        confirmed_style_rules=confirmed_style_rules,
-    )
+    memory = deepcopy(dict(project_memory)) if project_memory is not None else \
+        project_memory_from_state(
+            state,
+            translation_memory=translation_memory,
+            confirmed_style_rules=confirmed_style_rules,
+        )
+    if not isinstance(memory.get("knowledge"), Mapping):
+        raise ValueError("review packet Project Memory requires confirmed knowledge")
     input_fingerprint = review_input_fingerprint(
         source=[item["source"] for item in truth],
         target=[item["target"] for item in truth],

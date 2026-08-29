@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import terminology
+from . import models, terminology, translation_core
 
 MAX_REQUESTS_PER_ROUND = 5
 MAX_EVIDENCE_PAYLOAD_BYTES = 24000
@@ -13,6 +13,94 @@ DIAGNOSTIC_FIELDS = (
     "category", "summary", "source_span", "target_span", "explanation",
     "recommendation", "confidence", "detector",
 )
+
+
+def _scoped_project_memory(
+    glossary: Sequence[Dict[str, Any]], sources: Sequence[str],
+    segment_ids: Sequence[int],
+) -> Dict[str, Any]:
+    """Review-relevant confirmed knowledge; intentionally no TM or audit history."""
+    entries = models.normalize_glossary(glossary)
+    glossary_hash = models.glossary_hash(entries)
+    ids = set(segment_ids)
+    relevant = [
+        entry for entry in entries
+        if entry["status"] == "locked" and (
+            ids.intersection(entry.get("occurrences") or [])
+            or any(terminology.term_matches(entry["source"], source)
+                   for source in sources)
+        )
+    ]
+    return {
+        "schema_version": "translation-core-project-memory-v1",
+        "knowledge": {
+            "glossary_hash": glossary_hash,
+            "terminology_refs": [{
+                "glossary_entry_id": entry["id"],
+                "glossary_hash": glossary_hash,
+                "status": entry["status"],
+                "behavior": entry["behavior"],
+            } for entry in relevant],
+            # Phase 2B has no review-time TM retrieval layer. Growing project
+            # TM must not invalidate unrelated review artifacts.
+            "translation_memory": [],
+            "style_rules": [],
+        },
+    }
+
+
+def build_runtime_review_packet(
+    state: Dict[str, Any],
+    current_batch_pairs: Sequence[Dict[str, Any]],
+    segment_ids: Sequence[int],
+    glossary: Sequence[Dict[str, Any]],
+    *,
+    deterministic_checks: Any = None,
+    review_context: Any = None,
+    candidate_targets: Optional[Dict[int, str]] = None,
+    blind: bool = False,
+) -> Dict[str, Any]:
+    """Build a packet from an ephemeral current-batch state projection."""
+    ids = list(segment_ids)
+    batch = [dict(pair) for pair in current_batch_pairs]
+    if len(batch) != len(ids) or any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 0
+            for item in ids):
+        raise ValueError("current batch pairs require matching global segment IDs")
+    projected_pairs = [dict(pair) for pair in state.get("pairs") or []
+                       if isinstance(pair, dict)]
+    if ids:
+        projected_pairs.extend({} for _ in range(max(ids) + 1 - len(projected_pairs)))
+    targets = {int(key): str(value or "")
+               for key, value in (candidate_targets or {}).items()}
+    for pair, segment_id in zip(batch, ids):
+        target = targets.get(segment_id, str(pair.get("target") or ""))
+        if blind:
+            pair = {
+                "segment_id": segment_id,
+                "source": str(pair.get("source") or ""),
+                "target": target,
+                "reviewed": False,
+            }
+        else:
+            pair["segment_id"] = segment_id
+            pair["source"] = str(pair.get("source") or "")
+            pair["target"] = target
+        projected_pairs[segment_id] = pair
+    projection = dict(state)
+    projection["pairs"] = projected_pairs
+    projection["glossary"] = list(glossary)
+    projection["glossary_frozen"] = {"entries": list(glossary)}
+    sources = [str(pair.get("source") or "") for pair in batch]
+    memory = _scoped_project_memory(glossary, sources, ids)
+    return translation_core.build_review_packet(
+        projection,
+        segment_ids=ids,
+        deterministic_checks=deterministic_checks or [],
+        context=review_context or {},
+        evidence=[],
+        project_memory=memory,
+    )
 
 
 def _bound_evidence(result: Any) -> Any:
@@ -289,6 +377,9 @@ def _normalize_findings(
         }
         if item.get("suggested_target"):
             record["suggested_target"] = str(item["suggested_target"])
+        for field in ("code", "entry_id", "location_key", "occurrence_key"):
+            if item.get(field) is not None:
+                record[field] = str(item[field]).strip()
         for field in DIAGNOSTIC_FIELDS:
             value = item.get(field)
             if field == "confidence":
@@ -317,6 +408,78 @@ def _normalize_findings(
     return out
 
 
+def _packet_truth_matches(
+    packet: Dict[str, Any], sources: Sequence[str], targets: Sequence[str],
+    segment_ids: Sequence[int],
+) -> bool:
+    truth = packet.get("translation_truth")
+    if not isinstance(truth, list) or len(truth) != len(segment_ids):
+        return False
+    expected = list(zip(segment_ids, sources, targets))
+    return all(
+        isinstance(item, dict)
+        and item.get("segment_id") == segment_id
+        and item.get("source") == source
+        and item.get("target") == target
+        for item, (segment_id, source, target) in zip(truth, expected)
+    )
+
+
+def _reviewer_packet_view(packet: Dict[str, Any]) -> Dict[str, Any]:
+    """Return only independent-review inputs; audit and rationale stay hidden."""
+    memory = packet.get("project_memory") or {}
+    return {
+        "translation_truth": packet.get("translation_truth") or [],
+        "glossary": packet.get("glossary") or {},
+        "confirmed_knowledge": memory.get("knowledge") or {},
+        "deterministic_checks": packet.get("deterministic_checks") or [],
+        "context": packet.get("context") or {},
+    }
+
+
+def _consumed_fingerprint(
+    packet: Dict[str, Any], evidence: Sequence[Dict[str, Any]],
+) -> str:
+    truth = packet.get("translation_truth") or []
+    memory = packet.get("project_memory") or {}
+    return translation_core.review_input_fingerprint(
+        source=[item.get("source") for item in truth],
+        target=[item.get("target") for item in truth],
+        glossary_hash=str((packet.get("glossary") or {}).get("glossary_hash") or ""),
+        confirmed_knowledge=memory.get("knowledge") or {},
+        context=packet.get("context") or {},
+        deterministic_checks=packet.get("deterministic_checks") or [],
+        evidence=[*(packet.get("evidence") or []), *evidence],
+    )
+
+
+def _translation_core_findings(
+    findings: Sequence[Dict[str, Any]], input_fingerprint: str,
+) -> List[Dict[str, Any]]:
+    """Add authoritative identity/freshness while retaining the legacy surface."""
+    occurrences: Dict[Tuple[str, str, str], int] = {}
+    result = []
+    for finding in findings:
+        item = dict(finding)
+        code = str(item.get("code") or item.get("category") or "semantic_review")
+        subject = str(item.get("segment_id") if item.get("segment_id") is not None else "")
+        entry_id = str(item.get("entry_id") or "")
+        if not item.get("location_key") and not item.get("occurrence_key"):
+            key = (code, subject, entry_id)
+            occurrences[key] = occurrences.get(key, 0) + 1
+            item["occurrence_key"] = f"occurrence-{occurrences[key]}"
+        item.update({
+            "code": code,
+            "status": "open",
+            "subject_id": subject,
+            "requires_human_confirmation": item.get("severity") == "blocking",
+        })
+        normalized = translation_core.normalize_finding(
+            item, input_fingerprint=input_fingerprint)
+        result.append({**item, **normalized})
+    return result
+
+
 def _call(call_llm: Callable, provider: str, api_key: str, model: str,
           system_prompt: str, user_prompt: str) -> Any:
     try:
@@ -341,6 +504,7 @@ def review_translation_batch_with_evidence(
     blind: bool = False,
     segment_ids: Optional[Sequence[int]] = None,
     review_identity: Optional[Dict[str, str]] = None,
+    translation_core_packet: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], bool, Dict[str, Any]]:
     """Review a batch with a bounded, two-state evidence protocol."""
     if call_llm is None:
@@ -358,11 +522,36 @@ def review_translation_batch_with_evidence(
                 "review_identity": dict(review_identity or {}),
             },
         }
+    if translation_core_packet is not None and not _packet_truth_matches(
+            translation_core_packet, sources, targets, segment_ids):
+        return [], True, {
+            "blind": blind, "segment_ids": segment_ids, "rounds": [],
+            "requests": [], "evidence_ids": [], "decision": "failed",
+            "review_identity": dict(review_identity or {}),
+            "error": "Translation Core review packet truth mismatch",
+            "translation_core": {
+                "packet_schema_version": translation_core_packet.get("schema_version"),
+                "initial_input_fingerprint": translation_core_packet.get("input_fingerprint"),
+                "final_consumed_input_fingerprint": None,
+                "translation_truth_fingerprint": translation_core_packet.get(
+                    "translation_truth_fingerprint"),
+            },
+            "completion_receipt": {
+                "status": "failed", "reviewed_unit_count": 0,
+                "review_identity": dict(review_identity or {}),
+            },
+        }
     numbered = "\n".join(
         f"local_ordinal: {i}\nsegment_id: {segment_id}\n原文：{source}\n译文：{target}"
         for i, (segment_id, source, target) in
         enumerate(zip(segment_ids, sources, targets))
     )
+    packet_prompt = ""
+    if translation_core_packet is not None:
+        packet_prompt = "\n【Translation Core 独立审校包】\n" + json.dumps(
+            _reviewer_packet_view(translation_core_packet),
+            ensure_ascii=False, sort_keys=True,
+        )
     system_prompt = (
         "你是一位独立的翻译审校专家，负责审查机器译文。"
         + ("这是盲审：不要提及修复候选或内部流程。" if blind else "")
@@ -386,6 +575,7 @@ def review_translation_batch_with_evidence(
         "\"confidence\": 0.87, \"detector\": \"Semantic QA\", "
         "\"evidence_refs\": [\"E1\"]}。"
         "若无问题 findings 必须为空数组。\n" + glossary_text + "\n" + style_rules
+        + packet_prompt
     )
     base_prompt = f"待审校段落（目标语言：{target_lang}）：\n{numbered}"
     prompt = base_prompt
@@ -395,10 +585,27 @@ def review_translation_batch_with_evidence(
         "review_identity": dict(review_identity or {}),
         "completion_receipt": None,
     }
+    if translation_core_packet is not None:
+        trace["translation_core"] = {
+            "packet_schema_version": translation_core_packet.get("schema_version"),
+            "initial_input_fingerprint": translation_core_packet.get("input_fingerprint"),
+            "final_consumed_input_fingerprint": None,
+            "translation_truth_fingerprint": translation_core_packet.get(
+                "translation_truth_fingerprint"),
+        }
     latest_findings: List[Dict[str, Any]] = []
     evidence_by_key: Dict[str, Dict[str, Any]] = {}
 
     def finish(findings: List[Dict[str, Any]], decision: str):
+        final_fingerprint = None
+        if translation_core_packet is not None:
+            final_fingerprint = _consumed_fingerprint(
+                translation_core_packet, list(evidence_by_key.values()))
+            findings = _translation_core_findings(findings, final_fingerprint)
+            trace["translation_core"]["final_consumed_input_fingerprint"] = \
+                final_fingerprint
+            if trace["rounds"]:
+                trace["rounds"][-1]["findings"] = findings
         trace["decision"] = decision
         trace["completion_receipt"] = {
             "status": "completed",
@@ -408,9 +615,17 @@ def review_translation_batch_with_evidence(
             "evidence_ids": list(trace["evidence_ids"]),
             "review_identity": dict(trace["review_identity"]),
         }
+        if final_fingerprint is not None:
+            trace["completion_receipt"]["final_consumed_input_fingerprint"] = \
+                final_fingerprint
         return findings, False, trace
 
     def fail(message: Optional[str] = None):
+        if translation_core_packet is not None:
+            final_fingerprint = _consumed_fingerprint(
+                translation_core_packet, list(evidence_by_key.values()))
+            trace["translation_core"]["final_consumed_input_fingerprint"] = \
+                final_fingerprint
         trace["decision"] = "failed"
         if message:
             trace["error"] = message[:240]
@@ -422,6 +637,9 @@ def review_translation_batch_with_evidence(
             "evidence_ids": list(trace["evidence_ids"]),
             "review_identity": dict(trace["review_identity"]),
         }
+        if translation_core_packet is not None:
+            trace["completion_receipt"]["final_consumed_input_fingerprint"] = \
+                trace["translation_core"]["final_consumed_input_fingerprint"]
         return [], True, trace
 
     for round_index in range(max(1, int(max_rounds or 1))):
