@@ -63,12 +63,12 @@ def build_runtime_review_packet(
     """Build a packet from an ephemeral current-batch state projection."""
     ids = list(segment_ids)
     batch = [dict(pair) for pair in current_batch_pairs]
-    if len(batch) != len(ids) or any(
+    if len(batch) != len(ids) or len(set(ids)) != len(ids) or any(
             isinstance(item, bool) or not isinstance(item, int) or item < 0
             for item in ids):
         raise ValueError("current batch pairs require matching global segment IDs")
-    projected_pairs = [dict(pair) for pair in state.get("pairs") or []
-                       if isinstance(pair, dict)]
+    projected_pairs = [dict(pair) if isinstance(pair, dict) else {}
+                       for pair in state.get("pairs") or []]
     if ids:
         projected_pairs.extend({} for _ in range(max(ids) + 1 - len(projected_pairs)))
     targets = {int(key): str(value or "")
@@ -566,6 +566,7 @@ def review_translation_batch_with_evidence(
         "confidence 仅在检测依据支持时填写 0 到 1 的数字，否则为 null；"
         "detector 填写检测器名称。没有充分证据不要生成 blocking finding。"
         "每个 finding 可带 evidence_refs（证据编号数组）和 suggested_target。"
+        "若有稳定规则编号、术语或逻辑位置，可带 code、entry_id、location_key 或 occurrence_key。"
         "推荐格式：{\"segment_id\": 0, \"category\": \"semantic_accuracy\", "
         "\"severity\": \"actionable\", \"summary\": \"具体问题摘要\", "
         "\"source_span\": \"原文中的精确片段或 null\", "

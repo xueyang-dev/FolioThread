@@ -1561,7 +1561,10 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
             "section_profile": section_profile or {},
             "section_digest": section_digest or {},
             "previous_source_context": list(ctx_prev),
-            "previous_target_context": list(previous_target),
+            "previous_target_context": [
+                dict(item) for item in previous_target
+                if item.get("level") in {"human_accepted", "reviewed", "tm_approved"}
+            ],
             "next_source_context": list(ctx_next),
             "style_constraints": style_rules or "",
         }
