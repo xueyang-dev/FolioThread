@@ -27,6 +27,7 @@ class ReviewFinding(TypedDict, total=False):
     requires_human_confirmation: bool
     input_fingerprint: str
     detector: str
+    resolution_decision_id: str
 
 
 def _identity(raw: Mapping[str, Any]) -> str:
@@ -63,13 +64,16 @@ def normalize_finding(
     refs = raw.get("evidence_refs") or raw.get("evidence_ids") or []
     if not isinstance(refs, (list, tuple)):
         raise ValueError("review finding evidence_refs must be a list")
+    subject = raw.get("subject_id")
+    if subject is None:
+        subject = raw.get("segment_id", "")
     out: ReviewFinding = {
         "finding_id": _identity(raw),
         "category": category,
         "code": str(raw.get("code") or category),
         "severity": severity,
         "status": status,
-        "subject_id": str(raw.get("subject_id") or raw.get("segment_id") or ""),
+        "subject_id": str(subject),
         "summary": str(raw.get("summary") or raw.get("reason") or "").strip(),
         "explanation": str(raw.get("explanation") or "").strip(),
         "recommendation": str(raw.get("recommendation") or "").strip(),

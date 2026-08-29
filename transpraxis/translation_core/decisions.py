@@ -66,5 +66,5 @@ def record_human_decision(
     }
     updated: ReviewFinding = dict(finding)  # type: ignore[assignment]
     updated["status"] = "dismissed" if decision == "dismissed" else "resolved"
-    updated["resolution_decision_id"] = decision_id  # type: ignore[typeddict-unknown-key]
+    updated["resolution_decision_id"] = decision_id
     return updated, record

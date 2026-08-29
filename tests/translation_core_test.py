@@ -102,10 +102,15 @@ def test_review_finding_identity_ignores_mutable_explanation_text():
                                input_fingerprint=input_hash)
 
     assert first["finding_id"] == second["finding_id"]
+    assert first["subject_id"] == "4"
     assert first["evidence_refs"] == ["E1", "E2"]
     assert first["severity"] == "actionable" and first["status"] == "open"
     with pytest.raises(ValueError, match="severity"):
         normalize_finding({**base, "severity": "urgent"}, input_fingerprint=input_hash)
+    segment_zero = normalize_finding(
+        {**base, "segment_id": 0}, input_fingerprint=input_hash,
+    )
+    assert segment_zero["subject_id"] == "0"
 
 
 def test_only_a_human_can_decide_an_open_human_required_finding():
