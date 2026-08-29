@@ -354,7 +354,8 @@ def test_runtime_review_packet_truth_mismatch_fails_closed(field, value):
 def test_runtime_review_findings_have_stable_distinct_core_identity():
     state = {"pairs": []}
     batch = [{"source": "source", "target": "target"}]
-    packet = build_runtime_review_packet(state, batch, [0], [])
+    packet = build_runtime_review_packet(
+        state, batch, [0], [], review_context={"target_language": "中文"})
     payload = {"findings": [{
         "segment_id": 0, "category": "omission", "severity": "blocking",
         "summary": "first", "source_span": "mutable source",
@@ -403,7 +404,8 @@ def test_runtime_review_findings_have_stable_distinct_core_identity():
 def test_dynamic_evidence_becomes_the_final_finding_fingerprint():
     state = {"pairs": []}
     batch = [{"source": "source", "target": "target"}]
-    packet = build_runtime_review_packet(state, batch, [0], [])
+    packet = build_runtime_review_packet(
+        state, batch, [0], [], review_context={"target_language": "中文"})
     replies = iter([
         json.dumps({"findings": [], "evidence_requests": [{
             "tool": "get_segment", "arguments": {"segment_id": 0},
@@ -436,7 +438,7 @@ def test_blind_reviewer_packet_view_hides_formal_audit_and_rationale():
     }]
     packet = build_runtime_review_packet(
         state, batch, [0], [], candidate_targets={0: "CANDIDATE"}, blind=True,
-        review_context={"previous_source_context": []},
+        review_context={"previous_source_context": [], "target_language": "中文"},
     )
     prompts = []
     findings, failed, _ = review_translation_batch_with_evidence(
@@ -483,3 +485,24 @@ def test_packet_mode_has_no_unfingerprinted_legacy_prompt_context():
     assert findings == [] and not failed
     assert "UNTRACKED_SECRET" in legacy_prompts[0]
     assert "UNTRACKED_STYLE" in legacy_prompts[0]
+
+
+def test_packet_target_language_mismatch_fails_closed_before_llm():
+    batch = [{"source": "source", "target": "target"}]
+    packet = build_runtime_review_packet(
+        {"pairs": []}, batch, [0], [], review_context={"target_language": "中文"})
+    called = False
+
+    def llm(*args, **kwargs):
+        nonlocal called
+        called = True
+        return "[]"
+
+    findings, failed, trace = review_translation_batch_with_evidence(
+        ["source"], ["target"], "", "", "法语", "p", "k", "m",
+        TranslationEvidenceIndex(["source"], batch, []), call_llm=llm,
+        segment_ids=[0], translation_core_packet=packet,
+    )
+
+    assert findings == [] and failed and not called
+    assert trace["error"] == "Translation Core target language mismatch"

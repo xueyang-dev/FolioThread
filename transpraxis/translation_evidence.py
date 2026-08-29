@@ -556,6 +556,10 @@ def review_translation_batch_with_evidence(
                 "review_identity": dict(review_identity or {}),
             },
         }
+    packet_target_lang = None
+    if translation_core_packet is not None:
+        packet_context = translation_core_packet.get("context") or {}
+        packet_target_lang = str(packet_context.get("target_language") or "")
     numbered = "\n".join(
         f"local_ordinal: {i}\nsegment_id: {segment_id}\n原文：{source}\n译文：{target}"
         for i, (segment_id, source, target) in
@@ -600,7 +604,8 @@ def review_translation_batch_with_evidence(
         "若无问题 findings 必须为空数组。\n" + legacy_prompt_context
         + packet_prompt
     )
-    base_prompt = f"待审校段落（目标语言：{target_lang}）：\n{numbered}"
+    prompt_target_lang = packet_target_lang if packet_target_lang is not None else target_lang
+    base_prompt = f"待审校段落（目标语言：{prompt_target_lang}）：\n{numbered}"
     prompt = base_prompt
     trace: Dict[str, Any] = {
         "blind": blind, "segment_ids": segment_ids, "rounds": [],
@@ -664,6 +669,9 @@ def review_translation_batch_with_evidence(
             trace["completion_receipt"]["final_consumed_input_fingerprint"] = \
                 trace["translation_core"]["final_consumed_input_fingerprint"]
         return [], True, trace
+
+    if packet_target_lang is not None and packet_target_lang != str(target_lang or ""):
+        return fail("Translation Core target language mismatch")
 
     for round_index in range(max(1, int(max_rounds or 1))):
         try:
