@@ -24,6 +24,7 @@ eval/approved_glossary.json
 
 # 本地界面截图、渲染探针与临时文档
 tmp/
+.codex_tmp/
 
 # 本地 capability audit reports and screenshots
 .audit/
