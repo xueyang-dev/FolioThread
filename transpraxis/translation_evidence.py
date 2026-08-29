@@ -458,6 +458,16 @@ def _translation_core_findings(
 ) -> List[Dict[str, Any]]:
     """Add authoritative identity/freshness while retaining the legacy surface."""
     occurrences: Dict[Tuple[str, str, str], int] = {}
+    used_locations: Dict[Tuple[str, str, str], set[str]] = {}
+    for finding in findings:
+        code = str(finding.get("code") or finding.get("category") or "semantic_review")
+        subject = str(finding.get("segment_id")
+                      if finding.get("segment_id") is not None else "")
+        key = (code, subject, str(finding.get("entry_id") or ""))
+        location = str(finding.get("location_key")
+                       or finding.get("occurrence_key") or "")
+        if location:
+            used_locations.setdefault(key, set()).add(location)
     result = []
     for finding in findings:
         item = dict(finding)
@@ -466,8 +476,13 @@ def _translation_core_findings(
         entry_id = str(item.get("entry_id") or "")
         if not item.get("location_key") and not item.get("occurrence_key"):
             key = (code, subject, entry_id)
-            occurrences[key] = occurrences.get(key, 0) + 1
-            item["occurrence_key"] = f"occurrence-{occurrences[key]}"
+            while True:
+                occurrences[key] = occurrences.get(key, 0) + 1
+                occurrence_key = f"occurrence-{occurrences[key]}"
+                if occurrence_key not in used_locations.get(key, set()):
+                    break
+            item["occurrence_key"] = occurrence_key
+            used_locations.setdefault(key, set()).add(occurrence_key)
         item.update({
             "code": code,
             "status": "open",
@@ -547,7 +562,12 @@ def review_translation_batch_with_evidence(
         enumerate(zip(segment_ids, sources, targets))
     )
     packet_prompt = ""
+    identity_prompt = ""
     if translation_core_packet is not None:
+        identity_prompt = (
+            "若有稳定规则编号、术语或逻辑位置，可带 code、entry_id、"
+            "location_key 或 occurrence_key。"
+        )
         packet_prompt = "\n【Translation Core 独立审校包】\n" + json.dumps(
             _reviewer_packet_view(translation_core_packet),
             ensure_ascii=False, sort_keys=True,
@@ -566,7 +586,7 @@ def review_translation_batch_with_evidence(
         "confidence 仅在检测依据支持时填写 0 到 1 的数字，否则为 null；"
         "detector 填写检测器名称。没有充分证据不要生成 blocking finding。"
         "每个 finding 可带 evidence_refs（证据编号数组）和 suggested_target。"
-        "若有稳定规则编号、术语或逻辑位置，可带 code、entry_id、location_key 或 occurrence_key。"
+        + identity_prompt +
         "推荐格式：{\"segment_id\": 0, \"category\": \"semantic_accuracy\", "
         "\"severity\": \"actionable\", \"summary\": \"具体问题摘要\", "
         "\"source_span\": \"原文中的精确片段或 null\", "

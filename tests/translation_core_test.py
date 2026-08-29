@@ -340,6 +340,7 @@ def test_runtime_review_findings_have_stable_distinct_core_identity():
         "summary": "first", "source_span": "mutable source",
         "target_span": "mutable target", "explanation": "why",
         "recommendation": "fix", "detector": "Semantic QA",
+        "occurrence_key": "occurrence-1",
     }, {
         "segment_id": 0, "category": "omission", "severity": "actionable",
         "summary": "second", "source_span": "another source",
