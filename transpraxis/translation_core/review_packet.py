@@ -96,7 +96,7 @@ def build_review_packet(
         source=[item["source"] for item in truth],
         target=[item["target"] for item in truth],
         glossary_hash=glossary_hash,
-        project_memory=memory,
+        confirmed_knowledge=memory["knowledge"],
         context=bounded_context,
         deterministic_checks=bounded_checks,
         evidence=bounded_evidence,

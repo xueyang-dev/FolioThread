@@ -1,4 +1,4 @@
-"""Confirmed-only Project Memory views over existing FolioThread truth."""
+"""Project Memory views with confirmed knowledge and separate audit history."""
 from __future__ import annotations
 
 import json
@@ -10,13 +10,21 @@ from .. import models
 CONFIRMED_STYLE_STATUSES = {"approved", "confirmed", "locked"}
 
 
-class ProjectMemory(TypedDict, total=False):
-    schema_version: str
+class ConfirmedKnowledge(TypedDict, total=False):
     glossary_hash: str
     terminology_refs: List[Dict[str, Any]]
     translation_memory: List[Dict[str, Any]]
     style_rules: List[Dict[str, Any]]
+
+
+class AuditHistory(TypedDict, total=False):
     human_decisions: List[Dict[str, Any]]
+
+
+class ProjectMemory(TypedDict, total=False):
+    schema_version: str
+    knowledge: ConfirmedKnowledge
+    audit_history: AuditHistory
 
 
 def _glossary(state: Mapping[str, Any]) -> tuple[List[models.GlossaryEntry], str]:
@@ -106,9 +114,11 @@ def project_memory_from_state(
     ]
     return {
         "schema_version": "translation-core-project-memory-v1",
-        "glossary_hash": glossary_hash,
-        "terminology_refs": terminology_refs,
-        "translation_memory": _translation_memory(state, translation_memory),
-        "style_rules": _style_rules(confirmed_style_rules),
-        "human_decisions": _unique(human_decisions),
+        "knowledge": {
+            "glossary_hash": glossary_hash,
+            "terminology_refs": terminology_refs,
+            "translation_memory": _translation_memory(state, translation_memory),
+            "style_rules": _style_rules(confirmed_style_rules),
+        },
+        "audit_history": {"human_decisions": _unique(human_decisions)},
     }

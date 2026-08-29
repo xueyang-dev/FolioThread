@@ -5,11 +5,14 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Tuple, TypedDict
 
 from .. import models
-from .evidence import freshness
 from .findings import ReviewFinding
 
 
-DECISIONS = {"approved", "rejected", "request_changes", "dismissed"}
+DECISION_STATUSES = {
+    "accept_resolution": "resolved",
+    "dismiss": "dismissed",
+    "request_revision": "open",
+}
 
 
 class HumanDecision(TypedDict, total=False):
@@ -30,26 +33,28 @@ def record_human_decision(
     actor: str,
     *,
     actor_type: str,
+    current_fingerprint: str,
     note: str = "",
     decided_at: str | None = None,
-    current_fingerprint: str | None = None,
 ) -> Tuple[ReviewFinding, HumanDecision]:
-    """Resolve one current, open, human-required finding with a human actor."""
+    """Record a fail-closed decision on one current, human-required finding."""
     decision = str(decision or "").strip().lower()
     actor = str(actor or "").strip()
     if actor_type != "human" or not actor:
         raise ValueError("only an identified human may record a human decision")
-    if decision not in DECISIONS:
+    if decision not in DECISION_STATUSES:
         raise ValueError(f"invalid human decision: {decision!r}")
+    finding_id = str(finding.get("finding_id") or "").strip()
+    if not finding_id:
+        raise ValueError("finding has no finding_id")
     if finding.get("status") != "open" or not finding.get("requires_human_confirmation"):
         raise ValueError("human decisions require an open finding that requests confirmation")
     input_fingerprint = str(finding.get("input_fingerprint") or "")
     if not input_fingerprint:
         raise ValueError("finding has no review input fingerprint")
-    if current_fingerprint is not None and freshness(finding, current_fingerprint) != "current":
+    if input_fingerprint != current_fingerprint:
         raise ValueError("cannot decide a stale finding")
     timestamp = decided_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    finding_id = str(finding.get("finding_id") or "")
     decision_id = models.stable_id(
         finding_id, input_fingerprint, actor, decision, timestamp, prefix="d",
     )
@@ -65,6 +70,8 @@ def record_human_decision(
         "status": "current",
     }
     updated: ReviewFinding = dict(finding)  # type: ignore[assignment]
-    updated["status"] = "dismissed" if decision == "dismissed" else "resolved"
-    updated["resolution_decision_id"] = decision_id
+    updated["status"] = DECISION_STATUSES[decision]
+    updated["latest_decision_id"] = decision_id
+    if updated["status"] in {"resolved", "dismissed"}:
+        updated["resolution_decision_id"] = decision_id
     return updated, record

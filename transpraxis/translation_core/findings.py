@@ -18,6 +18,9 @@ class ReviewFinding(TypedDict, total=False):
     status: str
     subject_id: str
     segment_id: int | str
+    entry_id: str
+    location_key: str
+    occurrence_key: str
     summary: str
     explanation: str
     recommendation: str
@@ -28,6 +31,7 @@ class ReviewFinding(TypedDict, total=False):
     input_fingerprint: str
     detector: str
     resolution_decision_id: str
+    latest_decision_id: str
 
 
 def _identity(raw: Mapping[str, Any]) -> str:
@@ -38,9 +42,12 @@ def _identity(raw: Mapping[str, Any]) -> str:
     if subject is None:
         subject = raw.get("segment_id", "")
     code = raw.get("code") or raw.get("category") or raw.get("type") or "review"
+    location = raw.get("location_key")
+    if location in (None, ""):
+        location = raw.get("occurrence_key", "")
     return models.stable_id(
         str(code), str(subject), str(raw.get("entry_id") or ""),
-        str(raw.get("source_span") or ""), str(raw.get("target_span") or ""),
+        str(location),
         prefix="f",
     )
 
@@ -74,6 +81,9 @@ def normalize_finding(
         "severity": severity,
         "status": status,
         "subject_id": str(subject),
+        "entry_id": str(raw.get("entry_id") or ""),
+        "location_key": str(raw.get("location_key") or ""),
+        "occurrence_key": str(raw.get("occurrence_key") or ""),
         "summary": str(raw.get("summary") or raw.get("reason") or "").strip(),
         "explanation": str(raw.get("explanation") or "").strip(),
         "recommendation": str(raw.get("recommendation") or "").strip(),
