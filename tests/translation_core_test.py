@@ -1,6 +1,7 @@
 """Focused contracts for the additive Translation Core foundation."""
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -14,6 +15,11 @@ from transpraxis.translation_core import (
     project_memory_from_state,
     record_human_decision,
     review_input_fingerprint,
+)
+from transpraxis.translation_evidence import (
+    TranslationEvidenceIndex,
+    build_runtime_review_packet,
+    review_translation_batch_with_evidence,
 )
 
 
@@ -260,3 +266,166 @@ def test_review_packet_is_bounded_independent_and_v04_compatible():
 
     legacy = {"pairs": [{"source": "A", "target": "甲"}], "glossary": []}
     assert build_review_packet(legacy)["translation_truth"][0]["source"] == "A"
+
+
+def test_runtime_packet_projection_is_ephemeral_global_and_review_scoped():
+    glossary = [_entry("term", "术语", occurrences=[4])]
+    state = {
+        "pairs": [
+            {"source": f"old {index}", "target": f"旧 {index}", "reviewed": True}
+            for index in range(4)
+        ],
+        "human_actions": [{"actor": "alice", "action": "AUDIT_SECRET"}],
+    }
+    batch = [{"source": "term source", "target": "当前译文", "reviewed": False}]
+    before_state, before_batch = deepcopy(state), deepcopy(batch)
+    packet = build_runtime_review_packet(
+        state, batch, [4], glossary,
+        deterministic_checks=[{"segment_id": 4, "code": "check"}],
+        review_context={"previous_source_context": ["old 3"]},
+    )
+
+    assert state == before_state and batch == before_batch
+    assert len(state["pairs"]) == 4
+    assert packet["translation_truth"] == [{
+        "segment_id": 4, "source": "term source", "target": "当前译文",
+        "reviewed": False, "target_provenance": None,
+    }]
+    knowledge = packet["project_memory"]["knowledge"]
+    assert knowledge["translation_memory"] == []
+    assert knowledge["terminology_refs"][0]["glossary_entry_id"]
+    assert "audit_history" not in packet["project_memory"]
+
+    grown = deepcopy(state)
+    grown["pairs"][0]["target"] = "changed reviewed TM"
+    grown["human_actions"].append({"actor": "bob", "action": "MORE_AUDIT"})
+    changed = build_runtime_review_packet(
+        grown, batch, [4], glossary,
+        deterministic_checks=[{"segment_id": 4, "code": "check"}],
+        review_context={"previous_source_context": ["old 3"]},
+    )
+    assert changed["input_fingerprint"] == packet["input_fingerprint"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("segment_id", 9), ("source", "different"), ("target", "different"),
+])
+def test_runtime_review_packet_truth_mismatch_fails_closed(field, value):
+    state = {"pairs": []}
+    batch = [{"source": "source", "target": "target"}]
+    packet = build_runtime_review_packet(state, batch, [0], [])
+    packet["translation_truth"][0][field] = value
+    called = False
+
+    def llm(*args, **kwargs):
+        nonlocal called
+        called = True
+        return "[]"
+
+    findings, failed, trace = review_translation_batch_with_evidence(
+        ["source"], ["target"], "", "", "中文", "p", "k", "m",
+        TranslationEvidenceIndex(["source"], batch, []),
+        call_llm=llm, segment_ids=[0], translation_core_packet=packet,
+    )
+    assert findings == [] and failed and not called
+    assert "truth mismatch" in trace["error"]
+
+
+def test_runtime_review_findings_have_stable_distinct_core_identity():
+    state = {"pairs": []}
+    batch = [{"source": "source", "target": "target"}]
+    packet = build_runtime_review_packet(state, batch, [0], [])
+    payload = {"findings": [{
+        "segment_id": 0, "category": "omission", "severity": "blocking",
+        "summary": "first", "source_span": "mutable source",
+        "target_span": "mutable target", "explanation": "why",
+        "recommendation": "fix", "detector": "Semantic QA",
+    }, {
+        "segment_id": 0, "category": "omission", "severity": "actionable",
+        "summary": "second", "source_span": "another source",
+        "target_span": "another target", "explanation": "why",
+        "recommendation": "fix", "detector": "Semantic QA",
+    }], "evidence_requests": []}
+    findings, failed, trace = review_translation_batch_with_evidence(
+        ["source"], ["target"], "", "", "中文", "p", "k", "m",
+        TranslationEvidenceIndex(["source"], batch, []),
+        call_llm=lambda *args, **kwargs: json.dumps(payload),
+        segment_ids=[0], translation_core_packet=packet,
+    )
+
+    assert not failed and len({item["finding_id"] for item in findings}) == 2
+    assert [item["occurrence_key"] for item in findings] == [
+        "occurrence-1", "occurrence-2"]
+    assert findings[0]["requires_human_confirmation"] is True
+    assert findings[1]["requires_human_confirmation"] is False
+    assert all(item["status"] == "open" for item in findings)
+    assert all(item["input_fingerprint"] == packet["input_fingerprint"]
+               for item in findings)
+    assert trace["translation_core"]["initial_input_fingerprint"] == \
+        trace["translation_core"]["final_consumed_input_fingerprint"]
+
+    changed_spans = deepcopy(payload)
+    changed_spans["findings"] = [changed_spans["findings"][0]]
+    changed_spans["findings"][0].update({
+        "source_span": "rewritten source span", "target_span": "rewritten target span",
+        "occurrence_key": "occurrence-1",
+    })
+    repeated, failed, _ = review_translation_batch_with_evidence(
+        ["source"], ["target"], "", "", "中文", "p", "k", "m",
+        TranslationEvidenceIndex(["source"], batch, []),
+        call_llm=lambda *args, **kwargs: json.dumps(changed_spans),
+        segment_ids=[0], translation_core_packet=packet,
+    )
+    assert not failed and repeated[0]["finding_id"] == findings[0]["finding_id"]
+
+
+def test_dynamic_evidence_becomes_the_final_finding_fingerprint():
+    state = {"pairs": []}
+    batch = [{"source": "source", "target": "target"}]
+    packet = build_runtime_review_packet(state, batch, [0], [])
+    replies = iter([
+        json.dumps({"findings": [], "evidence_requests": [{
+            "tool": "get_segment", "arguments": {"segment_id": 0},
+        }]}),
+        json.dumps({"findings": [{
+            "segment_id": 0, "severity": "actionable", "reason": "problem",
+            "evidence_refs": ["E1"],
+        }], "evidence_requests": []}),
+    ])
+    findings, failed, trace = review_translation_batch_with_evidence(
+        ["source"], ["target"], "", "", "中文", "p", "k", "m",
+        TranslationEvidenceIndex(["source"], batch, []),
+        call_llm=lambda *args, **kwargs: next(replies),
+        segment_ids=[0], translation_core_packet=packet,
+    )
+    final = trace["translation_core"]["final_consumed_input_fingerprint"]
+    assert not failed and final != packet["input_fingerprint"]
+    assert findings[0]["input_fingerprint"] == final
+    assert trace["completion_receipt"]["final_consumed_input_fingerprint"] == final
+
+
+def test_blind_reviewer_packet_view_hides_formal_audit_and_rationale():
+    state = {
+        "pairs": [{"source": "source", "target": "FORMAL_SECRET"}],
+        "human_actions": [{"actor": "alice", "note": "AUDIT_SECRET"}],
+    }
+    batch = [{
+        "source": "source", "target": "FORMAL_SECRET",
+        "initial_target": "INITIAL_SECRET", "repair_rationale": "REPAIR_SECRET",
+    }]
+    packet = build_runtime_review_packet(
+        state, batch, [0], [], candidate_targets={0: "CANDIDATE"}, blind=True,
+        review_context={"previous_source_context": []},
+    )
+    prompts = []
+    findings, failed, _ = review_translation_batch_with_evidence(
+        ["source"], ["CANDIDATE"], "", "", "中文", "p", "k", "m",
+        TranslationEvidenceIndex(
+            ["source"], batch, [], blind=True, candidate_targets={0: "CANDIDATE"}),
+        call_llm=lambda *args, **kwargs: prompts.append(args[3:5]) or "[]",
+        blind=True, segment_ids=[0], translation_core_packet=packet,
+    )
+    visible = json.dumps(prompts, ensure_ascii=False)
+    assert findings == [] and not failed and "CANDIDATE" in visible
+    assert all(secret not in visible for secret in (
+        "FORMAL_SECRET", "INITIAL_SECRET", "REPAIR_SECRET", "AUDIT_SECRET"))
