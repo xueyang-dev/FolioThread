@@ -139,6 +139,8 @@ def _merge_unresolved_findings(
         if not isinstance(source, dict):
             continue
         f = dict(source)
+        if f.get("status") == "stale" and f.get("superseded_by_review_event_id"):
+            continue
         if f.get("resolved"):
             continue
         if f.get("severity") not in allowed:
@@ -303,6 +305,12 @@ def finding_context(state: Dict[str, Any], finding: Dict[str, Any]) -> Dict[str,
         "review_evidence": review_evidence,
         "duplicate_count": int(finding.get("duplicate_count") or 1),
         "review_event_id": event_id,
+        "translation_core_finding_id": finding.get("finding_id"),
+        "finding_status": finding.get("status") or (
+            "resolved" if finding.get("resolved") else "open"),
+        "stale_reason": finding.get("stale_reason"),
+        "requires_human_confirmation": bool(
+            finding.get("requires_human_confirmation")),
     }
 
 
@@ -330,10 +338,28 @@ def mark_findings(state: Dict[str, Any], finding_ids: List[str], action: str,
     for f in state.get("findings") or []:
         fid = finding_id(f)
         if fid in ids and not f.get("resolved"):
+            timestamp = now_iso()
             f["resolved"] = True
             f["resolution"] = {"action": action, "note": note,
-                               "timestamp": now_iso(), "actor": actor}
-            add_human_action(state, fid, action, note, actor)
+                               "timestamp": timestamp, "actor": actor}
+            audit = {
+                "finding_id": fid,
+                "action": action,
+                "note": note,
+                "timestamp": timestamp,
+                "actor": actor,
+            }
+            if action == "accepted_risk" and f.get("type") == "review" \
+                    and f.get("input_fingerprint"):
+                audit.update({
+                    "record_type": "delivery_risk_acceptance",
+                    "actor_type": "human",
+                    "translation_core_finding_id": f.get("finding_id"),
+                    "review_event_id": f.get("review_event_id"),
+                    "input_fingerprint": f.get("input_fingerprint"),
+                    "status": "current",
+                })
+            state.setdefault("human_actions", []).append(audit)
             marked.append(fid)
     return state, marked
 
@@ -342,6 +368,9 @@ def compute_delivery_status(state: Dict[str, Any]) -> str:
     """由当前状态推导交付状态；final/approved 只能由人工确认产生。"""
     if not state.get("p2_done"):
         return "draft"
+    from .translation_evidence import translation_review_readiness
+    if not translation_review_readiness(state)["ready"]:
+        return "review_required"
     if unresolved_blocking(state):
         return "review_required"
     current = state.get("delivery_status")
@@ -370,6 +399,21 @@ def approve_delivery(state: Dict[str, Any], note: str = "", actor: str = "user",
         return state, False, ["翻译尚未完成，不能创建最终交付版本"]
     if not report_ready(state):
         return state, False, ["实践报告尚未完成或未通过校验，不能创建最终交付版本"]
+    from .translation_evidence import translation_review_readiness
+    review = translation_review_readiness(state)
+    can_accept_current_review_risk = (
+        accept_blocking
+        and review["status"] == "missing"
+        and review["blocking_finding_ids"]
+        and not review["missing_segment_ids"]
+        and not review["stale_segment_ids"]
+        and not review["failed_segment_ids"]
+        and all(item.get("status") == "missing"
+                for item in review["decision_errors"])
+    )
+    if not review["ready"] and not can_accept_current_review_risk:
+        return state, False, [
+            f"Translation Core review gate={review['status']}，不能进入 final"]
     target_report = translation_target.validate_translation_pairs(
         state.get("pairs") or [])
     pair_count_mismatch = bool(

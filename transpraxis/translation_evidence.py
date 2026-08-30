@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import models, terminology, translation_core
 
@@ -15,8 +16,401 @@ DIAGNOSTIC_FIELDS = (
 )
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _segment_id(value: Mapping[str, Any]) -> Optional[int]:
+    segment_id = value.get("segment_id")
+    if isinstance(segment_id, bool) or not isinstance(segment_id, int):
+        segment_id = value.get("segment_index")
+    return segment_id if isinstance(segment_id, int) and not isinstance(
+        segment_id, bool) else None
+
+
+def _review_segment_ids(event: Mapping[str, Any]) -> List[int]:
+    values = event.get("segment_ids") or (event.get("completion_receipt") or {}).get(
+        "reviewed_segment_ids") or []
+    return [value for value in values
+            if isinstance(value, int) and not isinstance(value, bool)]
+
+
+def _review_dependency_segment_ids(event: Mapping[str, Any]) -> List[int]:
+    """Return the persisted segment dependencies for one review event."""
+    translation_core = event.get("translation_core") or {}
+    values = event.get("dependency_segment_ids") or \
+        translation_core.get("dependency_segment_ids") or _review_segment_ids(event)
+    return [value for value in values
+            if isinstance(value, int) and not isinstance(value, bool)]
+
+
+def _current_translation_review(event: Mapping[str, Any]) -> bool:
+    return event.get("review_scope") == "current_translation" or \
+        event.get("phase") == "formal_review"
+
+
+def current_review_event(
+    state: Mapping[str, Any], segment_id: int,
+) -> Optional[Dict[str, Any]]:
+    """Return the latest non-stale current-translation review for one segment."""
+    for event in reversed(state.get("review_evidence") or []):
+        if not isinstance(event, dict) or not _current_translation_review(event):
+            continue
+        if segment_id not in _review_segment_ids(event):
+            continue
+        if segment_id in set(event.get("stale_segment_ids") or []):
+            continue
+        if event.get("freshness_status") == "stale":
+            continue
+        return event
+    return None
+
+
+def mark_runtime_review_stale(
+    state: Dict[str, Any], segment_ids: Sequence[int], reason: str, *,
+    stale_at: Optional[str] = None, superseded_by: Optional[str] = None,
+    exclude_review_event_id: Optional[str] = None,
+    dependency_change: bool = False,
+    review_event_ids: Optional[Sequence[str]] = None,
+) -> Dict[str, int]:
+    """Preserve and stale review artifacts by segment or dependency event."""
+    ids = {value for value in segment_ids
+           if isinstance(value, int) and not isinstance(value, bool)}
+    selected_event_ids = {str(value) for value in review_event_ids or [] if str(value)}
+    timestamp = stale_at or _now_iso()
+    affected_events = set()
+    for event in state.get("review_evidence") or []:
+        if not isinstance(event, dict) or not _current_translation_review(event):
+            continue
+        event_id = str(event.get("review_event_id") or "")
+        event_segments = set(_review_segment_ids(event))
+        overlap = ids.intersection(event_segments)
+        dependency_overlap = ids.intersection(_review_dependency_segment_ids(event))
+        selected = event_id in selected_event_ids
+        if not (selected or overlap or
+                (dependency_change and dependency_overlap)):
+            continue
+        affected_events.add(event_id)
+        stale_segments = event_segments if (
+            selected or dependency_change) else overlap
+        event["stale_segment_ids"] = sorted(
+            set(event.get("stale_segment_ids") or []).union(stale_segments))
+        if set(_review_segment_ids(event)).issubset(event["stale_segment_ids"]):
+            if event.get("freshness_status") != "stale":
+                event["status_before_stale"] = event.get("decision") or "current"
+            event["freshness_status"] = "stale"
+        else:
+            event["freshness_status"] = "partial_stale"
+        event.setdefault("stale_reason", str(reason or "review inputs changed"))
+        event.setdefault("stale_at", timestamp)
+        if superseded_by:
+            event["superseded_by_review_event_id"] = superseded_by
+
+    affected_findings = set()
+    for finding in state.get("findings") or []:
+        if not isinstance(finding, dict) or finding.get("type") != "review" \
+                or not finding.get("input_fingerprint") \
+                or finding.get("review_event_id") == exclude_review_event_id:
+            continue
+        finding_event_id = str(finding.get("review_event_id") or "")
+        event_scoped = finding_event_id in affected_events
+        if dependency_change or selected_event_ids:
+            if not event_scoped:
+                continue
+        elif _segment_id(finding) not in ids:
+            continue
+        affected_findings.add(str(finding.get("finding_id") or ""))
+        if finding.get("status") != "stale":
+            finding["status_before_stale"] = finding.get("status") or "open"
+            finding["status"] = "stale"
+        finding.setdefault("stale_reason", str(reason or "review inputs changed"))
+        finding.setdefault("stale_at", timestamp)
+        if superseded_by:
+            finding["superseded_by_review_event_id"] = superseded_by
+
+    decision_count = 0
+    for decision in state.get("human_actions") or []:
+        if not isinstance(decision, dict) or decision.get("record_type") not in {
+                "human_decision", "delivery_risk_acceptance"}:
+            continue
+        decision_finding_ids = {
+            str(decision.get("finding_id") or ""),
+            str(decision.get("translation_core_finding_id") or ""),
+        }
+        if not decision_finding_ids.intersection(affected_findings):
+            continue
+        if decision.get("status") != "stale":
+            decision["status_before_stale"] = decision.get("status") or "current"
+            decision["status"] = "stale"
+            decision_count += 1
+        decision.setdefault("stale_reason", str(reason or "review inputs changed"))
+        decision.setdefault("stale_at", timestamp)
+        if superseded_by:
+            decision["superseded_by_review_event_id"] = superseded_by
+    return {
+        "events": len(affected_events),
+        "findings": len(affected_findings),
+        "decisions": decision_count,
+    }
+
+
+def reconcile_runtime_review_truth(state: Dict[str, Any]) -> Dict[str, int]:
+    """Detect dependency changes even when state was edited outside core helpers."""
+    stale_ids = set()
+    stale_event_ids = set()
+    pairs = state.get("pairs") or []
+    paragraphs = state.get("paras") or []
+    glossary = models.normalize_glossary(
+        (state.get("glossary_frozen") or {}).get("entries")
+        or state.get("glossary") or [])
+    current_glossary_hash = models.glossary_hash(glossary)
+    for event in state.get("review_evidence") or []:
+        if not isinstance(event, dict) or not _current_translation_review(event) \
+                or event.get("freshness_status") == "stale":
+            continue
+        translation_core = event.get("translation_core") or {}
+        event_glossary_hash = str(
+            translation_core.get("glossary_hash") or event.get("glossary_hash") or "")
+        if event_glossary_hash and event_glossary_hash != current_glossary_hash \
+                and event.get("review_event_id"):
+            stale_event_ids.add(str(event["review_event_id"]))
+        truths = list(translation_core.get("dependency_truth") or [])
+        truths.extend(translation_core.get("review_truth") or [])
+        for truth in truths:
+            if not isinstance(truth, Mapping):
+                continue
+            segment_id = truth.get("segment_id")
+            if isinstance(segment_id, bool) or not isinstance(segment_id, int) \
+                    or segment_id < 0 or segment_id >= max(len(pairs), len(paragraphs)):
+                stale_ids.add(segment_id)
+                continue
+            pair = pairs[segment_id] if segment_id < len(pairs) else {}
+            if truth.get("source_from_paragraphs"):
+                current_source = str(
+                    paragraphs[segment_id] if segment_id < len(paragraphs) else "")
+            else:
+                current_source = str(pair.get("source") or (
+                    paragraphs[segment_id] if segment_id < len(paragraphs) else ""))
+            current_target = str(
+                (pair.get("accepted_target") or pair.get("target") or "")
+                if truth.get("target_from_accepted") else (pair.get("target") or ""))
+            source_changed = current_source != str(truth.get("source") or "")
+            target_changed = truth.get("target_checked", True) \
+                and current_target != str(truth.get("target") or "")
+            if source_changed or target_changed:
+                stale_ids.add(segment_id)
+                if event.get("review_event_id"):
+                    stale_event_ids.add(str(event["review_event_id"]))
+    valid_ids = [value for value in stale_ids
+                 if isinstance(value, int) and not isinstance(value, bool)]
+    if not valid_ids and not stale_event_ids:
+        return {"events": 0, "findings": 0, "decisions": 0}
+    return mark_runtime_review_stale(
+        state, valid_ids, "persisted translation truth changed after review",
+        dependency_change=True, review_event_ids=sorted(stale_event_ids))
+
+
+def register_runtime_review_event(
+    state: Dict[str, Any], event: Dict[str, Any],
+    findings: Sequence[Dict[str, Any]], review_event_id: str,
+    segment_ids: Sequence[int], *, phase: str = "formal_review",
+) -> Dict[str, Any]:
+    """Make one review current and supersede only its reviewed segments."""
+    ids = [value for value in segment_ids
+           if isinstance(value, int) and not isinstance(value, bool)]
+    mark_runtime_review_stale(
+        state, ids, "superseded by a current independent review",
+        superseded_by=review_event_id,
+        exclude_review_event_id=review_event_id)
+    event.update({
+        "phase": phase,
+        "review_scope": "current_translation",
+        "review_event_id": review_event_id,
+        "segment_ids": ids,
+        "freshness_status": "current",
+        "stale_segment_ids": [],
+        "finding_ids": [str(item.get("finding_id") or "")
+                        for item in findings if item.get("finding_id")],
+    })
+    translation_core = event.get("translation_core") or {}
+    dependency_ids = event.get("dependency_segment_ids") or \
+        translation_core.get("dependency_segment_ids") or ids
+    event["dependency_segment_ids"] = [value for value in dependency_ids
+                                       if isinstance(value, int)
+                                       and not isinstance(value, bool)]
+    for finding in findings:
+        finding["review_event_id"] = review_event_id
+    state.setdefault("review_evidence", []).append(event)
+    return event
+
+
+def translation_review_readiness(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """Evaluate only current required review state; history remains audit-only."""
+    required = bool(state.get("translation_core_review_required"))
+    expected = list(range(len(state.get("pairs") or [])))
+    base = {
+        "required": required,
+        "expected_segment_ids": expected,
+        "current_segment_ids": [],
+        "stale_segment_ids": [],
+        "missing_segment_ids": [],
+        "failed_segment_ids": [],
+        "blocking_finding_ids": [],
+        "decision_errors": [],
+    }
+    if not required:
+        return {**base, "ready": True, "status": "not_required"}
+
+    events = [event for event in state.get("review_evidence") or []
+              if isinstance(event, Mapping) and _current_translation_review(event)]
+    stale_ids, missing_ids, failed_ids, current_ids = [], [], [], []
+    current_events: Dict[int, Dict[str, Any]] = {}
+    for segment_id in expected:
+        event = current_review_event(state, segment_id)
+        if event is None:
+            historical = [item for item in events
+                          if segment_id in _review_segment_ids(item)]
+            (stale_ids if historical else missing_ids).append(segment_id)
+            continue
+        current_events[segment_id] = event
+        receipt = event.get("completion_receipt") or {}
+        if event.get("decision") == "failed" or receipt.get("status") == "failed":
+            failed_ids.append(segment_id)
+        else:
+            current_ids.append(segment_id)
+
+    blocking_ids, decision_errors = [], []
+    actions = state.get("human_actions") or []
+    for finding in state.get("findings") or []:
+        if not isinstance(finding, Mapping) or finding.get("type") != "review" \
+                or finding.get("severity") != "blocking" \
+                or not finding.get("requires_human_confirmation"):
+            continue
+        segment_id = _segment_id(finding)
+        event = current_events.get(segment_id)
+        if event is None or event.get("review_event_id") != finding.get(
+                "review_event_id"):
+            continue
+        finding_id = str(finding.get("finding_id") or "")
+        status = str(finding.get("status") or "open")
+        risk_acceptance = next((item for item in reversed(actions)
+                                if isinstance(item, Mapping)
+                                and item.get("record_type") ==
+                                "delivery_risk_acceptance"
+                                and item.get("action") == "accepted_risk"
+                                and item.get("status") == "current"
+                                and item.get("actor_type") == "human"
+                                and str(item.get("translation_core_finding_id") or "") ==
+                                finding_id
+                                and item.get("review_event_id") ==
+                                event.get("review_event_id")
+                                and item.get("input_fingerprint") ==
+                                finding.get("input_fingerprint")
+                                and str(item.get("actor") or "").strip()), None)
+        if risk_acceptance is not None and finding.get("resolved"):
+            continue
+        if status == "open":
+            blocking_ids.append(finding_id)
+            decision_errors.append({"finding_id": finding_id, "status": "missing"})
+            continue
+        if status not in {"resolved", "dismissed"}:
+            blocking_ids.append(finding_id)
+            decision_errors.append({"finding_id": finding_id, "status": "stale"})
+            continue
+        decision_id = str(finding.get("latest_decision_id") or "")
+        decision = next((item for item in reversed(actions)
+                         if isinstance(item, Mapping)
+                         and item.get("decision_id") == decision_id), None)
+        if decision is None:
+            blocking_ids.append(finding_id)
+            decision_errors.append({"finding_id": finding_id, "status": "missing"})
+        elif decision.get("status") != "current" \
+                or decision.get("actor_type") != "human" \
+                or decision.get("input_fingerprint") != finding.get("input_fingerprint"):
+            blocking_ids.append(finding_id)
+            decision_errors.append({"finding_id": finding_id, "status": "stale"})
+
+    base.update({
+        "current_segment_ids": current_ids,
+        "stale_segment_ids": stale_ids,
+        "missing_segment_ids": missing_ids,
+        "failed_segment_ids": failed_ids,
+        "blocking_finding_ids": blocking_ids,
+        "decision_errors": decision_errors,
+    })
+    if failed_ids:
+        status = "failed"
+    elif stale_ids or any(item["status"] == "stale" for item in decision_errors):
+        status = "stale"
+    elif blocking_ids or (missing_ids and current_ids):
+        status = "missing"
+    elif missing_ids:
+        status = "not_run" if not events else "missing"
+    else:
+        status = "current"
+    return {**base, "ready": status == "current", "status": status}
+
+
+def record_runtime_human_decision(
+    state: Dict[str, Any], finding_id: str, decision: str, actor: str, *,
+    actor_type: str, note: str = "", decided_at: Optional[str] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """Apply Translation Core HumanDecision to the current persisted finding."""
+    candidates = [item for item in state.get("findings") or []
+                  if isinstance(item, dict)
+                  and str(item.get("finding_id") or "") == str(finding_id or "")]
+    finding = next((item for item in reversed(candidates)
+                    if _segment_id(item) is not None
+                    and (current_review_event(state, _segment_id(item)) or {}).get(
+                        "review_event_id") == item.get("review_event_id")), None)
+    if finding is None and candidates:
+        finding = candidates[-1]
+    if finding is None:
+        raise ValueError("finding has no current persisted record")
+    segment_id = _segment_id(finding)
+    if segment_id is None:
+        raise ValueError("finding has no global segment_id")
+    event = current_review_event(state, segment_id)
+    if event is None or event.get("review_event_id") != finding.get("review_event_id"):
+        raise ValueError("cannot decide a stale finding")
+    current_fingerprint = str(
+        (event.get("translation_core") or {}).get(
+            "final_consumed_input_fingerprint") or "")
+    if not current_fingerprint:
+        raise ValueError("current review has no input fingerprint")
+    updated, record = translation_core.record_human_decision(
+        finding, decision, actor, actor_type=actor_type,
+        current_fingerprint=current_fingerprint, note=note, decided_at=decided_at)
+    for old in state.get("human_actions") or []:
+        if isinstance(old, dict) and old.get("record_type") == "human_decision" \
+                and old.get("finding_id") == updated["finding_id"] \
+                and old.get("status") == "current":
+            old["status"] = "superseded"
+            old["superseded_by_decision_id"] = record["decision_id"]
+    updated["resolved"] = updated["status"] in {"resolved", "dismissed"}
+    if updated["resolved"]:
+        updated["resolution"] = {
+            "action": record["decision"], "note": record["note"],
+            "timestamp": record["decided_at"], "actor": record["actor"],
+            "decision_id": record["decision_id"],
+        }
+    else:
+        updated.pop("resolution", None)
+    finding.clear()
+    finding.update(updated)
+    audit = {
+        **record,
+        "record_type": "human_decision",
+        "action": record["decision"],
+        "timestamp": record["decided_at"],
+        "review_event_id": event.get("review_event_id"),
+    }
+    state.setdefault("human_actions", []).append(audit)
+    return state, finding, audit
+
+
 def _scoped_project_memory(
-    glossary: Sequence[Dict[str, Any]], sources: Sequence[str],
+    state: Mapping[str, Any], glossary: Sequence[Dict[str, Any]], sources: Sequence[str],
     segment_ids: Sequence[int],
 ) -> Dict[str, Any]:
     """Review-relevant confirmed knowledge; intentionally no TM or audit history."""
@@ -31,22 +425,23 @@ def _scoped_project_memory(
                    for source in sources)
         )
     ]
-    return {
-        "schema_version": "translation-core-project-memory-v1",
-        "knowledge": {
-            "glossary_hash": glossary_hash,
-            "terminology_refs": [{
-                "glossary_entry_id": entry["id"],
-                "glossary_hash": glossary_hash,
-                "status": entry["status"],
-                "behavior": entry["behavior"],
-            } for entry in relevant],
-            # Phase 2B has no review-time TM retrieval layer. Growing project
-            # TM must not invalidate unrelated review artifacts.
-            "translation_memory": [],
-            "style_rules": [],
+    memory = translation_core.project_memory_from_state(
+        {
+            "pairs": [], "glossary": entries,
+            "glossary_frozen": {"entries": entries},
+            "confirmed_style_rules": state.get("confirmed_style_rules") or [],
         },
-    }
+        translation_memory=[], include_state_translation_memory=False,
+    )
+    memory.pop("audit_history", None)
+    memory["knowledge"]["glossary_hash"] = glossary_hash
+    memory["knowledge"]["terminology_refs"] = [{
+        "glossary_entry_id": entry["id"],
+        "glossary_hash": glossary_hash,
+        "status": entry["status"],
+        "behavior": entry["behavior"],
+    } for entry in relevant]
+    return memory
 
 
 def build_runtime_review_packet(
@@ -92,15 +487,52 @@ def build_runtime_review_packet(
     projection["glossary"] = list(glossary)
     projection["glossary_frozen"] = {"entries": list(glossary)}
     sources = [str(pair.get("source") or "") for pair in batch]
-    memory = _scoped_project_memory(glossary, sources, ids)
-    return translation_core.build_review_packet(
+    memory = _scoped_project_memory(state, glossary, sources, ids)
+    context_value = dict(review_context) if isinstance(review_context, Mapping) else {}
+    dependency_ids = context_value.pop("_dependency_segment_ids", None)
+    target_dependency_ids = context_value.pop("_dependency_target_segment_ids", None)
+    dependency_ids = [value for value in (dependency_ids or ids)
+                      if isinstance(value, int) and not isinstance(value, bool)]
+    target_dependency_ids = {
+        value for value in (target_dependency_ids or ids)
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+    dependency_truth = []
+    paragraphs = state.get("paras") or []
+    for dependency_id in sorted(set(dependency_ids)):
+        pair = projected_pairs[dependency_id] if dependency_id < len(projected_pairs) \
+            and isinstance(projected_pairs[dependency_id], Mapping) else {}
+        uses_pair_source = dependency_id in ids or dependency_id in target_dependency_ids
+        source = str(pair.get("source") or (
+            paragraphs[dependency_id] if dependency_id < len(paragraphs) else "")) \
+            if uses_pair_source else str(
+                paragraphs[dependency_id] if dependency_id < len(paragraphs)
+                else pair.get("source") or "")
+        target_from_accepted = dependency_id not in ids \
+            and dependency_id in target_dependency_ids \
+            and bool(pair.get("accepted_target"))
+        target = (pair.get("accepted_target") or pair.get("target") or "") \
+            if target_from_accepted else str(pair.get("target") or "")
+        dependency_truth.append({
+            "segment_id": dependency_id,
+            "source": source,
+            "target": target if dependency_id in target_dependency_ids else None,
+            "target_checked": dependency_id in target_dependency_ids,
+            "target_from_accepted": target_from_accepted,
+            "source_from_paragraphs": not uses_pair_source,
+        })
+    packet = translation_core.build_review_packet(
         projection,
         segment_ids=ids,
         deterministic_checks=deterministic_checks or [],
-        context=review_context or {},
+        context=context_value,
         evidence=[],
         project_memory=memory,
     )
+    packet["dependency_segment_ids"] = sorted(set(dependency_ids))
+    packet["dependency_target_segment_ids"] = sorted(target_dependency_ids)
+    packet["dependency_truth"] = dependency_truth
+    return packet
 
 
 def _bound_evidence(result: Any) -> Any:
@@ -455,11 +887,27 @@ def _consumed_fingerprint(
 
 def _translation_core_findings(
     findings: Sequence[Dict[str, Any]], input_fingerprint: str,
+    sources_by_segment: Optional[Mapping[int, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Add authoritative identity/freshness while retaining the legacy surface."""
+    prepared = []
+    group_counts: Dict[Tuple[str, str, str], int] = {}
+    for finding in findings:
+        item = dict(finding)
+        code = str(item.get("code") or item.get("category") or "semantic_review")
+        subject = str(item.get("segment_id")
+                      if item.get("segment_id") is not None else "")
+        key = (code, subject, str(item.get("entry_id") or ""))
+        group_counts[key] = group_counts.get(key, 0) + 1
+        if not item.get("location_key") and not item.get("occurrence_key"):
+            source = str((sources_by_segment or {}).get(item.get("segment_id"), ""))
+            span = str(item.get("source_span") or "")
+            if source and span and source.count(span) == 1:
+                item["location_key"] = f"source-offset:{source.index(span)}"
+        prepared.append(item)
     occurrences: Dict[Tuple[str, str, str], int] = {}
     used_locations: Dict[Tuple[str, str, str], set[str]] = {}
-    for finding in findings:
+    for finding in prepared:
         code = str(finding.get("code") or finding.get("category") or "semantic_review")
         subject = str(finding.get("segment_id")
                       if finding.get("segment_id") is not None else "")
@@ -469,20 +917,23 @@ def _translation_core_findings(
         if location:
             used_locations.setdefault(key, set()).add(location)
     result = []
-    for finding in findings:
+    for finding in prepared:
         item = dict(finding)
         code = str(item.get("code") or item.get("category") or "semantic_review")
         subject = str(item.get("segment_id") if item.get("segment_id") is not None else "")
         entry_id = str(item.get("entry_id") or "")
         if not item.get("location_key") and not item.get("occurrence_key"):
             key = (code, subject, entry_id)
-            while True:
-                occurrences[key] = occurrences.get(key, 0) + 1
-                occurrence_key = f"occurrence-{occurrences[key]}"
-                if occurrence_key not in used_locations.get(key, set()):
-                    break
-            item["occurrence_key"] = occurrence_key
-            used_locations.setdefault(key, set()).add(occurrence_key)
+            if group_counts.get(key, 0) > 1:
+                while True:
+                    occurrences[key] = occurrences.get(key, 0) + 1
+                    occurrence_key = f"occurrence-{occurrences[key]}"
+                    if occurrence_key not in used_locations.get(key, set()):
+                        break
+                item["occurrence_key"] = occurrence_key
+                item["identity_stability"] = "provisional"
+                used_locations.setdefault(key, set()).add(occurrence_key)
+        item.setdefault("identity_stability", "stable")
         item.update({
             "code": code,
             "status": "open",
@@ -620,6 +1071,20 @@ def review_translation_batch_with_evidence(
             "final_consumed_input_fingerprint": None,
             "translation_truth_fingerprint": translation_core_packet.get(
                 "translation_truth_fingerprint"),
+            "review_truth": [{
+                "segment_id": item.get("segment_id"),
+                "source": item.get("source"),
+                "target": item.get("target"),
+            } for item in translation_core_packet.get("translation_truth") or []],
+            "glossary_hash": str(
+                (translation_core_packet.get("glossary") or {}).get(
+                    "glossary_hash") or ""),
+            "dependency_segment_ids": list(
+                translation_core_packet.get("dependency_segment_ids") or []),
+            "dependency_target_segment_ids": list(
+                translation_core_packet.get("dependency_target_segment_ids") or []),
+            "dependency_truth": [dict(item) for item in
+                                 translation_core_packet.get("dependency_truth") or []],
         }
     latest_findings: List[Dict[str, Any]] = []
     evidence_by_key: Dict[str, Dict[str, Any]] = {}
@@ -629,7 +1094,8 @@ def review_translation_batch_with_evidence(
         if translation_core_packet is not None:
             final_fingerprint = _consumed_fingerprint(
                 translation_core_packet, list(evidence_by_key.values()))
-            findings = _translation_core_findings(findings, final_fingerprint)
+            findings = _translation_core_findings(
+                findings, final_fingerprint, dict(zip(segment_ids, sources)))
             trace["translation_core"]["final_consumed_input_fingerprint"] = \
                 final_fingerprint
             if trace["rounds"]:

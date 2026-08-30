@@ -37,6 +37,7 @@ def _glossary(state: Mapping[str, Any]) -> tuple[List[models.GlossaryEntry], str
 
 def _translation_memory(
     state: Mapping[str, Any], translation_memory: Any,
+    include_state_pairs: bool = True,
 ) -> List[Dict[str, Any]]:
     records = []
     if isinstance(translation_memory, Mapping):
@@ -46,14 +47,15 @@ def _translation_memory(
     elif isinstance(translation_memory, list):
         records.extend(dict(value) for value in translation_memory
                        if isinstance(value, Mapping))
-    for index, pair in enumerate(state.get("pairs") or []):
-        if isinstance(pair, Mapping) and pair.get("reviewed") \
-                and not pair.get("stale_due_to_glossary"):
-            records.append({
-                "source": pair.get("source"), "target": pair.get("target"),
-                "reviewed": True, "segment_id": pair.get("segment_id", index),
-                "provenance": "foliothread_state",
-            })
+    if include_state_pairs:
+        for index, pair in enumerate(state.get("pairs") or []):
+            if isinstance(pair, Mapping) and pair.get("reviewed") \
+                    and not pair.get("stale_due_to_glossary"):
+                records.append({
+                    "source": pair.get("source"), "target": pair.get("target"),
+                    "reviewed": True, "segment_id": pair.get("segment_id", index),
+                    "provenance": "foliothread_state",
+                })
     confirmed = {}
     for record in records:
         source = str(record.get("source") or "").strip()
@@ -96,7 +98,8 @@ def project_memory_from_state(
     state: Mapping[str, Any],
     *,
     translation_memory: Any = None,
-    confirmed_style_rules: Iterable[Any] = (),
+    confirmed_style_rules: Iterable[Any] | None = None,
+    include_state_translation_memory: bool = True,
 ) -> ProjectMemory:
     """Adapt current state without promoting candidates or adding persistence."""
     entries, glossary_hash = _glossary(state)
@@ -117,8 +120,11 @@ def project_memory_from_state(
         "knowledge": {
             "glossary_hash": glossary_hash,
             "terminology_refs": terminology_refs,
-            "translation_memory": _translation_memory(state, translation_memory),
-            "style_rules": _style_rules(confirmed_style_rules),
+            "translation_memory": _translation_memory(
+                state, translation_memory, include_state_translation_memory),
+            "style_rules": _style_rules(
+                state.get("confirmed_style_rules") or []
+                if confirmed_style_rules is None else confirmed_style_rules),
         },
         "audit_history": {"human_decisions": _unique(human_decisions)},
     }

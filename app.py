@@ -27,6 +27,7 @@ from transpraxis import report_evidence as _report_evidence
 from transpraxis import report_template as _report_template
 from transpraxis import compliance as _compliance
 from transpraxis import thesis_constraints as _thesis_constraints
+from transpraxis import translation_evidence as _translation_evidence
 
 # Older Streamlit versions (including the Python 3.9-compatible line) do not
 # expose persist_state; widget keys provide the fallback there.
@@ -3103,6 +3104,12 @@ def _render_delivery_review_queue(
 def _render_delivery_gate(job_id, state, dstatus, target_lang="", provider="", model=""):
     st.divider()
     st.subheader("最终交付")
+    review = _translation_evidence.translation_review_readiness(state)
+    if not review["ready"]:
+        st.error(
+            f"Translation Core 审校门禁为 {review['status']}；"
+            "请先完成当前译文的独立审校和必要人工决定。")
+        return
     blockers = _delivery.unresolved_blocking(state)
     actions = _delivery.unresolved_findings(state)
     if blockers:
@@ -3302,7 +3309,8 @@ def _workspace_delivery_state(job_id, state):
     structural = _workspace_structural_qa(job_id, state) if job_id else qa.get("structural_qa")
     case_gate = _finalization.case_review_gate(
         state, core.load_academic_artifact(job_id, "selected_cases") if job_id else None)
-    translation_ready = (bool(state.get("p2_done")) and not blockers and
+    review_ready = _translation_evidence.translation_review_readiness(state)["ready"]
+    translation_ready = (bool(state.get("p2_done")) and review_ready and not blockers and
                          (state.get("delivery_validation") or {}).get("blocking") is not True)
     technical_blocker = (
         not translation_ready or impact.get("status") == "stale" or
@@ -3348,6 +3356,8 @@ def _workspace_hard_gate_reasons(job_id, state):
     translation_truth_gate_pass = (bool(state.get("p2_done")) and
                                    (state.get("delivery_validation") or {}).get("blocking") is not True)
     reasons = []
+    if not _translation_evidence.translation_review_readiness(state)["ready"]:
+        reasons.append("Translation Core 审校尚未通过")
     if not translation_truth_gate_pass:
         reasons.append("当前译文交付门禁")
     if impact.get("status") == "stale":
@@ -4633,6 +4643,15 @@ def _render_workspace_review(job_id, state):
         action_a, action_b, action_c = st.columns(3)
         if action_a.button("接受建议" if suggested_target else "标记已处理",
                           type="primary", key=f"workspace_review_fix_{selected_id}", width="stretch"):
+            core_finding_id = str(raw_selected.get("finding_id") or "")
+            core_finding = bool(core_finding_id and raw_selected.get("input_fingerprint"))
+            if core_finding:
+                core.decide_translation_review_finding(
+                    job_id, core_finding_id,
+                    "request_revision" if suggested_target else "accept_resolution",
+                    "user", actor_type="human",
+                    note=note or ("接受审校建议并请求修订" if suggested_target
+                                  else "人工核对后确认已处理"))
             if suggested_target and selected.get("segment_index") is not None:
                 latest = core.load_job_state(job_id) or state
                 index = selected["segment_index"]
@@ -4644,18 +4663,34 @@ def _render_workspace_review(job_id, state):
                     # scope, TM trust and final approval are handled together.
                     core.save_translation_edit(
                         job_id, index, suggested_target, actor="reviewer")
-            core.mark_findings_resolved(job_id, [selected_id], "human_fixed",
-                                        note or ("接受审校建议" if suggested_target else "人工核对后确认已处理"))
+                    if latest.get("translation_core_review_required") and api_key:
+                        core.review_translation_segments(
+                            job_id, [index], ai_provider, api_key, ai_model,
+                            target_lang, style_rules=style_rules)
+            if not core_finding:
+                core.mark_findings_resolved(
+                    job_id, [selected_id], "human_fixed",
+                    note or ("接受审校建议" if suggested_target else "人工核对后确认已处理"))
             st.rerun()
         can_retranslate = bool(api_key and selected.get("segment_index") is not None)
         if action_b.button("重新翻译", disabled=not can_retranslate, key=f"workspace_review_retranslate_{selected_id}", width="stretch"):
+            if raw_selected.get("finding_id") and raw_selected.get("input_fingerprint"):
+                core.decide_translation_review_finding(
+                    job_id, raw_selected["finding_id"], "request_revision", "user",
+                    actor_type="human", note=note or "请求重新翻译并复审")
             core.retranslate_segments(job_id, [selected["segment_index"]], ai_provider, api_key, ai_model,
                                        target_lang, style_rules=style_rules,
                                        on_caption=lambda text: st.caption(text))
             st.rerun()
         if action_c.button("保留当前译文", disabled=not selected.get("proper_noun_candidate"),
                           key=f"workspace_review_preserve_{selected_id}", width="stretch"):
-            core.mark_findings_resolved(job_id, [selected_id], "preserved", note or "人工确认保留当前译文")
+            if raw_selected.get("finding_id") and raw_selected.get("input_fingerprint"):
+                core.decide_translation_review_finding(
+                    job_id, raw_selected["finding_id"], "dismiss", "user",
+                    actor_type="human", note=note or "人工确认保留当前译文")
+            else:
+                core.mark_findings_resolved(
+                    job_id, [selected_id], "preserved", note or "人工确认保留当前译文")
             st.rerun()
         if not can_retranslate:
             st.caption("重新翻译需要已配置 API Key。")

@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import core
-from transpraxis import knowledge
+from transpraxis import knowledge, models
 
 
 def _candidate(source="continuity", target="连续性", segment=0):
@@ -88,6 +88,13 @@ def test_knowledge_decisions_preserve_scope_conflicts_and_invalidation():
                    for event in promoted["knowledge_events"])
         assert any(action["action"] == "knowledge_project_term"
                    for action in promoted["human_actions"])
+        promotion = next(action for action in promoted["human_actions"]
+                         if action["action"] == "knowledge_project_term")
+        assert promotion["actor_type"] == "human"
+        assert promotion["previous_status"] == "emergent_candidate"
+        assert promotion["new_status"] == "promoted_project_term"
+        assert promoted["glossary_frozen"]["glossary_hash"] == \
+            models.glossary_hash(promoted["glossary"])
         repeated, repeated_ok, _ = core.review_knowledge_candidate(
             promoted_id, candidate_id, "task_only")
         assert not repeated_ok and repeated["knowledge_candidates"][0]["decision"] == "project_term"
@@ -131,6 +138,11 @@ def test_knowledge_decisions_preserve_scope_conflicts_and_invalidation():
         assert rejected_ok, rejected_message
         assert rejected_state["knowledge_candidates"][0]["status"] == "rejected"
         assert knowledge.provisional_hints(rejected_state["knowledge_candidates"]) == []
+        rejection = next(action for action in rejected_state["human_actions"]
+                         if action["action"] == "knowledge_rejected")
+        assert rejection["actor_type"] == "human"
+        assert rejection["previous_status"] == "emergent_candidate"
+        assert rejection["new_status"] == "rejected"
     finally:
         core.OUTPUT_DIR = old_dir
         shutil.rmtree(tmp, ignore_errors=True)

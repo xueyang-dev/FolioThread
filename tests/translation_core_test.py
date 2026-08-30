@@ -19,7 +19,12 @@ from transpraxis.translation_core import (
 from transpraxis.translation_evidence import (
     TranslationEvidenceIndex,
     build_runtime_review_packet,
+    current_review_event,
+    mark_runtime_review_stale,
+    record_runtime_human_decision,
+    register_runtime_review_event,
     review_translation_batch_with_evidence,
+    translation_review_readiness,
 )
 
 
@@ -94,6 +99,15 @@ def test_project_memory_contains_only_confirmed_existing_truth():
     assert memory["audit_history"]["human_decisions"] == [state["human_actions"][0]]
     assert "knowledge_candidates" not in memory
 
+    persisted = deepcopy(state)
+    persisted["confirmed_style_rules"] = [
+        {"rule": "Keep headings concise.", "status": "confirmed"},
+        {"rule": "Model style guess.", "status": "candidate"},
+    ]
+    persisted_memory = project_memory_from_state(persisted)
+    assert [item["rule"] for item in persisted_memory["knowledge"]["style_rules"]] == [
+        "Keep headings concise."]
+
 
 def test_review_finding_identity_ignores_mutable_explanation_text():
     input_hash = fingerprint({"review": 1})
@@ -162,6 +176,11 @@ def test_only_a_human_can_decide_an_open_human_required_finding():
             finding, "accept_resolution", "review-model", actor_type="model",
             current_fingerprint=current,
         )
+    with pytest.raises(ValueError, match="human"):
+        record_human_decision(
+            finding, "accept_resolution", "", actor_type="human",
+            current_fingerprint=current,
+        )
     with pytest.raises(ValueError, match="open finding"):
         record_human_decision(
             {**finding, "requires_human_confirmation": False},
@@ -173,6 +192,16 @@ def test_only_a_human_can_decide_an_open_human_required_finding():
             finding, "accept_resolution", "alice", actor_type="human",
             current_fingerprint=fingerprint({"target": "v2"}),
         )
+    with pytest.raises(ValueError, match="fingerprint"):
+        record_human_decision(
+            {**finding, "input_fingerprint": ""}, "accept_resolution", "alice",
+            actor_type="human", current_fingerprint=current,
+        )
+    with pytest.raises(ValueError, match="open finding"):
+        record_human_decision(
+            {**finding, "severity": "informational"}, "accept_resolution", "alice",
+            actor_type="human", current_fingerprint=current,
+        )
     with pytest.raises(TypeError, match="current_fingerprint"):
         record_human_decision(  # type: ignore[call-arg]
             finding, "accept_resolution", "alice", actor_type="human",
@@ -181,6 +210,12 @@ def test_only_a_human_can_decide_an_open_human_required_finding():
         record_human_decision(
             {**finding, "finding_id": ""}, "accept_resolution", "alice",
             actor_type="human", current_fingerprint=current,
+        )
+    with pytest.raises(ValueError, match="stable finding identity"):
+        record_human_decision(
+            {**finding, "identity_stability": "provisional"},
+            "accept_resolution", "alice", actor_type="human",
+            current_fingerprint=current,
         )
     with pytest.raises(ValueError, match="invalid human decision"):
         record_human_decision(
@@ -307,6 +342,28 @@ def test_runtime_packet_projection_is_ephemeral_global_and_review_scoped():
     assert changed["input_fingerprint"] == packet["input_fingerprint"]
 
 
+def test_runtime_packet_includes_confirmed_style_knowledge_only():
+    batch = [{"source": "source", "target": "译文"}]
+    state = {
+        "pairs": [],
+        "confirmed_style_rules": [
+            {"rule": "Use formal register.", "status": "confirmed"},
+            {"rule": "Model suggestion.", "status": "candidate"},
+        ],
+    }
+    packet = build_runtime_review_packet(
+        state, batch, [0], [], review_context={"target_language": "中文"})
+    rules = packet["project_memory"]["knowledge"]["style_rules"]
+    assert [item["rule"] for item in rules] == ["Use formal register."]
+    assert packet["project_memory"]["knowledge"]["translation_memory"] == []
+
+    changed = deepcopy(state)
+    changed["confirmed_style_rules"][0]["rule"] = "Use concise register."
+    changed_packet = build_runtime_review_packet(
+        changed, batch, [0], [], review_context={"target_language": "中文"})
+    assert changed_packet["input_fingerprint"] != packet["input_fingerprint"]
+
+
 @pytest.mark.parametrize("field,value", [
     ("advisory_terminology_context", "term -> different advisory target"),
     ("target_language", "繁體中文"),
@@ -378,6 +435,8 @@ def test_runtime_review_findings_have_stable_distinct_core_identity():
     assert not failed and len({item["finding_id"] for item in findings}) == 2
     assert [item["occurrence_key"] for item in findings] == [
         "occurrence-1", "occurrence-2"]
+    assert [item["identity_stability"] for item in findings] == [
+        "stable", "provisional"]
     assert findings[0]["requires_human_confirmation"] is True
     assert findings[1]["requires_human_confirmation"] is False
     assert all(item["status"] == "open" for item in findings)
@@ -399,6 +458,36 @@ def test_runtime_review_findings_have_stable_distinct_core_identity():
         segment_ids=[0], translation_core_packet=packet,
     )
     assert not failed and repeated[0]["finding_id"] == findings[0]["finding_id"]
+
+
+def test_runtime_duplicate_finding_identity_uses_stable_source_offsets():
+    batch = [{"source": "alpha and beta", "target": "译文"}]
+    packet = build_runtime_review_packet(
+        {"pairs": []}, batch, [0], [], review_context={"target_language": "中文"})
+    base = {
+        "segment_id": 0, "category": "omission", "severity": "blocking",
+        "summary": "missing", "target_span": None, "explanation": "why",
+        "recommendation": "fix", "detector": "Semantic QA",
+    }
+
+    def review(spans):
+        payload = {"findings": [dict(base, source_span=span) for span in spans],
+                   "evidence_requests": []}
+        findings, failed, _ = review_translation_batch_with_evidence(
+            ["alpha and beta"], ["译文"], "", "", "中文", "p", "k", "m",
+            TranslationEvidenceIndex(["alpha and beta"], batch, []),
+            call_llm=lambda *args, **kwargs: json.dumps(payload), segment_ids=[0],
+            translation_core_packet=packet,
+        )
+        assert not failed
+        return {item["source_span"]: item for item in findings}
+
+    first = review(["alpha", "beta"])
+    reordered = review(["beta", "alpha"])
+    assert first["alpha"]["finding_id"] == reordered["alpha"]["finding_id"]
+    assert first["beta"]["finding_id"] == reordered["beta"]["finding_id"]
+    assert first["alpha"]["finding_id"] != first["beta"]["finding_id"]
+    assert {item["identity_stability"] for item in first.values()} == {"stable"}
 
 
 def test_dynamic_evidence_becomes_the_final_finding_fingerprint():
@@ -506,3 +595,229 @@ def test_packet_target_language_mismatch_fails_closed_before_llm():
 
     assert findings == [] and failed and not called
     assert trace["error"] == "Translation Core target language mismatch"
+
+
+def test_runtime_human_decision_uses_current_review_event_and_audits():
+    current = fingerprint({"target": "v1"})
+    finding = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=current)
+    finding["review_event_id"] = "review-1"
+    state = {
+        "findings": [finding],
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-1",
+            "segment_ids": [0], "decision": "findings",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+        "human_actions": [],
+    }
+
+    state, updated, decision = record_runtime_human_decision(
+        state, finding["finding_id"], "accept_resolution", "alice",
+        actor_type="human", note="verified",
+        decided_at="2026-08-30T12:00:00+00:00")
+
+    assert updated["status"] == "resolved" and updated["resolved"] is True
+    assert decision["decision"] == "accept_resolution"
+    assert decision["actor_type"] == "human" and decision["status"] == "current"
+    assert decision["input_fingerprint"] == current
+    assert state["human_actions"] == [decision]
+
+
+def test_runtime_human_decision_rejects_noncurrent_review_event():
+    current = fingerprint({"target": "v1"})
+    finding = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=current)
+    finding["review_event_id"] = "review-1"
+    state = {
+        "findings": [finding],
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-1",
+            "segment_ids": [0], "freshness_status": "stale",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+    }
+
+    with pytest.raises(ValueError, match="stale"):
+        record_runtime_human_decision(
+            state, finding["finding_id"], "dismiss", "alice", actor_type="human")
+
+
+def test_runtime_stale_propagation_preserves_finding_and_decision():
+    current = fingerprint({"target": "v1"})
+    finding = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=current)
+    finding.update({"type": "review", "review_event_id": "review-1"})
+    state = {
+        "findings": [finding],
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-1",
+            "segment_ids": [0], "decision": "findings",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+        "human_actions": [],
+    }
+    state, _, decision = record_runtime_human_decision(
+        state, finding["finding_id"], "accept_resolution", "alice",
+        actor_type="human", decided_at="2026-08-30T12:00:00+00:00")
+
+    counts = mark_runtime_review_stale(
+        state, [0], "target changed", stale_at="2026-08-30T12:01:00+00:00")
+
+    assert counts == {"events": 1, "findings": 1, "decisions": 1}
+    assert len(state["findings"]) == 1 and len(state["human_actions"]) == 1
+    assert state["findings"][0]["status"] == "stale"
+    assert state["findings"][0]["status_before_stale"] == "resolved"
+    assert decision["status"] == "stale" and decision["status_before_stale"] == "current"
+    assert state["review_evidence"][0]["freshness_status"] == "stale"
+
+
+def test_runtime_review_supersession_is_segment_scoped():
+    current = fingerprint({"target": "v1"})
+    findings = []
+    for segment_id in (0, 1):
+        finding = normalize_finding({
+            "category": "omission", "severity": "blocking", "status": "open",
+            "segment_id": segment_id, "requires_human_confirmation": True,
+        }, input_fingerprint=current)
+        finding.update({"type": "review", "review_event_id": "review-a"})
+        findings.append(finding)
+    state = {
+        "findings": findings,
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-a",
+            "segment_ids": [0, 1], "decision": "findings",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+    }
+
+    register_runtime_review_event(
+        state, {"decision": "clean", "completion_receipt": {"status": "completed"}},
+        [], "review-b", [0])
+
+    old = state["review_evidence"][0]
+    assert old["freshness_status"] == "partial_stale"
+    assert old["stale_segment_ids"] == [0]
+    assert state["findings"][0]["status"] == "stale"
+    assert state["findings"][0]["superseded_by_review_event_id"] == "review-b"
+    assert state["findings"][1]["status"] == "open"
+    assert current_review_event(state, 0)["review_event_id"] == "review-b"
+    assert current_review_event(state, 1)["review_event_id"] == "review-a"
+
+
+def test_current_clean_review_supersedes_stale_history_for_delivery():
+    current = fingerprint({"target": "v1"})
+    finding = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=current)
+    finding.update({"type": "review", "review_event_id": "review-a"})
+    state = {
+        "translation_core_review_required": True,
+        "pairs": [{"source": "source", "target": "target"}],
+        "findings": [finding],
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-a",
+            "segment_ids": [0], "decision": "findings",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+        "human_actions": [],
+    }
+    state, _, decision = record_runtime_human_decision(
+        state, finding["finding_id"], "accept_resolution", "alice",
+        actor_type="human", decided_at="2026-08-30T12:00:00+00:00")
+    mark_runtime_review_stale(
+        state, [0], "target changed", stale_at="2026-08-30T12:01:00+00:00")
+    assert translation_review_readiness(state)["status"] == "stale"
+
+    register_runtime_review_event(
+        state, {"decision": "clean", "completion_receipt": {"status": "completed"}},
+        [], "review-b", [0])
+    readiness = translation_review_readiness(state)
+
+    assert readiness["ready"] is True and readiness["status"] == "current"
+    assert state["findings"][0]["status"] == "stale"
+    assert state["findings"][0]["superseded_by_review_event_id"] == "review-b"
+    assert decision["status"] == "stale"
+    assert len(state["findings"]) == 1 and len(state["human_actions"]) == 1
+
+
+def test_required_review_distinguishes_not_run_failed_and_missing_decision():
+    state = {
+        "translation_core_review_required": True,
+        "pairs": [{"source": "source", "target": "target"}],
+    }
+    assert translation_review_readiness(state)["status"] == "not_run"
+    state["review_evidence"] = [{
+        "phase": "formal_review", "review_event_id": "failed-review",
+        "segment_ids": [0], "decision": "failed",
+        "completion_receipt": {"status": "failed"},
+    }]
+    assert translation_review_readiness(state)["status"] == "failed"
+
+    current = fingerprint({"target": "current"})
+    finding = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=current)
+    finding.update({"type": "review", "review_event_id": "current-review"})
+    state.update(
+        findings=[finding],
+        review_evidence=[{
+            "phase": "formal_review", "review_event_id": "current-review",
+            "segment_ids": [0], "decision": "findings",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+    )
+    readiness = translation_review_readiness(state)
+    assert readiness["status"] == "missing" and readiness["ready"] is False
+    assert readiness["blocking_finding_ids"] == [finding["finding_id"]]
+
+    legacy = {"pairs": state["pairs"], "findings": []}
+    assert translation_review_readiness(legacy)["status"] == "not_required"
+
+
+def test_human_decision_selects_current_version_of_stable_finding_id():
+    first_fingerprint = fingerprint({"target": "v1"})
+    first = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=first_fingerprint)
+    first.update({"type": "review", "review_event_id": "review-a"})
+    state = {
+        "findings": [first],
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-a",
+            "segment_ids": [0], "decision": "findings",
+            "translation_core": {
+                "final_consumed_input_fingerprint": first_fingerprint},
+        }],
+    }
+    mark_runtime_review_stale(state, [0], "target changed")
+
+    second_fingerprint = fingerprint({"target": "v2"})
+    second = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=second_fingerprint)
+    second.update({"type": "review", "review_event_id": "review-b"})
+    assert second["finding_id"] == first["finding_id"]
+    state["findings"].append(second)
+    register_runtime_review_event(
+        state, {
+            "decision": "findings",
+            "translation_core": {
+                "final_consumed_input_fingerprint": second_fingerprint},
+        }, [second], "review-b", [0])
+
+    _, updated, _ = record_runtime_human_decision(
+        state, second["finding_id"], "dismiss", "alice", actor_type="human")
+    assert state["findings"][0]["status"] == "stale"
+    assert updated is state["findings"][1]
+    assert updated["status"] == "dismissed"

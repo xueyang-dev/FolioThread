@@ -74,7 +74,7 @@ def build_review_packet(
     context: Any = None,
     evidence: Any = None,
     translation_memory: Any = None,
-    confirmed_style_rules: Iterable[Any] = (),
+    confirmed_style_rules: Iterable[Any] | None = None,
     project_memory: Mapping[str, Any] | None = None,
     context_char_limit: int = 12_000,
     evidence_char_limit: int = 16_000,
