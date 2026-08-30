@@ -30,6 +30,7 @@ class ReviewFinding(TypedDict, total=False):
     requires_human_confirmation: bool
     input_fingerprint: str
     detector: str
+    identity_stability: str
     resolution_decision_id: str
     latest_decision_id: str
 

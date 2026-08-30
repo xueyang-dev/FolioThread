@@ -378,6 +378,8 @@ def test_runtime_review_findings_have_stable_distinct_core_identity():
     assert not failed and len({item["finding_id"] for item in findings}) == 2
     assert [item["occurrence_key"] for item in findings] == [
         "occurrence-1", "occurrence-2"]
+    assert [item["identity_stability"] for item in findings] == [
+        "stable", "provisional"]
     assert findings[0]["requires_human_confirmation"] is True
     assert findings[1]["requires_human_confirmation"] is False
     assert all(item["status"] == "open" for item in findings)
@@ -399,6 +401,36 @@ def test_runtime_review_findings_have_stable_distinct_core_identity():
         segment_ids=[0], translation_core_packet=packet,
     )
     assert not failed and repeated[0]["finding_id"] == findings[0]["finding_id"]
+
+
+def test_runtime_duplicate_finding_identity_uses_stable_source_offsets():
+    batch = [{"source": "alpha and beta", "target": "译文"}]
+    packet = build_runtime_review_packet(
+        {"pairs": []}, batch, [0], [], review_context={"target_language": "中文"})
+    base = {
+        "segment_id": 0, "category": "omission", "severity": "blocking",
+        "summary": "missing", "target_span": None, "explanation": "why",
+        "recommendation": "fix", "detector": "Semantic QA",
+    }
+
+    def review(spans):
+        payload = {"findings": [dict(base, source_span=span) for span in spans],
+                   "evidence_requests": []}
+        findings, failed, _ = review_translation_batch_with_evidence(
+            ["alpha and beta"], ["译文"], "", "", "中文", "p", "k", "m",
+            TranslationEvidenceIndex(["alpha and beta"], batch, []),
+            call_llm=lambda *args, **kwargs: json.dumps(payload), segment_ids=[0],
+            translation_core_packet=packet,
+        )
+        assert not failed
+        return {item["source_span"]: item for item in findings}
+
+    first = review(["alpha", "beta"])
+    reordered = review(["beta", "alpha"])
+    assert first["alpha"]["finding_id"] == reordered["alpha"]["finding_id"]
+    assert first["beta"]["finding_id"] == reordered["beta"]["finding_id"]
+    assert first["alpha"]["finding_id"] != first["beta"]["finding_id"]
+    assert {item["identity_stability"] for item in first.values()} == {"stable"}
 
 
 def test_dynamic_evidence_becomes_the_final_finding_fingerprint():

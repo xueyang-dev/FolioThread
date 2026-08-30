@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import models, terminology, translation_core
 
@@ -455,11 +455,27 @@ def _consumed_fingerprint(
 
 def _translation_core_findings(
     findings: Sequence[Dict[str, Any]], input_fingerprint: str,
+    sources_by_segment: Optional[Mapping[int, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Add authoritative identity/freshness while retaining the legacy surface."""
+    prepared = []
+    group_counts: Dict[Tuple[str, str, str], int] = {}
+    for finding in findings:
+        item = dict(finding)
+        code = str(item.get("code") or item.get("category") or "semantic_review")
+        subject = str(item.get("segment_id")
+                      if item.get("segment_id") is not None else "")
+        key = (code, subject, str(item.get("entry_id") or ""))
+        group_counts[key] = group_counts.get(key, 0) + 1
+        if not item.get("location_key") and not item.get("occurrence_key"):
+            source = str((sources_by_segment or {}).get(item.get("segment_id"), ""))
+            span = str(item.get("source_span") or "")
+            if source and span and source.count(span) == 1:
+                item["location_key"] = f"source-offset:{source.index(span)}"
+        prepared.append(item)
     occurrences: Dict[Tuple[str, str, str], int] = {}
     used_locations: Dict[Tuple[str, str, str], set[str]] = {}
-    for finding in findings:
+    for finding in prepared:
         code = str(finding.get("code") or finding.get("category") or "semantic_review")
         subject = str(finding.get("segment_id")
                       if finding.get("segment_id") is not None else "")
@@ -469,20 +485,23 @@ def _translation_core_findings(
         if location:
             used_locations.setdefault(key, set()).add(location)
     result = []
-    for finding in findings:
+    for finding in prepared:
         item = dict(finding)
         code = str(item.get("code") or item.get("category") or "semantic_review")
         subject = str(item.get("segment_id") if item.get("segment_id") is not None else "")
         entry_id = str(item.get("entry_id") or "")
         if not item.get("location_key") and not item.get("occurrence_key"):
             key = (code, subject, entry_id)
-            while True:
-                occurrences[key] = occurrences.get(key, 0) + 1
-                occurrence_key = f"occurrence-{occurrences[key]}"
-                if occurrence_key not in used_locations.get(key, set()):
-                    break
-            item["occurrence_key"] = occurrence_key
-            used_locations.setdefault(key, set()).add(occurrence_key)
+            if group_counts.get(key, 0) > 1:
+                while True:
+                    occurrences[key] = occurrences.get(key, 0) + 1
+                    occurrence_key = f"occurrence-{occurrences[key]}"
+                    if occurrence_key not in used_locations.get(key, set()):
+                        break
+                item["occurrence_key"] = occurrence_key
+                item["identity_stability"] = "provisional"
+                used_locations.setdefault(key, set()).add(occurrence_key)
+        item.setdefault("identity_stability", "stable")
         item.update({
             "code": code,
             "status": "open",
@@ -629,7 +648,8 @@ def review_translation_batch_with_evidence(
         if translation_core_packet is not None:
             final_fingerprint = _consumed_fingerprint(
                 translation_core_packet, list(evidence_by_key.values()))
-            findings = _translation_core_findings(findings, final_fingerprint)
+            findings = _translation_core_findings(
+                findings, final_fingerprint, dict(zip(segment_ids, sources)))
             trace["translation_core"]["final_consumed_input_fingerprint"] = \
                 final_fingerprint
             if trace["rounds"]:
