@@ -25,6 +25,11 @@ class HumanDecision(TypedDict, total=False):
     decided_at: str
     input_fingerprint: str
     status: str
+    status_before_stale: str
+    stale_reason: str
+    stale_at: str
+    superseded_by_decision_id: str
+    superseded_by_review_event_id: str
 
 
 def record_human_decision(
@@ -47,7 +52,8 @@ def record_human_decision(
     finding_id = str(finding.get("finding_id") or "").strip()
     if not finding_id:
         raise ValueError("finding has no finding_id")
-    if finding.get("status") != "open" or not finding.get("requires_human_confirmation"):
+    if finding.get("status") != "open" or not finding.get("requires_human_confirmation") \
+            or finding.get("severity") == "informational":
         raise ValueError("human decisions require an open finding that requests confirmation")
     input_fingerprint = str(finding.get("input_fingerprint") or "")
     if not input_fingerprint:
