@@ -52,6 +52,8 @@ def record_human_decision(
     finding_id = str(finding.get("finding_id") or "").strip()
     if not finding_id:
         raise ValueError("finding has no finding_id")
+    if finding.get("identity_stability") == "provisional":
+        raise ValueError("human decisions require a stable finding identity")
     if finding.get("status") != "open" or not finding.get("requires_human_confirmation") \
             or finding.get("severity") == "informational":
         raise ValueError("human decisions require an open finding that requests confirmation")

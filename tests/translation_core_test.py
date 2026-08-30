@@ -211,6 +211,12 @@ def test_only_a_human_can_decide_an_open_human_required_finding():
             {**finding, "finding_id": ""}, "accept_resolution", "alice",
             actor_type="human", current_fingerprint=current,
         )
+    with pytest.raises(ValueError, match="stable finding identity"):
+        record_human_decision(
+            {**finding, "identity_stability": "provisional"},
+            "accept_resolution", "alice", actor_type="human",
+            current_fingerprint=current,
+        )
     with pytest.raises(ValueError, match="invalid human decision"):
         record_human_decision(
             finding, "approved", "alice", actor_type="human",
