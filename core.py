@@ -930,6 +930,17 @@ def _runtime_review_context(
     profile = state.get("document_profile") or {}
     digests = state.get("section_digests") or []
     previous_target = _context.select_target_context(pairs, offset, limit=2)
+    dependency_ids = _runtime_review_dependency_ids(
+        state, offset, batch_len, previous_target)
+    target_dependency_ids = set(range(
+        max(0, offset), max(0, offset) + max(0, batch_len)))
+    target_dependency_ids.update(
+        int(item["segment_index"])
+        for item in previous_target or []
+        if isinstance(item, dict)
+        and isinstance(item.get("segment_index"), int)
+        and not isinstance(item.get("segment_index"), bool)
+    )
     return {
         "document_profile": profile,
         "document_synopsis": state.get("document_synopsis") or {},
@@ -945,7 +956,28 @@ def _runtime_review_context(
         "target_language": target_lang,
         "style_constraints": style_rules or "",
         "advisory_terminology_context": glossary_text or "",
+        "_dependency_segment_ids": dependency_ids,
+        "_dependency_target_segment_ids": sorted(target_dependency_ids),
     }
+
+
+def _runtime_review_dependency_ids(state, offset, batch_len, previous_target=None):
+    """Return segment IDs whose source/target can appear in review context."""
+    paragraphs = state.get("paras") or []
+    ids = set(range(max(0, offset), max(0, offset) + max(0, batch_len)))
+    ids.update(range(max(0, offset - 2), max(0, offset)))
+    ids.update(range(
+        max(0, offset) + max(0, batch_len),
+        min(len(paragraphs), max(0, offset) + max(0, batch_len) + 2),
+    ))
+    ids.update(
+        int(item["segment_index"])
+        for item in previous_target or []
+        if isinstance(item, dict)
+        and isinstance(item.get("segment_index"), int)
+        and not isinstance(item.get("segment_index"), bool)
+    )
+    return sorted(ids)
 
 
 def _batch_section_profile(document_profile, offset, batch_len):
@@ -1608,21 +1640,8 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
             style_rules=style_rules,
             entity_hints=entity_hints,
         )
-        review_context = {
-            "document_profile": document_profile or {},
-            "document_synopsis": document_synopsis,
-            "section_profile": section_profile or {},
-            "section_digest": section_digest or {},
-            "previous_source_context": list(ctx_prev),
-            "previous_target_context": [
-                dict(item) for item in previous_target
-                if item.get("level") in {"human_accepted", "reviewed", "tm_approved"}
-            ],
-            "next_source_context": list(ctx_next),
-            "target_language": target_lang,
-            "style_constraints": style_rules or "",
-            "advisory_terminology_context": glossary_text or "",
-        }
+        review_context = _runtime_review_context(
+            state, offset, len(batch), glossary_text, style_rules, target_lang)
         state.setdefault("context_packet_log", []).append({
             "batch": bi,
             "offset": offset,
@@ -3540,12 +3559,15 @@ def _mark_translation_truth_changed(
     return state
 
 
-def _invalidate_translation_reviews(state, indexes, reason):
+def _invalidate_translation_reviews(
+    state, indexes, reason, *, review_event_ids=None,
+):
     """Revoke review/TM trust while preserving review and decision history."""
     indexes = sorted({int(index) for index in indexes
                       if isinstance(index, int) or str(index).lstrip("-").isdigit()})
     changed = _translation_evidence.mark_runtime_review_stale(
-        state, indexes, reason)
+        state, indexes, reason, dependency_change=True,
+        review_event_ids=review_event_ids)
     if not any(changed.values()):
         return changed
     tm = load_tm()
@@ -5033,10 +5055,26 @@ def _apply_glossary_staleness(state, job_id=None):
 
     stale = stale_segments_for_glossary(state)
     pairs = state.get("pairs") or []
-    if stale:
+    current_glossary = normalize_glossary(
+        (state.get("glossary_frozen") or {}).get("entries")
+        or state.get("glossary") or [])
+    current_glossary_hash = _models.glossary_hash(current_glossary)
+    stale_event_ids = []
+    for event in state.get("review_evidence") or []:
+        if not isinstance(event, dict) or not (
+                event.get("review_scope") == "current_translation"
+                or event.get("phase") == "formal_review"):
+            continue
+        event_hash = str((event.get("translation_core") or {}).get(
+            "glossary_hash") or event.get("glossary_hash") or "")
+        if event_hash and event_hash != current_glossary_hash \
+                and event.get("review_event_id"):
+            stale_event_ids.append(str(event["review_event_id"]))
+    if stale or stale_event_ids:
         _invalidate_translation_reviews(
             state, stale,
-            "canonical glossary changed; independent review must be refreshed")
+            "canonical glossary changed; independent review must be refreshed",
+            review_event_ids=stale_event_ids)
     for p in pairs:
         p.pop("stale_due_to_glossary", None)
     state["findings"] = [f for f in state.get("findings") or []

@@ -35,6 +35,15 @@ def _review_segment_ids(event: Mapping[str, Any]) -> List[int]:
             if isinstance(value, int) and not isinstance(value, bool)]
 
 
+def _review_dependency_segment_ids(event: Mapping[str, Any]) -> List[int]:
+    """Return the persisted segment dependencies for one review event."""
+    translation_core = event.get("translation_core") or {}
+    values = event.get("dependency_segment_ids") or \
+        translation_core.get("dependency_segment_ids") or _review_segment_ids(event)
+    return [value for value in values
+            if isinstance(value, int) and not isinstance(value, bool)]
+
+
 def _current_translation_review(event: Mapping[str, Any]) -> bool:
     return event.get("review_scope") == "current_translation" or \
         event.get("phase") == "formal_review"
@@ -61,21 +70,31 @@ def mark_runtime_review_stale(
     state: Dict[str, Any], segment_ids: Sequence[int], reason: str, *,
     stale_at: Optional[str] = None, superseded_by: Optional[str] = None,
     exclude_review_event_id: Optional[str] = None,
+    dependency_change: bool = False,
+    review_event_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, int]:
-    """Preserve and stale review events, findings, and decisions by segment."""
+    """Preserve and stale review artifacts by segment or dependency event."""
     ids = {value for value in segment_ids
            if isinstance(value, int) and not isinstance(value, bool)}
+    selected_event_ids = {str(value) for value in review_event_ids or [] if str(value)}
     timestamp = stale_at or _now_iso()
     affected_events = set()
     for event in state.get("review_evidence") or []:
         if not isinstance(event, dict) or not _current_translation_review(event):
             continue
-        overlap = ids.intersection(_review_segment_ids(event))
-        if not overlap:
+        event_id = str(event.get("review_event_id") or "")
+        event_segments = set(_review_segment_ids(event))
+        overlap = ids.intersection(event_segments)
+        dependency_overlap = ids.intersection(_review_dependency_segment_ids(event))
+        selected = event_id in selected_event_ids
+        if not (selected or overlap or
+                (dependency_change and dependency_overlap)):
             continue
-        affected_events.add(str(event.get("review_event_id") or ""))
+        affected_events.add(event_id)
+        stale_segments = event_segments if (
+            selected or dependency_change) else overlap
         event["stale_segment_ids"] = sorted(
-            set(event.get("stale_segment_ids") or []).union(overlap))
+            set(event.get("stale_segment_ids") or []).union(stale_segments))
         if set(_review_segment_ids(event)).issubset(event["stale_segment_ids"]):
             if event.get("freshness_status") != "stale":
                 event["status_before_stale"] = event.get("decision") or "current"
@@ -91,8 +110,14 @@ def mark_runtime_review_stale(
     for finding in state.get("findings") or []:
         if not isinstance(finding, dict) or finding.get("type") != "review" \
                 or not finding.get("input_fingerprint") \
-                or _segment_id(finding) not in ids \
                 or finding.get("review_event_id") == exclude_review_event_id:
+            continue
+        finding_event_id = str(finding.get("review_event_id") or "")
+        event_scoped = finding_event_id in affected_events
+        if dependency_change or selected_event_ids:
+            if not event_scoped:
+                continue
+        elif _segment_id(finding) not in ids:
             continue
         affected_findings.add(str(finding.get("finding_id") or ""))
         if finding.get("status") != "stale":
@@ -130,31 +155,59 @@ def mark_runtime_review_stale(
 
 
 def reconcile_runtime_review_truth(state: Dict[str, Any]) -> Dict[str, int]:
-    """Detect source/target changes even when state was edited outside core helpers."""
+    """Detect dependency changes even when state was edited outside core helpers."""
     stale_ids = set()
+    stale_event_ids = set()
     pairs = state.get("pairs") or []
+    paragraphs = state.get("paras") or []
+    glossary = models.normalize_glossary(
+        (state.get("glossary_frozen") or {}).get("entries")
+        or state.get("glossary") or [])
+    current_glossary_hash = models.glossary_hash(glossary)
     for event in state.get("review_evidence") or []:
         if not isinstance(event, dict) or not _current_translation_review(event) \
                 or event.get("freshness_status") == "stale":
             continue
-        for truth in (event.get("translation_core") or {}).get("review_truth") or []:
+        translation_core = event.get("translation_core") or {}
+        event_glossary_hash = str(
+            translation_core.get("glossary_hash") or event.get("glossary_hash") or "")
+        if event_glossary_hash and event_glossary_hash != current_glossary_hash \
+                and event.get("review_event_id"):
+            stale_event_ids.add(str(event["review_event_id"]))
+        truths = list(translation_core.get("dependency_truth") or [])
+        truths.extend(translation_core.get("review_truth") or [])
+        for truth in truths:
             if not isinstance(truth, Mapping):
                 continue
             segment_id = truth.get("segment_id")
             if isinstance(segment_id, bool) or not isinstance(segment_id, int) \
-                    or not 0 <= segment_id < len(pairs):
+                    or segment_id < 0 or segment_id >= max(len(pairs), len(paragraphs)):
                 stale_ids.add(segment_id)
                 continue
-            pair = pairs[segment_id]
-            if str(pair.get("source") or "") != str(truth.get("source") or "") \
-                    or str(pair.get("target") or "") != str(truth.get("target") or ""):
+            pair = pairs[segment_id] if segment_id < len(pairs) else {}
+            if truth.get("source_from_paragraphs"):
+                current_source = str(
+                    paragraphs[segment_id] if segment_id < len(paragraphs) else "")
+            else:
+                current_source = str(pair.get("source") or (
+                    paragraphs[segment_id] if segment_id < len(paragraphs) else ""))
+            current_target = str(
+                (pair.get("accepted_target") or pair.get("target") or "")
+                if truth.get("target_from_accepted") else (pair.get("target") or ""))
+            source_changed = current_source != str(truth.get("source") or "")
+            target_changed = truth.get("target_checked", True) \
+                and current_target != str(truth.get("target") or "")
+            if source_changed or target_changed:
                 stale_ids.add(segment_id)
+                if event.get("review_event_id"):
+                    stale_event_ids.add(str(event["review_event_id"]))
     valid_ids = [value for value in stale_ids
                  if isinstance(value, int) and not isinstance(value, bool)]
-    if not valid_ids:
+    if not valid_ids and not stale_event_ids:
         return {"events": 0, "findings": 0, "decisions": 0}
     return mark_runtime_review_stale(
-        state, valid_ids, "persisted translation truth changed after review")
+        state, valid_ids, "persisted translation truth changed after review",
+        dependency_change=True, review_event_ids=sorted(stale_event_ids))
 
 
 def register_runtime_review_event(
@@ -179,6 +232,12 @@ def register_runtime_review_event(
         "finding_ids": [str(item.get("finding_id") or "")
                         for item in findings if item.get("finding_id")],
     })
+    translation_core = event.get("translation_core") or {}
+    dependency_ids = event.get("dependency_segment_ids") or \
+        translation_core.get("dependency_segment_ids") or ids
+    event["dependency_segment_ids"] = [value for value in dependency_ids
+                                       if isinstance(value, int)
+                                       and not isinstance(value, bool)]
     for finding in findings:
         finding["review_event_id"] = review_event_id
     state.setdefault("review_evidence", []).append(event)
@@ -234,6 +293,22 @@ def translation_review_readiness(state: Mapping[str, Any]) -> Dict[str, Any]:
             continue
         finding_id = str(finding.get("finding_id") or "")
         status = str(finding.get("status") or "open")
+        risk_acceptance = next((item for item in reversed(actions)
+                                if isinstance(item, Mapping)
+                                and item.get("record_type") ==
+                                "delivery_risk_acceptance"
+                                and item.get("action") == "accepted_risk"
+                                and item.get("status") == "current"
+                                and item.get("actor_type") == "human"
+                                and str(item.get("translation_core_finding_id") or "") ==
+                                finding_id
+                                and item.get("review_event_id") ==
+                                event.get("review_event_id")
+                                and item.get("input_fingerprint") ==
+                                finding.get("input_fingerprint")
+                                and str(item.get("actor") or "").strip()), None)
+        if risk_acceptance is not None and finding.get("resolved"):
+            continue
         if status == "open":
             blocking_ids.append(finding_id)
             decision_errors.append({"finding_id": finding_id, "status": "missing"})
@@ -247,21 +322,6 @@ def translation_review_readiness(state: Mapping[str, Any]) -> Dict[str, Any]:
                          if isinstance(item, Mapping)
                          and item.get("decision_id") == decision_id), None)
         if decision is None:
-            risk_acceptance = next((item for item in reversed(actions)
-                                    if isinstance(item, Mapping)
-                                    and item.get("record_type") ==
-                                    "delivery_risk_acceptance"
-                                    and item.get("action") == "accepted_risk"
-                                    and item.get("status") == "current"
-                                    and str(item.get("translation_core_finding_id") or "") ==
-                                    finding_id
-                                    and item.get("review_event_id") ==
-                                    event.get("review_event_id")
-                                    and item.get("input_fingerprint") ==
-                                    finding.get("input_fingerprint")
-                                    and str(item.get("actor") or "").strip()), None)
-            if risk_acceptance is not None:
-                continue
             blocking_ids.append(finding_id)
             decision_errors.append({"finding_id": finding_id, "status": "missing"})
         elif decision.get("status") != "current" \
@@ -428,14 +488,51 @@ def build_runtime_review_packet(
     projection["glossary_frozen"] = {"entries": list(glossary)}
     sources = [str(pair.get("source") or "") for pair in batch]
     memory = _scoped_project_memory(state, glossary, sources, ids)
-    return translation_core.build_review_packet(
+    context_value = dict(review_context) if isinstance(review_context, Mapping) else {}
+    dependency_ids = context_value.pop("_dependency_segment_ids", None)
+    target_dependency_ids = context_value.pop("_dependency_target_segment_ids", None)
+    dependency_ids = [value for value in (dependency_ids or ids)
+                      if isinstance(value, int) and not isinstance(value, bool)]
+    target_dependency_ids = {
+        value for value in (target_dependency_ids or ids)
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+    dependency_truth = []
+    paragraphs = state.get("paras") or []
+    for dependency_id in sorted(set(dependency_ids)):
+        pair = projected_pairs[dependency_id] if dependency_id < len(projected_pairs) \
+            and isinstance(projected_pairs[dependency_id], Mapping) else {}
+        uses_pair_source = dependency_id in ids or dependency_id in target_dependency_ids
+        source = str(pair.get("source") or (
+            paragraphs[dependency_id] if dependency_id < len(paragraphs) else "")) \
+            if uses_pair_source else str(
+                paragraphs[dependency_id] if dependency_id < len(paragraphs)
+                else pair.get("source") or "")
+        target_from_accepted = dependency_id not in ids \
+            and dependency_id in target_dependency_ids \
+            and bool(pair.get("accepted_target"))
+        target = (pair.get("accepted_target") or pair.get("target") or "") \
+            if target_from_accepted else str(pair.get("target") or "")
+        dependency_truth.append({
+            "segment_id": dependency_id,
+            "source": source,
+            "target": target if dependency_id in target_dependency_ids else None,
+            "target_checked": dependency_id in target_dependency_ids,
+            "target_from_accepted": target_from_accepted,
+            "source_from_paragraphs": not uses_pair_source,
+        })
+    packet = translation_core.build_review_packet(
         projection,
         segment_ids=ids,
         deterministic_checks=deterministic_checks or [],
-        context=review_context or {},
+        context=context_value,
         evidence=[],
         project_memory=memory,
     )
+    packet["dependency_segment_ids"] = sorted(set(dependency_ids))
+    packet["dependency_target_segment_ids"] = sorted(target_dependency_ids)
+    packet["dependency_truth"] = dependency_truth
+    return packet
 
 
 def _bound_evidence(result: Any) -> Any:
@@ -982,6 +1079,12 @@ def review_translation_batch_with_evidence(
             "glossary_hash": str(
                 (translation_core_packet.get("glossary") or {}).get(
                     "glossary_hash") or ""),
+            "dependency_segment_ids": list(
+                translation_core_packet.get("dependency_segment_ids") or []),
+            "dependency_target_segment_ids": list(
+                translation_core_packet.get("dependency_target_segment_ids") or []),
+            "dependency_truth": [dict(item) for item in
+                                 translation_core_packet.get("dependency_truth") or []],
         }
     latest_findings: List[Dict[str, Any]] = []
     evidence_by_key: Dict[str, Dict[str, Any]] = {}
