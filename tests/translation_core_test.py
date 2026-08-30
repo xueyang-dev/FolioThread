@@ -19,6 +19,7 @@ from transpraxis.translation_core import (
 from transpraxis.translation_evidence import (
     TranslationEvidenceIndex,
     build_runtime_review_packet,
+    record_runtime_human_decision,
     review_translation_batch_with_evidence,
 )
 
@@ -538,3 +539,53 @@ def test_packet_target_language_mismatch_fails_closed_before_llm():
 
     assert findings == [] and failed and not called
     assert trace["error"] == "Translation Core target language mismatch"
+
+
+def test_runtime_human_decision_uses_current_review_event_and_audits():
+    current = fingerprint({"target": "v1"})
+    finding = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=current)
+    finding["review_event_id"] = "review-1"
+    state = {
+        "findings": [finding],
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-1",
+            "segment_ids": [0], "decision": "findings",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+        "human_actions": [],
+    }
+
+    state, updated, decision = record_runtime_human_decision(
+        state, finding["finding_id"], "accept_resolution", "alice",
+        actor_type="human", note="verified",
+        decided_at="2026-08-30T12:00:00+00:00")
+
+    assert updated["status"] == "resolved" and updated["resolved"] is True
+    assert decision["decision"] == "accept_resolution"
+    assert decision["actor_type"] == "human" and decision["status"] == "current"
+    assert decision["input_fingerprint"] == current
+    assert state["human_actions"] == [decision]
+
+
+def test_runtime_human_decision_rejects_noncurrent_review_event():
+    current = fingerprint({"target": "v1"})
+    finding = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=current)
+    finding["review_event_id"] = "review-1"
+    state = {
+        "findings": [finding],
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-1",
+            "segment_ids": [0], "freshness_status": "stale",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+    }
+
+    with pytest.raises(ValueError, match="stale"):
+        record_runtime_human_decision(
+            state, finding["finding_id"], "dismiss", "alice", actor_type="human")

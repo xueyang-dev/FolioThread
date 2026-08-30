@@ -5305,13 +5305,102 @@ def bypass_freeze(job_id, frozen_by="user"):
 
 
 # ================= 交付状态与人工处理记录 =================
+def _translation_review_finding(state, finding_id):
+    """Resolve either the Core finding ID or the existing review-card ID."""
+    from transpraxis import delivery as _delivery
+    selector = str(finding_id or "")
+    return next((item for item in state.get("findings") or []
+                 if isinstance(item, dict) and (
+                     str(item.get("finding_id") or "") == selector
+                     or _delivery.finding_id(item) == selector)), None)
+
+
+def _promote_human_reviewed_segment(state, segment_id, actor):
+    """Promote one currently clean human-confirmed pair through existing TM truth."""
+    from transpraxis import delivery as _delivery
+    pairs = state.get("pairs") or []
+    if not isinstance(segment_id, int) or not 0 <= segment_id < len(pairs):
+        return
+    if any(_delivery._segment_index(item) == segment_id
+           for item in _delivery.unresolved_findings(state)):
+        return
+    pair = pairs[segment_id]
+    deterministic = check_translation_batch(
+        [str(pair.get("source") or "")], [str(pair.get("target") or "")],
+        state.get("glossary") or [], state.get("target_lang") or "简体中文")
+    if any(item.get("severity") in {"blocking", "actionable"}
+           for item in deterministic):
+        return
+    pair["reviewed"] = True
+    pair["review_status"] = "reviewed_human"
+    pair["accepted_target"] = pair.get("target") or ""
+    pair["target_provenance"] = "human_accepted"
+    pair["human_accepted"] = True
+    pair["accepted_by_human"] = actor
+    if state.get("use_tm", True) and _tm_eligible(pair.get("source"), pair.get("target")):
+        tm = load_tm()
+        tm[str(pair.get("source") or "")] = {
+            "target": str(pair.get("target") or ""), "reviewed": True,
+        }
+        save_tm(tm)
+
+
+def decide_translation_review_finding(
+    job_id, finding_id, decision, actor, *, actor_type, note="",
+):
+    """Apply one fail-closed Translation Core HumanDecision to persisted state."""
+    from transpraxis import delivery as _delivery
+    state = load_job_state(job_id)
+    if state is None:
+        raise ValueError(f"找不到任务 {job_id}")
+    finding = _translation_review_finding(state, finding_id)
+    if finding is None or not finding.get("finding_id"):
+        raise ValueError("finding has no Translation Core identity")
+    state, updated, record = _translation_evidence.record_runtime_human_decision(
+        state, finding["finding_id"], decision, actor, actor_type=actor_type,
+        note=note)
+    segment_id = updated.get("segment_id")
+    if decision in {"accept_resolution", "dismiss"}:
+        _promote_human_reviewed_segment(state, segment_id, actor)
+    _recount_reviewed_segments(state)
+    queue = _delivery.review_queue_findings(state)
+    stats = state.setdefault("review_stats", {})
+    for severity in ("blocking", "actionable", "informational"):
+        stats[severity] = sum(item.get("severity") == severity for item in queue)
+    state["has_blocking"] = bool(_delivery.unresolved_blocking(state))
+    state["delivery_status"] = _delivery.compute_delivery_status(state)
+    save_job_state(job_id, state)
+    return state, updated, record
+
+
 def mark_findings_resolved(job_id, finding_ids, action, note="", actor="user"):
-    """标记 findings 已人工处理，并重算交付状态。"""
+    """Legacy action surface; Core findings route through HumanDecision."""
     from transpraxis import delivery as _delivery
     state = load_job_state(job_id)
     if state is None:
         return None
-    state, _marked = _delivery.mark_findings(state, finding_ids, action, note, actor)
+    legacy_ids = []
+    mapped = {"human_fixed": "accept_resolution", "preserved": "dismiss"}
+    for selector in finding_ids or []:
+        finding = _translation_review_finding(state, selector)
+        if finding is not None and finding.get("finding_id") \
+                and finding.get("input_fingerprint"):
+            if action not in mapped:
+                raise ValueError(f"Translation Core finding 不支持旧 action：{action}")
+            state, updated, _record = \
+                _translation_evidence.record_runtime_human_decision(
+                    state, finding["finding_id"], mapped[action], actor,
+                    actor_type="human", note=note)
+            if mapped[action] in {"accept_resolution", "dismiss"}:
+                _promote_human_reviewed_segment(
+                    state, updated.get("segment_id"), actor)
+        else:
+            legacy_ids.append(selector)
+    if legacy_ids:
+        state, _marked = _delivery.mark_findings(
+            state, legacy_ids, action, note, actor)
+    _recount_reviewed_segments(state)
+    state["has_blocking"] = bool(_delivery.unresolved_blocking(state))
     state["delivery_status"] = _delivery.compute_delivery_status(state)
     save_job_state(job_id, state)
     return state

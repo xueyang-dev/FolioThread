@@ -617,3 +617,46 @@ def test_reviewer_suggested_candidate_blind_review_uses_core_packet(tmp_path):
         assert "猫坐着。" not in blind_prompts[0]
     finally:
         core.OUTPUT_DIR, core.call_llm = old_output, old_call
+
+
+def test_persisted_blocking_review_uses_translation_core_human_decision(tmp_path):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        current = models.stable_id("review-version", prefix="sha256")
+        finding = {
+            "finding_id": "f-current", "category": "omission", "code": "omission",
+            "severity": "blocking", "status": "open", "subject_id": "0",
+            "segment_id": 0, "segment_index": 0, "type": "review",
+            "requires_human_confirmation": True, "input_fingerprint": current,
+            "review_event_id": "review-current", "reason": "遗漏",
+        }
+        state = core.new_job_state("decision.docx")
+        state.update(
+            p1_done=True, p2_done=True, target_lang="简体中文", use_tm=True,
+            paras=["Complete source."], pairs=[{
+                "source": "Complete source.", "target": "完整译文。",
+                "reviewed": False, "review_status": "reviewed_with_findings",
+            }], findings=[finding], has_blocking=True,
+            review_evidence=[{
+                "phase": "formal_review", "review_event_id": "review-current",
+                "segment_ids": [0], "decision": "findings",
+                "translation_core": {"final_consumed_input_fingerprint": current},
+            }],
+        )
+        core.save_job_state("decision-runtime", state)
+
+        decided, updated, audit = core.decide_translation_review_finding(
+            "decision-runtime", "f-current", "accept_resolution", "alice",
+            actor_type="human", note="checked against source")
+
+        assert updated["status"] == "resolved" and updated["resolved"] is True
+        assert audit["decision"] == "accept_resolution"
+        assert audit["actor_type"] == "human" and audit["finding_id"] == "f-current"
+        assert decided["pairs"][0]["review_status"] == "reviewed_human"
+        assert decided["pairs"][0]["target_provenance"] == "human_accepted"
+        assert core.load_tm()["Complete source."]["target"] == "完整译文。"
+        reloaded = core.load_job_state("decision-runtime")
+        assert reloaded["human_actions"][-1]["decision_id"] == audit["decision_id"]
+    finally:
+        core.OUTPUT_DIR = old_output

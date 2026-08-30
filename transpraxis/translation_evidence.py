@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import models, terminology, translation_core
@@ -13,6 +14,99 @@ DIAGNOSTIC_FIELDS = (
     "category", "summary", "source_span", "target_span", "explanation",
     "recommendation", "confidence", "detector",
 )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _segment_id(value: Mapping[str, Any]) -> Optional[int]:
+    segment_id = value.get("segment_id")
+    if isinstance(segment_id, bool) or not isinstance(segment_id, int):
+        segment_id = value.get("segment_index")
+    return segment_id if isinstance(segment_id, int) and not isinstance(
+        segment_id, bool) else None
+
+
+def _review_segment_ids(event: Mapping[str, Any]) -> List[int]:
+    values = event.get("segment_ids") or (event.get("completion_receipt") or {}).get(
+        "reviewed_segment_ids") or []
+    return [value for value in values
+            if isinstance(value, int) and not isinstance(value, bool)]
+
+
+def _current_translation_review(event: Mapping[str, Any]) -> bool:
+    return event.get("review_scope") == "current_translation" or \
+        event.get("phase") == "formal_review"
+
+
+def current_review_event(
+    state: Mapping[str, Any], segment_id: int,
+) -> Optional[Dict[str, Any]]:
+    """Return the latest non-stale current-translation review for one segment."""
+    for event in reversed(state.get("review_evidence") or []):
+        if not isinstance(event, dict) or not _current_translation_review(event):
+            continue
+        if segment_id not in _review_segment_ids(event):
+            continue
+        if segment_id in set(event.get("stale_segment_ids") or []):
+            continue
+        if event.get("freshness_status") == "stale":
+            continue
+        return event
+    return None
+
+
+def record_runtime_human_decision(
+    state: Dict[str, Any], finding_id: str, decision: str, actor: str, *,
+    actor_type: str, note: str = "", decided_at: Optional[str] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """Apply Translation Core HumanDecision to the current persisted finding."""
+    finding = next((item for item in state.get("findings") or []
+                    if isinstance(item, dict)
+                    and str(item.get("finding_id") or "") == str(finding_id or "")), None)
+    if finding is None:
+        raise ValueError("finding has no current persisted record")
+    segment_id = _segment_id(finding)
+    if segment_id is None:
+        raise ValueError("finding has no global segment_id")
+    event = current_review_event(state, segment_id)
+    if event is None or event.get("review_event_id") != finding.get("review_event_id"):
+        raise ValueError("cannot decide a stale finding")
+    current_fingerprint = str(
+        (event.get("translation_core") or {}).get(
+            "final_consumed_input_fingerprint") or "")
+    if not current_fingerprint:
+        raise ValueError("current review has no input fingerprint")
+    updated, record = translation_core.record_human_decision(
+        finding, decision, actor, actor_type=actor_type,
+        current_fingerprint=current_fingerprint, note=note, decided_at=decided_at)
+    for old in state.get("human_actions") or []:
+        if isinstance(old, dict) and old.get("record_type") == "human_decision" \
+                and old.get("finding_id") == updated["finding_id"] \
+                and old.get("status") == "current":
+            old["status"] = "superseded"
+            old["superseded_by_decision_id"] = record["decision_id"]
+    updated["resolved"] = updated["status"] in {"resolved", "dismissed"}
+    if updated["resolved"]:
+        updated["resolution"] = {
+            "action": record["decision"], "note": record["note"],
+            "timestamp": record["decided_at"], "actor": record["actor"],
+            "decision_id": record["decision_id"],
+        }
+    else:
+        updated.pop("resolution", None)
+    finding.clear()
+    finding.update(updated)
+    audit = {
+        **record,
+        "record_type": "human_decision",
+        "action": record["decision"],
+        "timestamp": record["decided_at"],
+        "review_event_id": event.get("review_event_id"),
+    }
+    state.setdefault("human_actions", []).append(audit)
+    return state, finding, audit
 
 
 def _scoped_project_memory(
@@ -639,6 +733,14 @@ def review_translation_batch_with_evidence(
             "final_consumed_input_fingerprint": None,
             "translation_truth_fingerprint": translation_core_packet.get(
                 "translation_truth_fingerprint"),
+            "review_truth": [{
+                "segment_id": item.get("segment_id"),
+                "source": item.get("source"),
+                "target": item.get("target"),
+            } for item in translation_core_packet.get("translation_truth") or []],
+            "glossary_hash": str(
+                (translation_core_packet.get("glossary") or {}).get(
+                    "glossary_hash") or ""),
         }
     latest_findings: List[Dict[str, Any]] = []
     evidence_by_key: Dict[str, Dict[str, Any]] = {}
