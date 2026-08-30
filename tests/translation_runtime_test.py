@@ -497,3 +497,123 @@ def test_malformed_section_ranges_are_skipped_not_crashed():
             "start_segment": "unknown", "end_segment": 1,
         }])
     assert index.request("get_section_digest", segment_id=0) == {}
+
+
+def test_translate_stage_persists_translation_core_formal_review_provenance(tmp_path):
+    old_output, old_call = core.OUTPUT_DIR, core.call_llm
+    core.OUTPUT_DIR = tmp_path
+    try:
+        def llm(provider, key, model, system, user, temperature=0.1, **kwargs):
+            if "独立的翻译审校专家" in system:
+                return json.dumps({"findings": [{
+                    "segment_id": 0, "category": "semantic_accuracy",
+                    "severity": "blocking", "summary": "meaning problem",
+                    "explanation": "the meaning differs", "recommendation": "revise",
+                    "detector": "Semantic QA", "evidence_refs": [],
+                }], "evidence_requests": []})
+            if "学术翻译专家" in system:
+                return json.dumps(["这是完整译文。"])
+            return "[]"
+
+        core.call_llm = llm
+        state = core.new_job_state("formal-review.docx")
+        state["paras"] = ["A complete source sentence."]
+        result = core.translate_stage(
+            state, "formal-review-core", [], "p", "k", "m", "简体中文", "",
+            enable_review=True, use_tm=False,
+        )
+        finding = next(item for item in result["findings"]
+                       if item.get("type") == "review")
+        assert finding["finding_id"] and finding["status"] == "open"
+        assert finding["input_fingerprint"].startswith("sha256:")
+        assert finding["subject_id"] == "0"
+        assert finding["requires_human_confirmation"] is True
+        assert finding["review_event_id"].startswith("translation-review-")
+        trace = next(item for item in result["review_evidence"]
+                     if item.get("phase") == "formal_review")
+        assert trace["translation_core"]["packet_schema_version"] == \
+            "translation-core-review-packet-v1"
+        assert trace["translation_core"]["initial_input_fingerprint"] == \
+            trace["translation_core"]["final_consumed_input_fingerprint"]
+    finally:
+        core.OUTPUT_DIR, core.call_llm = old_output, old_call
+
+
+def test_deterministic_repair_shadow_review_uses_translation_core_packet(tmp_path):
+    old_output, old_call = core.OUTPUT_DIR, core.call_llm
+    core.OUTPUT_DIR = tmp_path
+    blind_prompts = []
+    try:
+        def llm(provider, key, model, system, user, temperature=0.1, **kwargs):
+            if "独立的翻译审校专家" in system:
+                if "这是盲审" in system:
+                    blind_prompts.append(system + user)
+                return "[]"
+            if "翻译流知识抽取器" in system:
+                return "[]"
+            if "学术翻译专家" in system:
+                return json.dumps([
+                    "值 %s 必须保留。" if "问题清单" in user else "值必须保留。"
+                ])
+            return "[]"
+
+        core.call_llm = llm
+        state = core.new_job_state("shadow-review.docx")
+        state["paras"] = ["Value %s must remain."]
+        result = core.translate_stage(
+            state, "shadow-review-core", [], "p", "k", "m", "简体中文", "",
+            enable_review=True, use_tm=False,
+        )
+        shadow = next(item for item in result["review_evidence"]
+                      if item.get("phase") == "shadow_repair")
+        formal = next(item for item in result["review_evidence"]
+                      if item.get("phase") == "formal_review")
+        assert shadow["translation_core"]["initial_input_fingerprint"]
+        assert shadow["translation_core"]["translation_truth_fingerprint"]
+        assert formal["translation_core"]["initial_input_fingerprint"]
+        assert result["pairs"][0]["target"] == "值 %s 必须保留。"
+        assert blind_prompts and "值 %s 必须保留。" in blind_prompts[0]
+        assert "值必须保留。" not in blind_prompts[0]
+    finally:
+        core.OUTPUT_DIR, core.call_llm = old_output, old_call
+
+
+def test_reviewer_suggested_candidate_blind_review_uses_core_packet(tmp_path):
+    old_output, old_call = core.OUTPUT_DIR, core.call_llm
+    core.OUTPUT_DIR = tmp_path
+    blind_prompts = []
+    try:
+        def llm(provider, key, model, system, user, temperature=0.1, **kwargs):
+            if "独立的翻译审校专家" in system:
+                if "这是盲审" in system:
+                    blind_prompts.append(system + user)
+                    return "[]"
+                return json.dumps({"findings": [{
+                    "segment_id": 0, "category": "naturalness",
+                    "severity": "actionable", "summary": "wording",
+                    "explanation": "could be more natural", "recommendation": "revise",
+                    "detector": "Semantic QA", "suggested_target": "猫咪坐着。",
+                    "evidence_refs": [],
+                }], "evidence_requests": []})
+            if "翻译流知识抽取器" in system:
+                return "[]"
+            if "学术翻译专家" in system:
+                return json.dumps(["猫坐着。"])
+            return "[]"
+
+        core.call_llm = llm
+        state = core.new_job_state("suggested-review.docx")
+        state["paras"] = ["The cat sits."]
+        result = core.translate_stage(
+            state, "suggested-review-core", [], "p", "k", "m", "简体中文", "",
+            enable_review=True, use_tm=False,
+        )
+        suggested = next(item for item in result["review_evidence"]
+                         if item.get("phase") == "suggested_shadow_review")
+        assert suggested["translation_core"]["initial_input_fingerprint"]
+        assert suggested["translation_core"]["final_consumed_input_fingerprint"]
+        assert result["pairs"][0]["target"] == "猫咪坐着。"
+        assert blind_prompts and "猫咪坐着。" in blind_prompts[0]
+        assert "猫坐着。" not in blind_prompts[0]
+    finally:
+        core.OUTPUT_DIR, core.call_llm = old_output, old_call

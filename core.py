@@ -1555,6 +1555,21 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
             style_rules=style_rules,
             entity_hints=entity_hints,
         )
+        review_context = {
+            "document_profile": document_profile or {},
+            "document_synopsis": document_synopsis,
+            "section_profile": section_profile or {},
+            "section_digest": section_digest or {},
+            "previous_source_context": list(ctx_prev),
+            "previous_target_context": [
+                dict(item) for item in previous_target
+                if item.get("level") in {"human_accepted", "reviewed", "tm_approved"}
+            ],
+            "next_source_context": list(ctx_next),
+            "target_language": target_lang,
+            "style_constraints": style_rules or "",
+            "advisory_terminology_context": glossary_text or "",
+        }
         state.setdefault("context_packet_log", []).append({
             "batch": bi,
             "offset": offset,
@@ -1674,6 +1689,16 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                             blind=True,
                             candidate_targets={offset + j: shadow_targets[j]
                                                for j in range(len(shadow_targets))})
+                        shadow_packet = _translation_evidence.build_runtime_review_packet(
+                            state, batch_pairs,
+                            list(range(offset, offset + len(batch_pairs))),
+                            glossary,
+                            deterministic_checks=shadow_findings,
+                            review_context=review_context,
+                            candidate_targets={offset + j: shadow_targets[j]
+                                               for j in range(len(shadow_targets))},
+                            blind=True,
+                        )
                         blind_findings, blind_failed, blind_trace = \
                             _translation_evidence.review_translation_batch_with_evidence(
                                 batch_sources, shadow_targets, glossary_text, style_rules,
@@ -1684,7 +1709,7 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                                 review_identity={
                                     "input_hash": overlay["input_hash"],
                                     "candidate_hash": overlay["candidate_hash"],
-                                })
+                                }, translation_core_packet=shadow_packet)
                         if blind_trace:
                             state.setdefault("review_evidence", []).append({
                                 "batch": bi, "phase": "shadow_repair", **blind_trace})
@@ -1721,12 +1746,19 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
             evidence_index = _translation_evidence_index(
                 paras, pairs, batch_pairs, glossary, document_profile,
                 document_synopsis, section_digests, findings_all)
+            formal_segment_ids = list(range(offset, offset + len(batch_pairs)))
+            formal_packet = _translation_evidence.build_runtime_review_packet(
+                state, batch_pairs, formal_segment_ids, glossary,
+                deterministic_checks=_globalize_batch_findings(findings, offset),
+                review_context=review_context,
+            )
             rfindings, failed, review_trace = \
                 _translation_evidence.review_translation_batch_with_evidence(
                     batch_sources, batch_targets, glossary_text, style_rules, target_lang,
                     reviewer_config["provider"], reviewer_config["api_key"],
                     reviewer_config["model"], evidence_index, call_llm=reviewer_call,
-                    segment_ids=list(range(offset, offset + len(batch_pairs))))
+                    segment_ids=formal_segment_ids,
+                    translation_core_packet=formal_packet)
             review_event_id = (
                 f"translation-review-{job_id}-{bi}-formal-"
                 f"{len(state.get('review_evidence') or [])}")
@@ -1756,6 +1788,7 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                     if idx is None:
                         continue
                     record = {
+                        **rf,
                         "segment_id": segment_id, "segment_index": segment_id,
                         "severity": sev, "type": "review",
                         "category": rf.get("category") or "semantic_accuracy",
@@ -1792,6 +1825,14 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                                     paras, pairs, batch_pairs, glossary, document_profile,
                                     document_synopsis, section_digests, findings_all,
                                     blind=True, candidate_targets={segment_id: suggested})
+                                suggested_packet = \
+                                    _translation_evidence.build_runtime_review_packet(
+                                        state, [batch_pairs[idx]], [segment_id], glossary,
+                                        deterministic_checks=recheck,
+                                        review_context=review_context,
+                                        candidate_targets={segment_id: suggested},
+                                        blind=True,
+                                    )
                                 blind_findings, blind_failed, blind_trace = \
                                     _translation_evidence.review_translation_batch_with_evidence(
                                         [batch_sources[idx]], [suggested], glossary_text,
@@ -1803,7 +1844,7 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                                         segment_ids=[segment_id], review_identity={
                                             "input_hash": overlay["input_hash"],
                                             "candidate_hash": overlay["candidate_hash"],
-                                        })
+                                        }, translation_core_packet=suggested_packet)
                             overlay = _repair.evaluate_overlay(
                                 overlay, recheck, blind_findings, blind_failed,
                                 review_identity=(blind_trace or {}).get("review_identity"))

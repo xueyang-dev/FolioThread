@@ -63,3 +63,6 @@ workflow, project adapters, repair loop, or `.localize-anything` state layout.
 The first phase deliberately does not call these contracts from the current
 translation runtime. Runtime adoption can happen incrementally after the new
 contracts are validated against existing state.
+
+The first runtime adoption slice is documented in
+[Translation Core review adoption](translation-core-review-adoption.md).
