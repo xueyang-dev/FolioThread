@@ -24,6 +24,7 @@ from transpraxis.translation_evidence import (
     record_runtime_human_decision,
     register_runtime_review_event,
     review_translation_batch_with_evidence,
+    translation_review_readiness,
 )
 
 
@@ -687,3 +688,115 @@ def test_runtime_review_supersession_is_segment_scoped():
     assert state["findings"][1]["status"] == "open"
     assert current_review_event(state, 0)["review_event_id"] == "review-b"
     assert current_review_event(state, 1)["review_event_id"] == "review-a"
+
+
+def test_current_clean_review_supersedes_stale_history_for_delivery():
+    current = fingerprint({"target": "v1"})
+    finding = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=current)
+    finding.update({"type": "review", "review_event_id": "review-a"})
+    state = {
+        "translation_core_review_required": True,
+        "pairs": [{"source": "source", "target": "target"}],
+        "findings": [finding],
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-a",
+            "segment_ids": [0], "decision": "findings",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+        "human_actions": [],
+    }
+    state, _, decision = record_runtime_human_decision(
+        state, finding["finding_id"], "accept_resolution", "alice",
+        actor_type="human", decided_at="2026-08-30T12:00:00+00:00")
+    mark_runtime_review_stale(
+        state, [0], "target changed", stale_at="2026-08-30T12:01:00+00:00")
+    assert translation_review_readiness(state)["status"] == "stale"
+
+    register_runtime_review_event(
+        state, {"decision": "clean", "completion_receipt": {"status": "completed"}},
+        [], "review-b", [0])
+    readiness = translation_review_readiness(state)
+
+    assert readiness["ready"] is True and readiness["status"] == "current"
+    assert state["findings"][0]["status"] == "stale"
+    assert state["findings"][0]["superseded_by_review_event_id"] == "review-b"
+    assert decision["status"] == "stale"
+    assert len(state["findings"]) == 1 and len(state["human_actions"]) == 1
+
+
+def test_required_review_distinguishes_not_run_failed_and_missing_decision():
+    state = {
+        "translation_core_review_required": True,
+        "pairs": [{"source": "source", "target": "target"}],
+    }
+    assert translation_review_readiness(state)["status"] == "not_run"
+    state["review_evidence"] = [{
+        "phase": "formal_review", "review_event_id": "failed-review",
+        "segment_ids": [0], "decision": "failed",
+        "completion_receipt": {"status": "failed"},
+    }]
+    assert translation_review_readiness(state)["status"] == "failed"
+
+    current = fingerprint({"target": "current"})
+    finding = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=current)
+    finding.update({"type": "review", "review_event_id": "current-review"})
+    state.update(
+        findings=[finding],
+        review_evidence=[{
+            "phase": "formal_review", "review_event_id": "current-review",
+            "segment_ids": [0], "decision": "findings",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+    )
+    readiness = translation_review_readiness(state)
+    assert readiness["status"] == "missing" and readiness["ready"] is False
+    assert readiness["blocking_finding_ids"] == [finding["finding_id"]]
+
+    legacy = {"pairs": state["pairs"], "findings": []}
+    assert translation_review_readiness(legacy)["status"] == "not_required"
+
+
+def test_human_decision_selects_current_version_of_stable_finding_id():
+    first_fingerprint = fingerprint({"target": "v1"})
+    first = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=first_fingerprint)
+    first.update({"type": "review", "review_event_id": "review-a"})
+    state = {
+        "findings": [first],
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-a",
+            "segment_ids": [0], "decision": "findings",
+            "translation_core": {
+                "final_consumed_input_fingerprint": first_fingerprint},
+        }],
+    }
+    mark_runtime_review_stale(state, [0], "target changed")
+
+    second_fingerprint = fingerprint({"target": "v2"})
+    second = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=second_fingerprint)
+    second.update({"type": "review", "review_event_id": "review-b"})
+    assert second["finding_id"] == first["finding_id"]
+    state["findings"].append(second)
+    register_runtime_review_event(
+        state, {
+            "decision": "findings",
+            "translation_core": {
+                "final_consumed_input_fingerprint": second_fingerprint},
+        }, [second], "review-b", [0])
+
+    _, updated, _ = record_runtime_human_decision(
+        state, second["finding_id"], "dismiss", "alice", actor_type="human")
+    assert state["findings"][0]["status"] == "stale"
+    assert updated is state["findings"][1]
+    assert updated["status"] == "dismissed"

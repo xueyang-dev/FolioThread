@@ -11,6 +11,7 @@ from transpraxis.translation_evidence import (
     TranslationEvidenceIndex,
     build_runtime_review_packet,
     review_translation_batch_with_evidence,
+    translation_review_readiness,
 )
 
 
@@ -619,6 +620,7 @@ def test_reviewer_suggested_candidate_blind_review_uses_core_packet(tmp_path):
         assert result["pairs"][0]["target"] == "猫咪坐着。"
         assert blind_prompts and "猫咪坐着。" in blind_prompts[0]
         assert "猫坐着。" not in blind_prompts[0]
+        assert translation_review_readiness(result)["status"] == "current"
     finally:
         core.OUTPUT_DIR, core.call_llm = old_output, old_call
 
@@ -695,5 +697,57 @@ def test_confirmed_style_rule_is_audited_and_reused_by_future_review(tmp_path):
         assert [item["rule"] for item in
                 after["project_memory"]["knowledge"]["style_rules"]] == [
                     "Use formal register."]
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def test_re_review_clean_supersedes_stale_decision_and_unblocks_delivery(tmp_path):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "review-supersession-runtime"
+        current = models.stable_id("review-a", prefix="sha256")
+        finding = {
+            "finding_id": "f-omission", "category": "omission", "code": "omission",
+            "severity": "blocking", "status": "open", "subject_id": "0",
+            "segment_id": 0, "segment_index": 0, "type": "review",
+            "requires_human_confirmation": True, "input_fingerprint": current,
+            "review_event_id": "review-a", "reason": "遗漏",
+        }
+        state = core.new_job_state("supersession.docx")
+        state.update(
+            p1_done=True, p2_done=True, report_enabled=False,
+            translation_core_review_required=True, target_lang="简体中文",
+            paras=["Complete source."], pairs=[{
+                "source": "Complete source.", "target": "旧译文。",
+                "reviewed": False, "review_status": "reviewed_with_findings",
+            }], findings=[finding], has_blocking=True,
+            review_evidence=[{
+                "phase": "formal_review", "review_event_id": "review-a",
+                "segment_ids": [0], "decision": "findings",
+                "translation_core": {"final_consumed_input_fingerprint": current},
+            }],
+        )
+        core.save_job_state(job_id, state)
+        core.decide_translation_review_finding(
+            job_id, "f-omission", "accept_resolution", "alice",
+            actor_type="human", note="fix confirmed")
+        edited = core.save_translation_edit(job_id, 0, "修订后的完整译文。")
+        assert translation_review_readiness(edited)["status"] == "stale"
+
+        refreshed, result = core.review_translation_segments(
+            job_id, [0], "p", "k", "m", "简体中文",
+            call_llm_fn=lambda *args, **kwargs: json.dumps({
+                "findings": [], "evidence_requests": []}),
+        )
+
+        assert result == {"reviewed_segment_ids": [0], "failed_segment_ids": []}
+        assert translation_review_readiness(refreshed)["status"] == "current"
+        old = next(item for item in refreshed["findings"]
+                   if item.get("finding_id") == "f-omission")
+        assert old["status"] == "stale" and old["superseded_by_review_event_id"]
+        assert refreshed["human_actions"][0]["status"] == "stale"
+        approved, ok, errors = delivery.approve_delivery(refreshed)
+        assert ok and not errors and approved["delivery_status"] == "final"
     finally:
         core.OUTPUT_DIR = old_output

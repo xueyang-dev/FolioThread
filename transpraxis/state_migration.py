@@ -47,6 +47,7 @@ def _default_new_fields() -> Dict[str, Any]:
         "entity_registry": [],
         "translation_failures": [],
         "review_evidence": [],
+        "translation_core_review_required": False,
         "repair_overlays": [],
         "tm_recovered_count": 0,
         "auto_term_entries": [],

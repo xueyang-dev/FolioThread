@@ -4633,6 +4633,15 @@ def _render_workspace_review(job_id, state):
         action_a, action_b, action_c = st.columns(3)
         if action_a.button("接受建议" if suggested_target else "标记已处理",
                           type="primary", key=f"workspace_review_fix_{selected_id}", width="stretch"):
+            core_finding_id = str(raw_selected.get("finding_id") or "")
+            core_finding = bool(core_finding_id and raw_selected.get("input_fingerprint"))
+            if core_finding:
+                core.decide_translation_review_finding(
+                    job_id, core_finding_id,
+                    "request_revision" if suggested_target else "accept_resolution",
+                    "user", actor_type="human",
+                    note=note or ("接受审校建议并请求修订" if suggested_target
+                                  else "人工核对后确认已处理"))
             if suggested_target and selected.get("segment_index") is not None:
                 latest = core.load_job_state(job_id) or state
                 index = selected["segment_index"]
@@ -4644,18 +4653,34 @@ def _render_workspace_review(job_id, state):
                     # scope, TM trust and final approval are handled together.
                     core.save_translation_edit(
                         job_id, index, suggested_target, actor="reviewer")
-            core.mark_findings_resolved(job_id, [selected_id], "human_fixed",
-                                        note or ("接受审校建议" if suggested_target else "人工核对后确认已处理"))
+                    if latest.get("translation_core_review_required") and api_key:
+                        core.review_translation_segments(
+                            job_id, [index], ai_provider, api_key, ai_model,
+                            target_lang, style_rules=style_rules)
+            if not core_finding:
+                core.mark_findings_resolved(
+                    job_id, [selected_id], "human_fixed",
+                    note or ("接受审校建议" if suggested_target else "人工核对后确认已处理"))
             st.rerun()
         can_retranslate = bool(api_key and selected.get("segment_index") is not None)
         if action_b.button("重新翻译", disabled=not can_retranslate, key=f"workspace_review_retranslate_{selected_id}", width="stretch"):
+            if raw_selected.get("finding_id") and raw_selected.get("input_fingerprint"):
+                core.decide_translation_review_finding(
+                    job_id, raw_selected["finding_id"], "request_revision", "user",
+                    actor_type="human", note=note or "请求重新翻译并复审")
             core.retranslate_segments(job_id, [selected["segment_index"]], ai_provider, api_key, ai_model,
                                        target_lang, style_rules=style_rules,
                                        on_caption=lambda text: st.caption(text))
             st.rerun()
         if action_c.button("保留当前译文", disabled=not selected.get("proper_noun_candidate"),
                           key=f"workspace_review_preserve_{selected_id}", width="stretch"):
-            core.mark_findings_resolved(job_id, [selected_id], "preserved", note or "人工确认保留当前译文")
+            if raw_selected.get("finding_id") and raw_selected.get("input_fingerprint"):
+                core.decide_translation_review_finding(
+                    job_id, raw_selected["finding_id"], "dismiss", "user",
+                    actor_type="human", note=note or "人工确认保留当前译文")
+            else:
+                core.mark_findings_resolved(
+                    job_id, [selected_id], "preserved", note or "人工确认保留当前译文")
             st.rerun()
         if not can_retranslate:
             st.caption("重新翻译需要已配置 API Key。")

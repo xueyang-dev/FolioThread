@@ -123,6 +123,34 @@ def mark_runtime_review_stale(
     }
 
 
+def reconcile_runtime_review_truth(state: Dict[str, Any]) -> Dict[str, int]:
+    """Detect source/target changes even when state was edited outside core helpers."""
+    stale_ids = set()
+    pairs = state.get("pairs") or []
+    for event in state.get("review_evidence") or []:
+        if not isinstance(event, dict) or not _current_translation_review(event) \
+                or event.get("freshness_status") == "stale":
+            continue
+        for truth in (event.get("translation_core") or {}).get("review_truth") or []:
+            if not isinstance(truth, Mapping):
+                continue
+            segment_id = truth.get("segment_id")
+            if isinstance(segment_id, bool) or not isinstance(segment_id, int) \
+                    or not 0 <= segment_id < len(pairs):
+                stale_ids.add(segment_id)
+                continue
+            pair = pairs[segment_id]
+            if str(pair.get("source") or "") != str(truth.get("source") or "") \
+                    or str(pair.get("target") or "") != str(truth.get("target") or ""):
+                stale_ids.add(segment_id)
+    valid_ids = [value for value in stale_ids
+                 if isinstance(value, int) and not isinstance(value, bool)]
+    if not valid_ids:
+        return {"events": 0, "findings": 0, "decisions": 0}
+    return mark_runtime_review_stale(
+        state, valid_ids, "persisted translation truth changed after review")
+
+
 def register_runtime_review_event(
     state: Dict[str, Any], event: Dict[str, Any],
     findings: Sequence[Dict[str, Any]], review_event_id: str,
@@ -151,14 +179,111 @@ def register_runtime_review_event(
     return event
 
 
+def translation_review_readiness(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """Evaluate only current required review state; history remains audit-only."""
+    required = bool(state.get("translation_core_review_required"))
+    expected = list(range(len(state.get("pairs") or [])))
+    base = {
+        "required": required,
+        "expected_segment_ids": expected,
+        "current_segment_ids": [],
+        "stale_segment_ids": [],
+        "missing_segment_ids": [],
+        "failed_segment_ids": [],
+        "blocking_finding_ids": [],
+        "decision_errors": [],
+    }
+    if not required:
+        return {**base, "ready": True, "status": "not_required"}
+
+    events = [event for event in state.get("review_evidence") or []
+              if isinstance(event, Mapping) and _current_translation_review(event)]
+    stale_ids, missing_ids, failed_ids, current_ids = [], [], [], []
+    current_events: Dict[int, Dict[str, Any]] = {}
+    for segment_id in expected:
+        event = current_review_event(state, segment_id)
+        if event is None:
+            historical = [item for item in events
+                          if segment_id in _review_segment_ids(item)]
+            (stale_ids if historical else missing_ids).append(segment_id)
+            continue
+        current_events[segment_id] = event
+        receipt = event.get("completion_receipt") or {}
+        if event.get("decision") == "failed" or receipt.get("status") == "failed":
+            failed_ids.append(segment_id)
+        else:
+            current_ids.append(segment_id)
+
+    blocking_ids, decision_errors = [], []
+    actions = state.get("human_actions") or []
+    for finding in state.get("findings") or []:
+        if not isinstance(finding, Mapping) or finding.get("type") != "review" \
+                or finding.get("severity") != "blocking" \
+                or not finding.get("requires_human_confirmation"):
+            continue
+        segment_id = _segment_id(finding)
+        event = current_events.get(segment_id)
+        if event is None or event.get("review_event_id") != finding.get(
+                "review_event_id"):
+            continue
+        finding_id = str(finding.get("finding_id") or "")
+        status = str(finding.get("status") or "open")
+        if status == "open":
+            blocking_ids.append(finding_id)
+            decision_errors.append({"finding_id": finding_id, "status": "missing"})
+            continue
+        if status not in {"resolved", "dismissed"}:
+            blocking_ids.append(finding_id)
+            decision_errors.append({"finding_id": finding_id, "status": "stale"})
+            continue
+        decision_id = str(finding.get("latest_decision_id") or "")
+        decision = next((item for item in reversed(actions)
+                         if isinstance(item, Mapping)
+                         and item.get("decision_id") == decision_id), None)
+        if decision is None:
+            blocking_ids.append(finding_id)
+            decision_errors.append({"finding_id": finding_id, "status": "missing"})
+        elif decision.get("status") != "current" \
+                or decision.get("actor_type") != "human" \
+                or decision.get("input_fingerprint") != finding.get("input_fingerprint"):
+            blocking_ids.append(finding_id)
+            decision_errors.append({"finding_id": finding_id, "status": "stale"})
+
+    base.update({
+        "current_segment_ids": current_ids,
+        "stale_segment_ids": stale_ids,
+        "missing_segment_ids": missing_ids,
+        "failed_segment_ids": failed_ids,
+        "blocking_finding_ids": blocking_ids,
+        "decision_errors": decision_errors,
+    })
+    if failed_ids:
+        status = "failed"
+    elif stale_ids or any(item["status"] == "stale" for item in decision_errors):
+        status = "stale"
+    elif blocking_ids or (missing_ids and current_ids):
+        status = "missing"
+    elif missing_ids:
+        status = "not_run" if not events else "missing"
+    else:
+        status = "current"
+    return {**base, "ready": status == "current", "status": status}
+
+
 def record_runtime_human_decision(
     state: Dict[str, Any], finding_id: str, decision: str, actor: str, *,
     actor_type: str, note: str = "", decided_at: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """Apply Translation Core HumanDecision to the current persisted finding."""
-    finding = next((item for item in state.get("findings") or []
-                    if isinstance(item, dict)
-                    and str(item.get("finding_id") or "") == str(finding_id or "")), None)
+    candidates = [item for item in state.get("findings") or []
+                  if isinstance(item, dict)
+                  and str(item.get("finding_id") or "") == str(finding_id or "")]
+    finding = next((item for item in reversed(candidates)
+                    if _segment_id(item) is not None
+                    and (current_review_event(state, _segment_id(item)) or {}).get(
+                        "review_event_id") == item.get("review_event_id")), None)
+    if finding is None and candidates:
+        finding = candidates[-1]
     if finding is None:
         raise ValueError("finding has no current persisted record")
     segment_id = _segment_id(finding)

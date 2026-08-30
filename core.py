@@ -897,6 +897,57 @@ def _translation_evidence_index(
         blind=blind, candidate_targets=candidate_targets)
 
 
+def _review_finding_record(finding, review_event_id):
+    """Project a Translation Core finding onto the existing persisted surface."""
+    segment_id = finding.get("segment_id")
+    severity = finding.get("severity")
+    return {
+        **finding,
+        "segment_id": segment_id, "segment_index": segment_id,
+        "severity": severity, "type": "review",
+        "category": finding.get("category") or "semantic_accuracy",
+        "summary": str(finding.get("summary") or finding.get("reason") or
+                       "审校发现问题"),
+        "source_span": finding.get("source_span"),
+        "target_span": finding.get("target_span"),
+        "explanation": finding.get("explanation"),
+        "recommendation": finding.get("recommendation"),
+        "confidence": finding.get("confidence"),
+        "detector": finding.get("detector") or "Semantic QA",
+        "diagnostic_version": finding.get("diagnostic_version"),
+        "reason": str(finding.get("reason") or finding.get("summary") or
+                      "审校发现问题"),
+        "evidence_refs": list(finding.get("evidence_refs") or []),
+        "review_event_id": review_event_id,
+    }
+
+
+def _runtime_review_context(
+    state, offset, batch_len, glossary_text, style_rules, target_lang,
+):
+    paras = state.get("paras") or []
+    pairs = state.get("pairs") or []
+    profile = state.get("document_profile") or {}
+    digests = state.get("section_digests") or []
+    previous_target = _context.select_target_context(pairs, offset, limit=2)
+    return {
+        "document_profile": profile,
+        "document_synopsis": state.get("document_synopsis") or {},
+        "section_profile": _batch_section_profile(profile, offset, batch_len) or {},
+        "section_digest": _context.digest_for_segment(digests, offset) or {},
+        "previous_source_context": list(paras[max(0, offset - 2):offset]),
+        "previous_target_context": [
+            dict(item) for item in previous_target
+            if item.get("level") in {"human_accepted", "reviewed", "tm_approved"}
+        ],
+        "next_source_context": list(
+            paras[offset + batch_len:offset + batch_len + 2]),
+        "target_language": target_lang,
+        "style_constraints": style_rules or "",
+        "advisory_terminology_context": glossary_text or "",
+    }
+
+
 def _batch_section_profile(document_profile, offset, batch_len):
     """按全局段区间匹配 section profile（用于相关术语的 section:<id> scope）。"""
     if not document_profile:
@@ -1402,6 +1453,7 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
     - 独立审校：actionable 建议经确定性复验后应用，blocking 记录给用户确认；
     - 翻译记忆：仅审校通过的段落入库，精确命中直接复用。
     """
+    state["translation_core_review_required"] = bool(enable_review)
     # 严格术语治理门禁：存在待审核候选术语且未冻结（且未显式跳过）时，
     # 任何入口都禁止开始翻译。导入的锁定术语视为已固定，不构成阻塞。
     pending = [e for e in (glossary or [])
@@ -1787,23 +1839,7 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                     idx = global_to_local.get(segment_id)
                     if idx is None:
                         continue
-                    record = {
-                        **rf,
-                        "segment_id": segment_id, "segment_index": segment_id,
-                        "severity": sev, "type": "review",
-                        "category": rf.get("category") or "semantic_accuracy",
-                        "summary": str(rf.get("summary") or rf.get("reason") or "审校发现问题"),
-                        "source_span": rf.get("source_span"),
-                        "target_span": rf.get("target_span"),
-                        "explanation": rf.get("explanation"),
-                        "recommendation": rf.get("recommendation"),
-                        "confidence": rf.get("confidence"),
-                        "detector": rf.get("detector") or "Semantic QA",
-                        "diagnostic_version": rf.get("diagnostic_version"),
-                        "reason": str(rf.get("reason") or rf.get("summary") or "审校发现问题"),
-                        "evidence_refs": list(rf.get("evidence_refs") or []),
-                        "review_event_id": review_event_id,
-                    }
+                    record = _review_finding_record(rf, review_event_id)
                     if sev == "actionable" and rf.get("suggested_target") \
                             and not batch_pairs[idx]["from_tm"]:
                         suggested = clean_xml_chars(rf["suggested_target"]).replace('\n', ' ').strip()
@@ -4150,12 +4186,14 @@ def load_job_state(job_id):
         return None
     from transpraxis import delivery as _delivery
     state = _delivery.normalize_state_findings(_state_migration.migrate_state(raw))
+    _translation_evidence.reconcile_runtime_review_truth(state)
     return _reconcile_final_delivery_snapshot(job_id, state)
 
 
 def save_job_state(job_id, state):
     """原子写入（先写临时文件再替换），避免中断写坏 state.json。"""
     from transpraxis import delivery as _delivery
+    _translation_evidence.reconcile_runtime_review_truth(state)
     _delivery.normalize_state_findings(state)
     _reconcile_final_delivery_snapshot(job_id, state)
     d = job_dir(job_id)
@@ -5433,10 +5471,16 @@ def _translation_review_finding(state, finding_id):
     """Resolve either the Core finding ID or the existing review-card ID."""
     from transpraxis import delivery as _delivery
     selector = str(finding_id or "")
-    return next((item for item in state.get("findings") or []
-                 if isinstance(item, dict) and (
-                     str(item.get("finding_id") or "") == selector
-                     or _delivery.finding_id(item) == selector)), None)
+    candidates = [item for item in state.get("findings") or []
+                  if isinstance(item, dict) and (
+                      str(item.get("finding_id") or "") == selector
+                      or _delivery.finding_id(item) == selector)]
+    return next((item for item in reversed(candidates)
+                 if isinstance(item.get("segment_id"), int)
+                 and (_translation_evidence.current_review_event(
+                     state, item["segment_id"]) or {}).get(
+                         "review_event_id") == item.get("review_event_id")),
+                candidates[-1] if candidates else None)
 
 
 def _promote_human_reviewed_segment(state, segment_id, actor):
@@ -5495,6 +5539,109 @@ def decide_translation_review_finding(
     state["delivery_status"] = _delivery.compute_delivery_status(state)
     save_job_state(job_id, state)
     return state, updated, record
+
+
+def review_translation_segments(
+    job_id, indexes, provider, api_key, model, target_lang, *, style_rules="",
+    call_llm_fn=None,
+):
+    """Run the existing independent reviewer on current persisted segments."""
+    from transpraxis import delivery as _delivery
+    from transpraxis.terminology import (
+        glossary_block as _glossary_block,
+        select_glossary_for_segments as _select_glossary,
+    )
+    state = load_job_state(job_id)
+    if state is None:
+        raise ValueError(f"找不到任务 {job_id}")
+    pairs = state.get("pairs") or []
+    segment_ids = sorted({int(index) for index in indexes
+                          if str(index).lstrip("-").isdigit()
+                          and 0 <= int(index) < len(pairs)})
+    if not segment_ids:
+        return state, {"reviewed_segment_ids": [], "failed_segment_ids": []}
+    glossary = normalize_glossary(
+        state.get("glossary") or (state.get("glossary_frozen") or {}).get(
+            "entries") or [])
+    reviewed, failed_ids = [], []
+    tm = load_tm() if state.get("use_tm", True) else {}
+    tm_changed = False
+    for segment_id in segment_ids:
+        pair = pairs[segment_id]
+        source = str(pair.get("source") or "")
+        target = str(pair.get("target") or "")
+        section_profile = _batch_section_profile(
+            state.get("document_profile"), segment_id, 1)
+        selected, _ = _select_glossary(
+            [source], glossary + _knowledge.provisional_hints(
+                state.get("knowledge_candidates") or [],
+                authoritative_entries=glossary),
+            state.get("document_profile"), section_profile)
+        glossary_text = _glossary_block(selected)
+        deterministic = _globalize_batch_findings(check_translation_batch(
+            [source], [target], glossary, target_lang,
+            section_profile=section_profile), segment_id)
+        review_context = _runtime_review_context(
+            state, segment_id, 1, glossary_text, style_rules, target_lang)
+        packet = _translation_evidence.build_runtime_review_packet(
+            state, [pair], [segment_id], glossary,
+            deterministic_checks=deterministic, review_context=review_context)
+        evidence_index = _translation_evidence.TranslationEvidenceIndex(
+            state.get("paras") or [item.get("source") or "" for item in pairs],
+            pairs, glossary, state.get("document_profile"),
+            state.get("document_synopsis"), state.get("section_digests"),
+            state.get("findings"))
+        findings, failed, trace = \
+            _translation_evidence.review_translation_batch_with_evidence(
+                [source], [target], glossary_text, style_rules, target_lang,
+                provider, api_key, model, evidence_index,
+                call_llm=call_llm_fn or call_llm, segment_ids=[segment_id],
+                translation_core_packet=packet)
+        event_id = (
+            f"translation-review-{job_id}-refresh-{segment_id}-"
+            f"{len(state.get('review_evidence') or [])}")
+        records = [_review_finding_record(item, event_id) for item in findings]
+        state.setdefault("findings", []).extend(records)
+        _translation_evidence.register_runtime_review_event(
+            state, trace, records, event_id, [segment_id])
+        if failed:
+            failed_ids.append(segment_id)
+            pair["reviewed"] = False
+            pair["review_status"] = "review_failed"
+        elif not any(item.get("severity") in {"blocking", "actionable"}
+                     for item in [*deterministic, *records]):
+            reviewed.append(segment_id)
+            pair["reviewed"] = True
+            pair["review_status"] = "reviewed_clean"
+            pair["accepted_target"] = target
+            pair["target_provenance"] = "reviewed"
+            if state.get("use_tm", True) and _tm_eligible(source, target):
+                tm[source] = {"target": target, "reviewed": True}
+                tm_changed = True
+        else:
+            pair["reviewed"] = False
+            pair["review_status"] = "reviewed_with_findings"
+        _checkpoint.append_event(job_dir(job_id), {
+            "phase": "semantic_review_done", "segment_ids": [segment_id],
+            "refresh": True, "failed": failed,
+        })
+    if tm_changed:
+        save_tm(tm)
+    _recount_reviewed_segments(state)
+    queue = _delivery.review_queue_findings(state)
+    stats = state.setdefault("review_stats", {})
+    for severity in ("blocking", "actionable", "informational"):
+        stats[severity] = sum(item.get("severity") == severity for item in queue)
+    stats["review_failed"] = sum(
+        item.get("decision") == "failed" and _translation_evidence._current_translation_review(
+            item) for item in state.get("review_evidence") or [] if isinstance(item, dict))
+    state["has_blocking"] = bool(_delivery.unresolved_blocking(state))
+    state["delivery_status"] = _delivery.compute_delivery_status(state)
+    save_job_state(job_id, state)
+    return state, {
+        "reviewed_segment_ids": reviewed,
+        "failed_segment_ids": failed_ids,
+    }
 
 
 def mark_findings_resolved(job_id, finding_ids, action, note="", actor="user"):
@@ -5638,9 +5785,14 @@ def retranslate_segments(job_id, indexes, provider, api_key, model, target_lang,
                          on_caption=None, actor="user"):
     """定点重译（抽取自 scripts/fix_segments.py 的能力）。"""
     from transpraxis import delivery as _delivery
-    return _delivery.retranslate_segments(
+    state, fixed = _delivery.retranslate_segments(
         job_id, indexes, provider, api_key, model, target_lang,
         style_rules, glossary, on_status, on_caption, actor)
+    if fixed and state.get("translation_core_review_required"):
+        state, _ = review_translation_segments(
+            job_id, fixed, provider, api_key, model, target_lang,
+            style_rules=style_rules)
+    return state, fixed
 
 
 def delivery_status_label(state):
@@ -5772,6 +5924,10 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
     state = load_job_state(job_id) or base
     state = {**base, **state}  # 兼容旧版本状态缺字段
     state = _state_migration.migrate_state(state)
+    previous_target_lang = str(state.get("target_lang") or "")
+    previous_style_rules = str(state.get("style_rules") or "")
+    review_required = bool(state.get("translation_core_review_required")) \
+        if state.get("p2_done") else bool(enable_review)
     saved_understanding = (state.get("pipeline_config") or {}).get(
         "enable_understanding")
     if mode is not None:
@@ -5809,9 +5965,17 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
         style_rules=style_rules, enable_review=bool(enable_review),
         enable_annotate=bool(enable_annotate), use_tm=bool(use_tm),
         provider=provider, model=model,
+        translation_core_review_required=review_required,
         translator_config=_model_roles.public_role_config(translator_config),
         reviewer_config=_model_roles.public_role_config(reviewer_config),
     )
+    if state.get("p2_done") and review_required and (
+            previous_target_lang != str(target_lang or "")
+            or previous_style_rules != str(style_rules or "")):
+        _invalidate_translation_reviews(
+            state, list(range(len(state.get("pairs") or []))),
+            "target language or style review context changed")
+        _invalidate_final_delivery_state(state)
     if delivery_config is not None:
         state["delivery_config"] = normalize_delivery_config(
             delivery_config, enable_report=enable_report,
@@ -6025,8 +6189,8 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
                         reviewer_config=reviewer_config,
                         on_status=on_status, on_caption=on_caption)
         state["p2_done"] = True
-        state["delivery_status"] = "review_required" if state.get("has_blocking") \
-            else "draft"
+        from transpraxis import delivery as _delivery
+        state["delivery_status"] = _delivery.compute_delivery_status(state)
         save_job_state(job_id, state)
 
     # ---------------- 阶段 2.5：三色自动标注 ----------------
