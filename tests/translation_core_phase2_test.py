@@ -3,6 +3,7 @@ from copy import deepcopy
 
 import core
 from transpraxis import models
+from transpraxis import delivery
 from transpraxis.translation_core import (
     fingerprint,
     normalize_finding,
@@ -105,6 +106,99 @@ def test_document_profile_change_stales_current_review_context(tmp_path):
         core.OUTPUT_DIR = old_output
 
 
+def test_batch_dependency_change_stales_the_whole_shared_review_event(tmp_path):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "phase2-batch-dependency-stale"
+        current = fingerprint({"batch": "v1"})
+        findings = []
+        for segment_id in (0, 1):
+            item = normalize_finding({
+                "category": "omission", "severity": "blocking", "status": "open",
+                "segment_id": segment_id, "requires_human_confirmation": True,
+            }, input_fingerprint=current)
+            item.update({"type": "review", "segment_index": segment_id,
+                         "review_event_id": "review-batch"})
+            findings.append(item)
+        state = core.new_job_state("batch-dependency.docx")
+        state.update(
+            _review_state(), p1_done=True, p2_done=True, paras=["A", "B"],
+            pairs=[{"source": "A", "target": "甲"},
+                   {"source": "B", "target": "乙"}],
+            findings=findings,
+            review_evidence=[{
+                "phase": "formal_review", "review_event_id": "review-batch",
+                "segment_ids": [0, 1], "freshness_status": "current",
+                "decision": "findings",
+                "dependency_segment_ids": [0, 1],
+                "translation_core": {
+                    "final_consumed_input_fingerprint": current,
+                    "dependency_segment_ids": [0, 1],
+                    "dependency_truth": [
+                        {"segment_id": 0, "source": "A", "target": "甲",
+                         "target_checked": True},
+                        {"segment_id": 1, "source": "B", "target": "乙",
+                         "target_checked": True},
+                    ],
+                },
+            }],
+        )
+        core.save_job_state(job_id, state)
+        changed = core.load_job_state(job_id)
+        changed["pairs"][0]["target"] = "改后的甲"
+        core.save_job_state(job_id, changed)
+
+        loaded = core.load_job_state(job_id)
+        event = loaded["review_evidence"][0]
+        assert event["freshness_status"] == "stale"
+        assert event["stale_segment_ids"] == [0, 1]
+        assert {item["status"] for item in loaded["findings"]} == {"stale"}
+        assert translation_review_readiness(loaded)["status"] == "stale"
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def test_previous_accepted_target_dependency_stales_following_review(tmp_path):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "phase2-previous-target-stale"
+        current = fingerprint({"segment": 1, "target": "乙"})
+        state = core.new_job_state("previous-target.docx")
+        state.update(
+            p1_done=True, p2_done=True, paras=["A", "B"],
+            pairs=[{"source": "A", "target": "甲", "reviewed": True,
+                     "human_accepted": True, "accepted_target": "甲"},
+                   {"source": "B", "target": "乙", "reviewed": True}],
+            review_evidence=[{
+                "phase": "formal_review", "review_event_id": "review-following",
+                "segment_ids": [1], "freshness_status": "current", "decision": "clean",
+                "dependency_segment_ids": [0, 1],
+                "translation_core": {
+                    "final_consumed_input_fingerprint": current,
+                    "dependency_segment_ids": [0, 1],
+                    "dependency_truth": [
+                        {"segment_id": 0, "source": "A", "target": "甲",
+                         "target_checked": True, "target_from_accepted": True},
+                        {"segment_id": 1, "source": "B", "target": "乙",
+                         "target_checked": True},
+                    ],
+                },
+            }],
+        )
+        core.save_job_state(job_id, state)
+        changed = core.load_job_state(job_id)
+        changed["pairs"][0]["accepted_target"] = "改后的甲"
+        core.save_job_state(job_id, changed)
+
+        loaded = core.load_job_state(job_id)
+        assert loaded["review_evidence"][0]["freshness_status"] == "stale"
+        assert loaded["review_evidence"][0]["stale_segment_ids"] == [1]
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
 def test_locked_glossary_change_stales_review_and_pair(tmp_path):
     old_output = core.OUTPUT_DIR
     core.OUTPUT_DIR = tmp_path
@@ -136,6 +230,52 @@ def test_locked_glossary_change_stales_review_and_pair(tmp_path):
         core.OUTPUT_DIR = old_output
 
 
+def test_unrelated_glossary_change_stales_full_hash_review_event_without_pair_mark(tmp_path):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "phase2-unrelated-glossary-stale"
+        old_entry = models.normalize_glossary_entry({
+            "source": "Source term", "target": "术语", "preferred": "术语",
+            "status": "locked", "behavior": "translate", "scope": "document",
+        })
+        old_hash = models.glossary_hash([old_entry])
+        current = fingerprint({"review": "glossary-v1"})
+        state = core.new_job_state("unrelated-glossary.docx")
+        state.update(
+            p1_done=True, p2_done=True, paras=["Unrelated source."],
+            pairs=[{"source": "Unrelated source.", "target": "无关译文",
+                     "reviewed": True, "glossary_hash_used": old_hash,
+                     "glossary_entry_ids": []}],
+            glossary=[old_entry],
+            glossary_frozen={"version": 1, "entries": [old_entry],
+                             "glossary_hash": old_hash},
+            glossary_versions=[{"version": 1, "entries": [old_entry],
+                                "glossary_hash": old_hash}],
+            review_evidence=[{
+                "phase": "formal_review", "review_event_id": "review-glossary",
+                "segment_ids": [0], "freshness_status": "current", "decision": "clean",
+                "translation_core": {
+                    "final_consumed_input_fingerprint": current,
+                    "glossary_hash": old_hash,
+                    "review_truth": [{"segment_id": 0, "source": "Unrelated source.",
+                                      "target": "无关译文"}],
+                },
+            }],
+        )
+        core.save_job_state(job_id, state)
+        changed = core.freeze_glossary(job_id, entries=[old_entry, {
+            "source": "Other term", "target": "其他术语", "preferred": "其他术语",
+            "status": "locked", "behavior": "translate", "scope": "document",
+        }], frozen_by="alice")
+
+        assert changed["review_evidence"][0]["freshness_status"] == "stale"
+        assert changed["pairs"][0].get("stale_due_to_glossary") is not True
+        assert changed["pairs"][0]["reviewed"] is True
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
 def test_explicit_style_promotion_does_not_invalidate_its_source_decision(tmp_path):
     old_output = core.OUTPUT_DIR
     core.OUTPUT_DIR = tmp_path
@@ -162,6 +302,22 @@ def test_explicit_style_promotion_does_not_invalidate_its_source_decision(tmp_pa
             "Use formal register."]
     finally:
         core.OUTPUT_DIR = old_output
+
+
+def test_current_review_risk_acceptance_remains_current_for_readiness():
+    state = _review_state()
+    state["p2_done"] = True
+    approved, ok, errors = delivery.approve_delivery(
+        state, note="document-level risk accepted", actor="alice",
+        accept_blocking=True)
+
+    assert ok and not errors and approved["delivery_status"] == "final"
+    assert approved["findings"][0]["status"] == "open"
+    assert approved["findings"][0]["resolved"] is True
+    assert translation_review_readiness(approved)["status"] == "current"
+    risk = approved["human_actions"][0]
+    assert risk["record_type"] == "delivery_risk_acceptance"
+    assert risk["input_fingerprint"] == approved["findings"][0]["input_fingerprint"]
 
 
 def test_v04_state_round_trip_keeps_legacy_human_actor_inference(tmp_path):

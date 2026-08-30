@@ -540,6 +540,15 @@ def test_translate_stage_persists_translation_core_formal_review_provenance(tmp_
             "translation-core-review-packet-v1"
         assert trace["translation_core"]["initial_input_fingerprint"] == \
             trace["translation_core"]["final_consumed_input_fingerprint"]
+        assert trace["dependency_segment_ids"] == [0]
+        assert trace["translation_core"]["dependency_truth"] == [{
+            "segment_id": 0,
+            "source": "A complete source sentence.",
+            "target": "这是完整译文。",
+            "target_checked": True,
+            "target_from_accepted": False,
+            "source_from_paragraphs": False,
+        }]
     finally:
         core.OUTPUT_DIR, core.call_llm = old_output, old_call
 
