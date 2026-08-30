@@ -5033,9 +5033,10 @@ def _apply_glossary_staleness(state, job_id=None):
 
     stale = stale_segments_for_glossary(state)
     pairs = state.get("pairs") or []
-    _invalidate_translation_reviews(
-        state, list(range(len(pairs))),
-        "canonical glossary changed; independent review must be refreshed")
+    if stale:
+        _invalidate_translation_reviews(
+            state, stale,
+            "canonical glossary changed; independent review must be refreshed")
     for p in pairs:
         p.pop("stale_due_to_glossary", None)
     state["findings"] = [f for f in state.get("findings") or []

@@ -105,8 +105,14 @@ def mark_runtime_review_stale(
 
     decision_count = 0
     for decision in state.get("human_actions") or []:
-        if not isinstance(decision, dict) or decision.get("record_type") != "human_decision" \
-                or str(decision.get("finding_id") or "") not in affected_findings:
+        if not isinstance(decision, dict) or decision.get("record_type") not in {
+                "human_decision", "delivery_risk_acceptance"}:
+            continue
+        decision_finding_ids = {
+            str(decision.get("finding_id") or ""),
+            str(decision.get("translation_core_finding_id") or ""),
+        }
+        if not decision_finding_ids.intersection(affected_findings):
             continue
         if decision.get("status") != "stale":
             decision["status_before_stale"] = decision.get("status") or "current"
@@ -241,6 +247,21 @@ def translation_review_readiness(state: Mapping[str, Any]) -> Dict[str, Any]:
                          if isinstance(item, Mapping)
                          and item.get("decision_id") == decision_id), None)
         if decision is None:
+            risk_acceptance = next((item for item in reversed(actions)
+                                    if isinstance(item, Mapping)
+                                    and item.get("record_type") ==
+                                    "delivery_risk_acceptance"
+                                    and item.get("action") == "accepted_risk"
+                                    and item.get("status") == "current"
+                                    and str(item.get("translation_core_finding_id") or "") ==
+                                    finding_id
+                                    and item.get("review_event_id") ==
+                                    event.get("review_event_id")
+                                    and item.get("input_fingerprint") ==
+                                    finding.get("input_fingerprint")
+                                    and str(item.get("actor") or "").strip()), None)
+            if risk_acceptance is not None:
+                continue
             blocking_ids.append(finding_id)
             decision_errors.append({"finding_id": finding_id, "status": "missing"})
         elif decision.get("status") != "current" \

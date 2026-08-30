@@ -97,8 +97,10 @@ For jobs that require Translation Core review, readiness distinguishes `not_run`
 `missing`, `failed`, `stale`, and `current`. Only `current` passes. Every expected
 segment must have a successful current review event, and every current blocking
 finding must have a matching current human decision. Both backend approval and the
-workbench delivery surface use this readiness result; accepting legacy review risk
-cannot bypass it.
+workbench delivery surface use this readiness result. The existing document-level
+risk-acceptance path is permitted only after all segments have a current successful
+review; it cannot bypass a missing, failed, or stale review and is itself freshness
+tracked.
 
 Legacy jobs whose additive `translation_core_review_required` flag is false retain
 their existing delivery behavior. Existing target invariants, academic/report

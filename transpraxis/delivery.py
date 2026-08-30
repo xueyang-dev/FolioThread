@@ -338,10 +338,28 @@ def mark_findings(state: Dict[str, Any], finding_ids: List[str], action: str,
     for f in state.get("findings") or []:
         fid = finding_id(f)
         if fid in ids and not f.get("resolved"):
+            timestamp = now_iso()
             f["resolved"] = True
             f["resolution"] = {"action": action, "note": note,
-                               "timestamp": now_iso(), "actor": actor}
-            add_human_action(state, fid, action, note, actor)
+                               "timestamp": timestamp, "actor": actor}
+            audit = {
+                "finding_id": fid,
+                "action": action,
+                "note": note,
+                "timestamp": timestamp,
+                "actor": actor,
+            }
+            if action == "accepted_risk" and f.get("type") == "review" \
+                    and f.get("input_fingerprint"):
+                audit.update({
+                    "record_type": "delivery_risk_acceptance",
+                    "actor_type": "human",
+                    "translation_core_finding_id": f.get("finding_id"),
+                    "review_event_id": f.get("review_event_id"),
+                    "input_fingerprint": f.get("input_fingerprint"),
+                    "status": "current",
+                })
+            state.setdefault("human_actions", []).append(audit)
             marked.append(fid)
     return state, marked
 
@@ -383,7 +401,17 @@ def approve_delivery(state: Dict[str, Any], note: str = "", actor: str = "user",
         return state, False, ["实践报告尚未完成或未通过校验，不能创建最终交付版本"]
     from .translation_evidence import translation_review_readiness
     review = translation_review_readiness(state)
-    if not review["ready"]:
+    can_accept_current_review_risk = (
+        accept_blocking
+        and review["status"] == "missing"
+        and review["blocking_finding_ids"]
+        and not review["missing_segment_ids"]
+        and not review["stale_segment_ids"]
+        and not review["failed_segment_ids"]
+        and all(item.get("status") == "missing"
+                for item in review["decision_errors"])
+    )
+    if not review["ready"] and not can_accept_current_review_risk:
         return state, False, [
             f"Translation Core review gate={review['status']}，不能进入 final"]
     target_report = translation_target.validate_translation_pairs(
