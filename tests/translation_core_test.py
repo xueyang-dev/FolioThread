@@ -19,7 +19,10 @@ from transpraxis.translation_core import (
 from transpraxis.translation_evidence import (
     TranslationEvidenceIndex,
     build_runtime_review_packet,
+    current_review_event,
+    mark_runtime_review_stale,
     record_runtime_human_decision,
+    register_runtime_review_event,
     review_translation_batch_with_evidence,
 )
 
@@ -589,3 +592,67 @@ def test_runtime_human_decision_rejects_noncurrent_review_event():
     with pytest.raises(ValueError, match="stale"):
         record_runtime_human_decision(
             state, finding["finding_id"], "dismiss", "alice", actor_type="human")
+
+
+def test_runtime_stale_propagation_preserves_finding_and_decision():
+    current = fingerprint({"target": "v1"})
+    finding = normalize_finding({
+        "category": "omission", "severity": "blocking", "status": "open",
+        "segment_id": 0, "requires_human_confirmation": True,
+    }, input_fingerprint=current)
+    finding.update({"type": "review", "review_event_id": "review-1"})
+    state = {
+        "findings": [finding],
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-1",
+            "segment_ids": [0], "decision": "findings",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+        "human_actions": [],
+    }
+    state, _, decision = record_runtime_human_decision(
+        state, finding["finding_id"], "accept_resolution", "alice",
+        actor_type="human", decided_at="2026-08-30T12:00:00+00:00")
+
+    counts = mark_runtime_review_stale(
+        state, [0], "target changed", stale_at="2026-08-30T12:01:00+00:00")
+
+    assert counts == {"events": 1, "findings": 1, "decisions": 1}
+    assert len(state["findings"]) == 1 and len(state["human_actions"]) == 1
+    assert state["findings"][0]["status"] == "stale"
+    assert state["findings"][0]["status_before_stale"] == "resolved"
+    assert decision["status"] == "stale" and decision["status_before_stale"] == "current"
+    assert state["review_evidence"][0]["freshness_status"] == "stale"
+
+
+def test_runtime_review_supersession_is_segment_scoped():
+    current = fingerprint({"target": "v1"})
+    findings = []
+    for segment_id in (0, 1):
+        finding = normalize_finding({
+            "category": "omission", "severity": "blocking", "status": "open",
+            "segment_id": segment_id, "requires_human_confirmation": True,
+        }, input_fingerprint=current)
+        finding.update({"type": "review", "review_event_id": "review-a"})
+        findings.append(finding)
+    state = {
+        "findings": findings,
+        "review_evidence": [{
+            "phase": "formal_review", "review_event_id": "review-a",
+            "segment_ids": [0, 1], "decision": "findings",
+            "translation_core": {"final_consumed_input_fingerprint": current},
+        }],
+    }
+
+    register_runtime_review_event(
+        state, {"decision": "clean", "completion_receipt": {"status": "completed"}},
+        [], "review-b", [0])
+
+    old = state["review_evidence"][0]
+    assert old["freshness_status"] == "partial_stale"
+    assert old["stale_segment_ids"] == [0]
+    assert state["findings"][0]["status"] == "stale"
+    assert state["findings"][0]["superseded_by_review_event_id"] == "review-b"
+    assert state["findings"][1]["status"] == "open"
+    assert current_review_event(state, 0)["review_event_id"] == "review-b"
+    assert current_review_event(state, 1)["review_event_id"] == "review-a"

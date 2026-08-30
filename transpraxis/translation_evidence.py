@@ -57,6 +57,100 @@ def current_review_event(
     return None
 
 
+def mark_runtime_review_stale(
+    state: Dict[str, Any], segment_ids: Sequence[int], reason: str, *,
+    stale_at: Optional[str] = None, superseded_by: Optional[str] = None,
+    exclude_review_event_id: Optional[str] = None,
+) -> Dict[str, int]:
+    """Preserve and stale review events, findings, and decisions by segment."""
+    ids = {value for value in segment_ids
+           if isinstance(value, int) and not isinstance(value, bool)}
+    timestamp = stale_at or _now_iso()
+    affected_events = set()
+    for event in state.get("review_evidence") or []:
+        if not isinstance(event, dict) or not _current_translation_review(event):
+            continue
+        overlap = ids.intersection(_review_segment_ids(event))
+        if not overlap:
+            continue
+        affected_events.add(str(event.get("review_event_id") or ""))
+        event["stale_segment_ids"] = sorted(
+            set(event.get("stale_segment_ids") or []).union(overlap))
+        if set(_review_segment_ids(event)).issubset(event["stale_segment_ids"]):
+            if event.get("freshness_status") != "stale":
+                event["status_before_stale"] = event.get("decision") or "current"
+            event["freshness_status"] = "stale"
+        else:
+            event["freshness_status"] = "partial_stale"
+        event.setdefault("stale_reason", str(reason or "review inputs changed"))
+        event.setdefault("stale_at", timestamp)
+        if superseded_by:
+            event["superseded_by_review_event_id"] = superseded_by
+
+    affected_findings = set()
+    for finding in state.get("findings") or []:
+        if not isinstance(finding, dict) or finding.get("type") != "review" \
+                or not finding.get("input_fingerprint") \
+                or _segment_id(finding) not in ids \
+                or finding.get("review_event_id") == exclude_review_event_id:
+            continue
+        affected_findings.add(str(finding.get("finding_id") or ""))
+        if finding.get("status") != "stale":
+            finding["status_before_stale"] = finding.get("status") or "open"
+            finding["status"] = "stale"
+        finding.setdefault("stale_reason", str(reason or "review inputs changed"))
+        finding.setdefault("stale_at", timestamp)
+        if superseded_by:
+            finding["superseded_by_review_event_id"] = superseded_by
+
+    decision_count = 0
+    for decision in state.get("human_actions") or []:
+        if not isinstance(decision, dict) or decision.get("record_type") != "human_decision" \
+                or str(decision.get("finding_id") or "") not in affected_findings:
+            continue
+        if decision.get("status") != "stale":
+            decision["status_before_stale"] = decision.get("status") or "current"
+            decision["status"] = "stale"
+            decision_count += 1
+        decision.setdefault("stale_reason", str(reason or "review inputs changed"))
+        decision.setdefault("stale_at", timestamp)
+        if superseded_by:
+            decision["superseded_by_review_event_id"] = superseded_by
+    return {
+        "events": len(affected_events),
+        "findings": len(affected_findings),
+        "decisions": decision_count,
+    }
+
+
+def register_runtime_review_event(
+    state: Dict[str, Any], event: Dict[str, Any],
+    findings: Sequence[Dict[str, Any]], review_event_id: str,
+    segment_ids: Sequence[int], *, phase: str = "formal_review",
+) -> Dict[str, Any]:
+    """Make one review current and supersede only its reviewed segments."""
+    ids = [value for value in segment_ids
+           if isinstance(value, int) and not isinstance(value, bool)]
+    mark_runtime_review_stale(
+        state, ids, "superseded by a current independent review",
+        superseded_by=review_event_id,
+        exclude_review_event_id=review_event_id)
+    event.update({
+        "phase": phase,
+        "review_scope": "current_translation",
+        "review_event_id": review_event_id,
+        "segment_ids": ids,
+        "freshness_status": "current",
+        "stale_segment_ids": [],
+        "finding_ids": [str(item.get("finding_id") or "")
+                        for item in findings if item.get("finding_id")],
+    })
+    for finding in findings:
+        finding["review_event_id"] = review_event_id
+    state.setdefault("review_evidence", []).append(event)
+    return event
+
+
 def record_runtime_human_decision(
     state: Dict[str, Any], finding_id: str, decision: str, actor: str, *,
     actor_type: str, note: str = "", decided_at: Optional[str] = None,

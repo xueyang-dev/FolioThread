@@ -1440,7 +1440,8 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
             _mark_translation_truth_changed(
                 job_id, state, changed_indexes,
                 "翻译流水线写入 CURRENT_TRANSLATION；记录该批次影响范围",
-                actor="pipeline", action="translation_batch")
+                actor="pipeline", action="translation_batch",
+                stale_translation_reviews=False)
         truncated_indexes = []
         save_job_state(job_id, state)
 
@@ -1763,9 +1764,8 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                 f"translation-review-{job_id}-{bi}-formal-"
                 f"{len(state.get('review_evidence') or [])}")
             review_trace["review_event_id"] = review_event_id
-            state.setdefault("review_evidence", []).append({
-                "batch": bi, "phase": "formal_review", **review_trace,
-            })
+            formal_records = []
+            promoted_review_events = []
             if failed:
                 stats["review_failed"] += 1
             if failed:
@@ -1854,18 +1854,36 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                                 "segment_id": segment_id, **overlay,
                                 "blind_trace": blind_trace,
                             })
-                            if blind_trace:
-                                state.setdefault("review_evidence", []).append({
-                                    "batch": bi, "phase": "suggested_shadow_review",
-                                    **blind_trace,
-                                })
                             if overlay["status"] == "accepted":
                                 batch_pairs[idx]["target"] = suggested
+                                if blind_trace:
+                                    promoted_review_events.append((
+                                        blind_trace,
+                                        f"translation-review-{job_id}-{bi}-suggested-"
+                                        f"{segment_id}-{len(promoted_review_events)}",
+                                        segment_id,
+                                    ))
                             else:
                                 record["suggested_target"] = suggested
                                 findings_all.append(record)
+                                formal_records.append(record)
+                                if blind_trace:
+                                    state.setdefault("review_evidence", []).append({
+                                        "batch": bi, "phase": "suggested_shadow_review",
+                                        **blind_trace,
+                                    })
                             continue
                     findings_all.append(record)
+                    formal_records.append(record)
+            _translation_evidence.register_runtime_review_event(
+                state, {"batch": bi, **review_trace}, formal_records,
+                review_event_id, formal_segment_ids)
+            for promoted_trace, promoted_event_id, promoted_segment_id in \
+                    promoted_review_events:
+                _translation_evidence.register_runtime_review_event(
+                    state, {"batch": bi, **promoted_trace}, [],
+                    promoted_event_id, [promoted_segment_id],
+                    phase="suggested_shadow_review")
             _checkpoint.append_event(job_dir(job_id), {
                 "batch": bi, "offset": offset, "phase": "semantic_review_done",
             })
@@ -3420,6 +3438,7 @@ def _reset_final_qa(state, reason=""):
 
 def _mark_translation_truth_changed(
     job_id, state, indexes, reason, *, actor="user", action="translation_changed",
+    stale_translation_reviews=True,
 ):
     """Record one canonical CURRENT_TRANSLATION mutation and its impact slice."""
     indexes = sorted({int(index) for index in indexes
@@ -3441,6 +3460,8 @@ def _mark_translation_truth_changed(
         ],
     }
     state["translation_truth"] = truth
+    if stale_translation_reviews:
+        _invalidate_translation_reviews(state, indexes, reason)
     changed_segment_ids = list(truth["last_change"]["segment_ids"])
     from transpraxis import academic_writer
     propagated = academic_writer.propagate_artifact_staleness(
@@ -3481,6 +3502,36 @@ def _mark_translation_truth_changed(
         "actor": actor,
     })
     return state
+
+
+def _invalidate_translation_reviews(state, indexes, reason):
+    """Revoke review/TM trust while preserving review and decision history."""
+    indexes = sorted({int(index) for index in indexes
+                      if isinstance(index, int) or str(index).lstrip("-").isdigit()})
+    changed = _translation_evidence.mark_runtime_review_stale(
+        state, indexes, reason)
+    if not any(changed.values()):
+        return changed
+    tm = load_tm()
+    tm_changed = False
+    pairs = state.get("pairs") or []
+    for index in indexes:
+        if not 0 <= index < len(pairs):
+            continue
+        pair = pairs[index]
+        pair["reviewed"] = False
+        pair["review_status"] = "not_reviewed"
+        pair["from_tm"] = False
+        for key in ("accepted_target", "human_accepted", "accepted_by_human"):
+            pair.pop(key, None)
+        source = str(pair.get("source") or "")
+        if source in tm:
+            del tm[source]
+            tm_changed = True
+    if tm_changed:
+        save_tm(tm)
+    _recount_reviewed_segments(state)
+    return changed
 
 
 def translation_truth_view(job_id, state=None):
@@ -4944,6 +4995,9 @@ def _apply_glossary_staleness(state, job_id=None):
 
     stale = stale_segments_for_glossary(state)
     pairs = state.get("pairs") or []
+    _invalidate_translation_reviews(
+        state, list(range(len(pairs))),
+        "canonical glossary changed; independent review must be refreshed")
     for p in pairs:
         p.pop("stale_due_to_glossary", None)
     state["findings"] = [f for f in state.get("findings") or []
@@ -5236,8 +5290,16 @@ def save_document_profile(job_id, profile):
     state = load_job_state(job_id)
     if state is None:
         return None
-    state["document_profile"] = _models.normalize_document_profile(profile)
+    normalized = _models.normalize_document_profile(profile)
+    changed = normalized != _models.normalize_document_profile(
+        state.get("document_profile"))
+    state["document_profile"] = normalized
     state["profile_done"] = True
+    if changed and state.get("p2_done"):
+        _invalidate_translation_reviews(
+            state, list(range(len(state.get("pairs") or []))),
+            "document profile changed; review context must be refreshed")
+        _invalidate_final_delivery_state(state)
     save_job_state(job_id, state)
     return state
 
