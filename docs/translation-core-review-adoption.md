@@ -1,5 +1,10 @@
 # Translation Core review adoption (Phase 2B)
 
+> Historical scope note: Phase 2B introduced only the review vertical slice.
+> HumanDecision, freshness propagation, confirmed-knowledge promotion, and delivery
+> readiness were added by the subsequent
+> [Phase 2 runtime closure](translation-core-phase2-completion.md).
+
 Phase 2B is a narrow runtime vertical slice: FolioThread's existing long-document
 translation review now crosses the Translation Core boundary without redesigning
 translation execution or persistence.
@@ -80,8 +85,8 @@ Identity uses code/category, global subject ID, optional glossary entry ID, and 
 explicit logical location or occurrence key. Mutable source/target span prose is not
 part of identity. When the reviewer emits duplicate logical findings without a key,
 the adapter assigns deterministic per-response occurrence ordinals so IDs do not
-collide. Blocking semantic findings request human confirmation; this phase adds no
-HumanDecision UI or action path.
+collide. Blocking semantic findings request human confirmation; Phase 2B itself
+added no HumanDecision UI or action path.
 
 Review traces add packet schema, initial and final consumed fingerprints, and the
 translation-truth fingerprint. The full packet is not persisted.
@@ -102,7 +107,6 @@ promotion, Workbench UI, HumanDecision integration, state migration, or persiste
 schema requirements. It adds no database, agent loop, workflow engine, retrieval
 subsystem, or persistence layer.
 
-Before HumanDecision runtime adoption, duplicate detectors must provide stable
-`location_key` or `occurrence_key` values. The current deterministic response-order
-fallback prevents collisions but is not a durable decision identity if a model
-reorders otherwise identical findings.
+Duplicate detectors must provide stable `location_key` or `occurrence_key` values.
+The deterministic response-order fallback prevents collisions but is marked
+provisional and cannot receive a HumanDecision.
