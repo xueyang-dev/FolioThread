@@ -176,6 +176,11 @@ def test_only_a_human_can_decide_an_open_human_required_finding():
             finding, "accept_resolution", "review-model", actor_type="model",
             current_fingerprint=current,
         )
+    with pytest.raises(ValueError, match="human"):
+        record_human_decision(
+            finding, "accept_resolution", "", actor_type="human",
+            current_fingerprint=current,
+        )
     with pytest.raises(ValueError, match="open finding"):
         record_human_decision(
             {**finding, "requires_human_confirmation": False},
@@ -186,6 +191,16 @@ def test_only_a_human_can_decide_an_open_human_required_finding():
         record_human_decision(
             finding, "accept_resolution", "alice", actor_type="human",
             current_fingerprint=fingerprint({"target": "v2"}),
+        )
+    with pytest.raises(ValueError, match="fingerprint"):
+        record_human_decision(
+            {**finding, "input_fingerprint": ""}, "accept_resolution", "alice",
+            actor_type="human", current_fingerprint=current,
+        )
+    with pytest.raises(ValueError, match="open finding"):
+        record_human_decision(
+            {**finding, "severity": "informational"}, "accept_resolution", "alice",
+            actor_type="human", current_fingerprint=current,
         )
     with pytest.raises(TypeError, match="current_fingerprint"):
         record_human_decision(  # type: ignore[call-arg]
