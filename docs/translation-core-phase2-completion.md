@@ -63,13 +63,21 @@ packet mode, legacy prompt arguments are not appended outside the packet, and th
 external target-language argument must match packet context before the reviewer is
 called.
 
-Changing review-relevant translation truth marks dependent review events,
-findings, decisions, and reviewed/TM trust stale. Triggers include source or target
-edits, relevant context/profile changes, canonical glossary changes, confirmed
-style changes, deterministic checks, and evidence/version changes. Stale records
-retain their prior status, reason, time, and superseding review event. A new current
-review supersedes only the segments it covers, so unrelated segments remain current
-and historical stale records do not permanently block delivery.
+Changing review-relevant translation truth marks dependent review events, findings,
+and decisions stale; directly affected reviewed/TM trust is revoked as before.
+Triggers include source or target edits, relevant context/profile changes, canonical
+glossary changes, confirmed style changes, deterministic checks, and evidence/version
+changes. Stale records retain their prior status, reason, time, and superseding review
+event. A new current review supersedes only the segments it covers, so unrelated
+segments remain current and historical stale records do not permanently block delivery.
+
+Runtime review events persist their dependency segment IDs and bounded source/target
+snapshots. A dependency mutation invalidates the entire affected event (including a
+multi-segment batch and reviews that consume an accepted previous target); only
+review supersession remains segment-scoped. Because the packet fingerprint includes
+the complete canonical glossary hash, a glossary-hash change invalidates each event
+built from the old hash, while the existing glossary-specific pair marker remains
+limited to semantically affected segments.
 
 Audit history is carried separately from confirmed Project Memory knowledge and is
 not a review fingerprint dependency. Recording a decision therefore cannot make
