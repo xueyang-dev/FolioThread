@@ -98,6 +98,15 @@ def test_project_memory_contains_only_confirmed_existing_truth():
     assert memory["audit_history"]["human_decisions"] == [state["human_actions"][0]]
     assert "knowledge_candidates" not in memory
 
+    persisted = deepcopy(state)
+    persisted["confirmed_style_rules"] = [
+        {"rule": "Keep headings concise.", "status": "confirmed"},
+        {"rule": "Model style guess.", "status": "candidate"},
+    ]
+    persisted_memory = project_memory_from_state(persisted)
+    assert [item["rule"] for item in persisted_memory["knowledge"]["style_rules"]] == [
+        "Keep headings concise."]
+
 
 def test_review_finding_identity_ignores_mutable_explanation_text():
     input_hash = fingerprint({"review": 1})
@@ -309,6 +318,28 @@ def test_runtime_packet_projection_is_ephemeral_global_and_review_scoped():
         review_context={"previous_source_context": ["old 3"]},
     )
     assert changed["input_fingerprint"] == packet["input_fingerprint"]
+
+
+def test_runtime_packet_includes_confirmed_style_knowledge_only():
+    batch = [{"source": "source", "target": "译文"}]
+    state = {
+        "pairs": [],
+        "confirmed_style_rules": [
+            {"rule": "Use formal register.", "status": "confirmed"},
+            {"rule": "Model suggestion.", "status": "candidate"},
+        ],
+    }
+    packet = build_runtime_review_packet(
+        state, batch, [0], [], review_context={"target_language": "中文"})
+    rules = packet["project_memory"]["knowledge"]["style_rules"]
+    assert [item["rule"] for item in rules] == ["Use formal register."]
+    assert packet["project_memory"]["knowledge"]["translation_memory"] == []
+
+    changed = deepcopy(state)
+    changed["confirmed_style_rules"][0]["rule"] = "Use concise register."
+    changed_packet = build_runtime_review_packet(
+        changed, batch, [0], [], review_context={"target_language": "中文"})
+    assert changed_packet["input_fingerprint"] != packet["input_fingerprint"]
 
 
 @pytest.mark.parametrize("field,value", [

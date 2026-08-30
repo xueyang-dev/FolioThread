@@ -5111,6 +5111,9 @@ def review_knowledge_candidate(job_id, candidate_id, decision, actor="user"):
     state = load_job_state(job_id)
     if state is None:
         return None, False, "任务不存在"
+    actor = str(actor or "").strip()
+    if not actor:
+        return state, False, "人工确认必须记录 actor"
     candidate = next((item for item in state.get("knowledge_candidates") or []
                       if _knowledge.candidate_id(item) == str(candidate_id)), None)
     if candidate is None:
@@ -5120,6 +5123,7 @@ def review_knowledge_candidate(job_id, candidate_id, decision, actor="user"):
 
     context = _knowledge.candidate_context(candidate, state)
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    previous_status = str(candidate.get("status") or "emergent_candidate")
 
     def record(action, note, event):
         candidate["decision"] = decision
@@ -5144,7 +5148,10 @@ def review_knowledge_candidate(job_id, candidate_id, decision, actor="user"):
             "scope": "document" if decision == "project_term" else "task",
             "timestamp": timestamp,
             "actor": actor,
+            "actor_type": "human",
             "note": note,
+            "previous_status": previous_status,
+            "new_status": candidate["status"],
             **event,
         })
         state.setdefault("human_actions", []).append({
@@ -5153,6 +5160,9 @@ def review_knowledge_candidate(job_id, candidate_id, decision, actor="user"):
             "note": note,
             "timestamp": timestamp,
             "actor": actor,
+            "actor_type": "human",
+            "previous_status": previous_status,
+            "new_status": candidate["status"],
         })
 
     if decision == "project_term":
@@ -5217,6 +5227,58 @@ def review_knowledge_candidate(job_id, candidate_id, decision, actor="user"):
     record("knowledge_rejected", "人工拒绝该知识候选", {})
     save_job_state(job_id, state)
     return state, True, "已拒绝该知识候选"
+
+
+def confirm_translation_style_rule(
+    job_id, rule, actor, *, actor_type, note="", source_finding_id="",
+):
+    """Explicitly promote one human-confirmed style rule into Project Memory."""
+    actor = str(actor or "").strip()
+    text = str(rule or "").strip()
+    if actor_type != "human" or not actor:
+        raise ValueError("only an identified human may confirm style knowledge")
+    if not text:
+        raise ValueError("confirmed style rule must not be empty")
+    state = load_job_state(job_id)
+    if state is None:
+        raise ValueError(f"找不到任务 {job_id}")
+    rule_id = _models.stable_id(text.casefold(), prefix="s")
+    existing = next((item for item in state.get("confirmed_style_rules") or []
+                     if isinstance(item, dict) and item.get("rule_id") == rule_id), None)
+    if existing is not None:
+        return state, existing
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record = {
+        "rule_id": rule_id,
+        "rule": text,
+        "status": "confirmed",
+        "confirmed_by": actor,
+        "confirmed_at": timestamp,
+        "note": str(note or "").strip(),
+        "source_finding_id": str(source_finding_id or "").strip(),
+    }
+    state.setdefault("confirmed_style_rules", []).append(record)
+    state.setdefault("human_actions", []).append({
+        "finding_id": record["source_finding_id"] or f"style:{rule_id}",
+        "action": "confirm_style_rule",
+        "actor": actor,
+        "actor_type": "human",
+        "timestamp": timestamp,
+        "note": record["note"] or text,
+        "previous_status": "candidate",
+        "new_status": "confirmed",
+        "rule_id": rule_id,
+    })
+    excluded = _translation_review_finding(state, record["source_finding_id"])
+    excluded_segment = excluded.get("segment_id") if excluded else None
+    indexes = [index for index in range(len(state.get("pairs") or []))
+               if index != excluded_segment]
+    _invalidate_translation_reviews(
+        state, indexes, "confirmed style knowledge changed review dependencies")
+    if indexes:
+        _invalidate_final_delivery_state(state)
+    save_job_state(job_id, state)
+    return state, record
 
 
 def freeze_glossary(job_id, entries=None, frozen_by="user"):

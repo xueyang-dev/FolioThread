@@ -42,6 +42,7 @@ def _default_new_fields() -> Dict[str, Any]:
         "knowledge_candidates": [],
         "translation_continuity": [],
         "knowledge_events": [],
+        "confirmed_style_rules": [],
         "knowledge_feedback_failures": 0,
         "entity_registry": [],
         "translation_failures": [],

@@ -7,7 +7,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import core
 from transpraxis import checkpoint, context, delivery, knowledge, models, repair
-from transpraxis.translation_evidence import TranslationEvidenceIndex, review_translation_batch_with_evidence
+from transpraxis.translation_evidence import (
+    TranslationEvidenceIndex,
+    build_runtime_review_packet,
+    review_translation_batch_with_evidence,
+)
 
 
 def test_context_understanding_and_target_priority(tmp_path):
@@ -658,5 +662,38 @@ def test_persisted_blocking_review_uses_translation_core_human_decision(tmp_path
         assert core.load_tm()["Complete source."]["target"] == "完整译文。"
         reloaded = core.load_job_state("decision-runtime")
         assert reloaded["human_actions"][-1]["decision_id"] == audit["decision_id"]
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def test_confirmed_style_rule_is_audited_and_reused_by_future_review(tmp_path):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "confirmed-style-runtime"
+        state = core.new_job_state("style.docx")
+        state.update(
+            p1_done=True, p2_done=True,
+            paras=["Source."], pairs=[{"source": "Source.", "target": "译文。"}],
+        )
+        core.save_job_state(job_id, state)
+        before = build_runtime_review_packet(
+            state, state["pairs"], [0], [],
+            review_context={"target_language": "中文"})
+
+        updated, rule = core.confirm_translation_style_rule(
+            job_id, "Use formal register.", "alice", actor_type="human",
+            note="project style confirmed")
+        after = build_runtime_review_packet(
+            updated, updated["pairs"], [0], [],
+            review_context={"target_language": "中文"})
+
+        assert rule["status"] == "confirmed" and rule["confirmed_by"] == "alice"
+        assert updated["human_actions"][-1]["action"] == "confirm_style_rule"
+        assert updated["human_actions"][-1]["actor_type"] == "human"
+        assert after["input_fingerprint"] != before["input_fingerprint"]
+        assert [item["rule"] for item in
+                after["project_memory"]["knowledge"]["style_rules"]] == [
+                    "Use formal register."]
     finally:
         core.OUTPUT_DIR = old_output

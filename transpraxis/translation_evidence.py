@@ -204,7 +204,7 @@ def record_runtime_human_decision(
 
 
 def _scoped_project_memory(
-    glossary: Sequence[Dict[str, Any]], sources: Sequence[str],
+    state: Mapping[str, Any], glossary: Sequence[Dict[str, Any]], sources: Sequence[str],
     segment_ids: Sequence[int],
 ) -> Dict[str, Any]:
     """Review-relevant confirmed knowledge; intentionally no TM or audit history."""
@@ -219,22 +219,23 @@ def _scoped_project_memory(
                    for source in sources)
         )
     ]
-    return {
-        "schema_version": "translation-core-project-memory-v1",
-        "knowledge": {
-            "glossary_hash": glossary_hash,
-            "terminology_refs": [{
-                "glossary_entry_id": entry["id"],
-                "glossary_hash": glossary_hash,
-                "status": entry["status"],
-                "behavior": entry["behavior"],
-            } for entry in relevant],
-            # Phase 2B has no review-time TM retrieval layer. Growing project
-            # TM must not invalidate unrelated review artifacts.
-            "translation_memory": [],
-            "style_rules": [],
+    memory = translation_core.project_memory_from_state(
+        {
+            "pairs": [], "glossary": entries,
+            "glossary_frozen": {"entries": entries},
+            "confirmed_style_rules": state.get("confirmed_style_rules") or [],
         },
-    }
+        translation_memory=[], include_state_translation_memory=False,
+    )
+    memory.pop("audit_history", None)
+    memory["knowledge"]["glossary_hash"] = glossary_hash
+    memory["knowledge"]["terminology_refs"] = [{
+        "glossary_entry_id": entry["id"],
+        "glossary_hash": glossary_hash,
+        "status": entry["status"],
+        "behavior": entry["behavior"],
+    } for entry in relevant]
+    return memory
 
 
 def build_runtime_review_packet(
@@ -280,7 +281,7 @@ def build_runtime_review_packet(
     projection["glossary"] = list(glossary)
     projection["glossary_frozen"] = {"entries": list(glossary)}
     sources = [str(pair.get("source") or "") for pair in batch]
-    memory = _scoped_project_memory(glossary, sources, ids)
+    memory = _scoped_project_memory(state, glossary, sources, ids)
     return translation_core.build_review_packet(
         projection,
         segment_ids=ids,
