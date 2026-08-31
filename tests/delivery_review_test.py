@@ -97,8 +97,8 @@ def test_delivery_review_ui():
         assert any(button.label == "返回任务列表" for button in at.button)
         assert any(button.label == "回到主页" for button in at.button)
         filter_control = next(x for x in at.segmented_control
-                              if x.label == "筛选审校发现")
-        assert "必须处理 1" in filter_control.options
+                              if x.label == "筛选审校任务")
+        assert "待处理 1" in filter_control.options
         filter_control.set_value("全部 4")
         at.run()
         assert not at.exception, f"审校筛选重渲染异常：{at.exception}"
@@ -115,13 +115,14 @@ def test_delivery_review_ui():
         assert any("译文可能扩大原文概念的语义范围" in x.value for x in at.markdown)
         assert any("当前译文没有保留原文的概念边界" in x.value for x in at.markdown)
         assert any("回到原文核对概念关系" in x.value for x in at.markdown)
-        assert any("0.87" in x.value for x in at.markdown)
+        assert any("0.87" in x.value for x in [*at.markdown, *at.caption])
         assert any('tp-review-span">Name source</mark>' in x.value for x in at.markdown)
-        assert any("E1" in x.value and "E2" in x.value for x in at.markdown)
+        assert any("E1" in x.value and "E2" in x.value
+                   for x in [*at.markdown, *at.caption])
         assert "selected_finding_id" in at.session_state.filtered_state
 
         filter_control = next(x for x in at.segmented_control
-                              if x.label == "筛选审校发现")
+                              if x.label == "筛选审校任务")
         filter_control.set_value("建议 1")
         at.run()
         assert not at.exception, f"建议筛选重渲染异常：{at.exception}"
@@ -130,7 +131,7 @@ def test_delivery_review_ui():
         assert at.session_state["selected_finding_id"] == expected_finding_id
 
         filter_control = next(x for x in at.segmented_control
-                              if x.label == "筛选审校发现")
+                              if x.label == "筛选审校任务")
         filter_control.set_value("全部 4")
         at.run()
         queue = next(x for x in at.radio if x.label == "审校队列")
@@ -148,7 +149,7 @@ def test_delivery_review_ui():
         at.run()
         assert at.session_state["selected_finding_id"] == third_finding_id
         location_blocks = [x.value for x in at.markdown
-                           if '<div class="tp-review-long-text">' in x.value]
+                           if '<div class="tp-review-compare-text">' in x.value]
         assert any("Other" in value for value in location_blocks)
         assert any("text" in value for value in location_blocks)
         assert any("tp-review-span" in value for value in location_blocks)
@@ -159,7 +160,7 @@ def test_delivery_review_ui():
         at.run()
         assert any("旧版本" in x.value for x in at.markdown)
         location_blocks = [x.value for x in at.markdown
-                           if '<div class="tp-review-long-text">' in x.value]
+                           if '<div class="tp-review-compare-text">' in x.value]
         assert not any("tp-review-span" in value for value in location_blocks)
 
         at.session_state["workspace_section"] = "report"

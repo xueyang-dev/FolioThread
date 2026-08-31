@@ -271,7 +271,7 @@ def test_case_and_qa_workspace_surfaces_render_without_conflating_states(tmp_pat
         at.run()
         assert not at.exception, at.exception
         assert any("暂不满足交付条件" in item.value for item in at.markdown)
-        assert any("当前译文真值" in item.value for item in at.markdown)
+        assert any("翻译审校" in item.value for item in at.markdown)
         assert any("冻结交付" in item.value for item in at.markdown)
         delivery_markup = "\n".join(item.value for item in at.markdown)
         for label in ("学术产物同步", "案例复核", "合规检查", "DOCX 结构检查",
