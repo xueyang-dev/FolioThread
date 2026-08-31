@@ -61,7 +61,7 @@ def finding_fingerprint(f: Dict[str, Any]) -> str:
 
 def finding_id(f: Dict[str, Any], index: Optional[int] = None) -> str:
     """Stable action/render ID: semantic identity plus event/evidence instance."""
-    existing = str(f.get("id") or "")
+    existing = str(f.get("finding_id") or f.get("id") or "")
     event_id = f.get("review_event_id") or f.get("finding_instance_id")
     evidence = sorted(set(_values(f.get("evidence_refs"))
                           + _values(f.get("evidence_ids"))))
