@@ -51,7 +51,8 @@ def _finding(segment_id, event_id, value, summary, location, *,
     return finding
 
 
-def _state(findings_by_segment, *, suggested=False, style=False):
+def _state(findings_by_segment, *, suggested=False, style=False,
+           review_required=True, legacy=False):
     state = core.new_job_state("phase3-workbench.docx")
     pairs = [
         {"source": f"Source {index + 1}", "target": f"译文 {index + 1}",
@@ -64,18 +65,22 @@ def _state(findings_by_segment, *, suggested=False, style=False):
         event_id = f"review-{segment_id}"
         events.append(_event(segment_id, event_id, value))
         for ordinal in range(count):
-            findings.append(_finding(
+            finding = _finding(
                 segment_id, event_id, value,
                 f"第 {segment_id + 1} 段问题 {ordinal + 1}",
                 f"source-offset:{ordinal}",
                 suggested_target="建议译文" if suggested and ordinal == 0 else "",
                 category="style" if style and ordinal == 0 else "completeness",
-            ))
+            )
+            if legacy:
+                finding.pop("finding_id", None)
+                finding.pop("input_fingerprint", None)
+            findings.append(finding)
     state.update(
         p1_done=True,
         p2_done=True,
         report_enabled=False,
-        translation_core_review_required=True,
+        translation_core_review_required=review_required,
         target_lang="简体中文",
         paras=[pair["source"] for pair in pairs],
         pairs=pairs,
@@ -257,5 +262,144 @@ def test_delivery_risk_action_is_visible_only_for_current_blockers(tmp_path):
         assert not any(button.label == "确认风险并继续交付" for button in at.button)
         assert any("需要重新审校" in item.value or "上次审校后发生变化" in item.value
                    for item in [*at.markdown, *at.error, *at.warning])
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def _configure_separate_reviewer(at, *, api_key="reviewer-key"):
+    at.session_state["reviewer_mode"] = "separate"
+    at.session_state["reviewer_provider_choice"] = "OpenAI"
+    at.session_state["reviewer_model"] = "reviewer-model"
+    at.session_state["reviewer_api_key"] = api_key
+    at.session_state["reviewer_base_url"] = "https://reviewer.example/v1"
+    at.run()
+    assert not at.exception, at.exception
+
+
+def test_separate_reviewer_manual_rereview_uses_reviewer_credentials(
+        tmp_path, monkeypatch):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "phase3reviewer01"
+        core.save_job_state(job_id, _state({0: 1}))
+        core.save_translation_edit(job_id, 0, "人工修改后的译文")
+        calls = []
+
+        def fake_review(job_id_, indexes, provider, api_key, model, target_lang,
+                        *, style_rules="", base_url=None):
+            calls.append((provider, api_key, model, base_url))
+            return core.load_job_state(job_id_), {
+                "reviewed_segment_ids": list(indexes), "failed_segment_ids": [],
+            }
+
+        monkeypatch.setattr(core, "review_translation_segments", fake_review)
+        at = _open_workspace(job_id, "review")
+        _configure_separate_reviewer(at)
+
+        review_button = next(button for button in at.button
+                             if button.label == "重新审校此段")
+        assert review_button.disabled is False
+        review_button.click()
+        at.run()
+
+        assert calls == [("OpenAI", "reviewer-key", "reviewer-model",
+                          "https://reviewer.example/v1")]
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def test_separate_reviewer_missing_key_disables_manual_rereview(
+        tmp_path):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "phase3reviewer02"
+        core.save_job_state(job_id, _state({0: 1}))
+        core.save_translation_edit(job_id, 0, "人工修改后的译文")
+        at = _open_workspace(job_id, "review", api_key="translator-key")
+        _configure_separate_reviewer(at, api_key="")
+
+        review_button = next(button for button in at.button
+                             if button.label == "重新审校此段")
+        assert review_button.disabled is True
+        assert any("需要先完成审校模型配置" in item.value for item in at.caption)
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def test_separate_reviewer_suggested_target_uses_reviewer_credentials(
+        tmp_path, monkeypatch):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "phase3reviewer03"
+        core.save_job_state(job_id, _state({0: 1}, suggested=True))
+        calls = []
+
+        def fake_review(job_id_, indexes, provider, api_key, model, target_lang,
+                        *, style_rules="", base_url=None):
+            calls.append((provider, api_key, model, base_url))
+            return core.load_job_state(job_id_), {
+                "reviewed_segment_ids": list(indexes), "failed_segment_ids": [],
+            }
+
+        monkeypatch.setattr(core, "review_translation_segments", fake_review)
+        at = _open_workspace(job_id, "review", api_key="translator-key")
+        _configure_separate_reviewer(at)
+
+        apply_button = next(button for button in at.button
+                            if button.label == "应用建议并复审")
+        assert apply_button.disabled is False
+        apply_button.click()
+        at.run()
+
+        assert calls == [("OpenAI", "reviewer-key", "reviewer-model",
+                          "https://reviewer.example/v1")]
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def test_legacy_no_review_suggestion_does_not_claim_or_run_rereview(
+        tmp_path, monkeypatch):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "phase3legacy01"
+        core.save_job_state(job_id, _state(
+            {0: 1}, suggested=True, review_required=False, legacy=True))
+
+        def unexpected_review(*args, **kwargs):
+            raise AssertionError("legacy no-review action invoked independent review")
+
+        monkeypatch.setattr(core, "review_translation_segments", unexpected_review)
+        at = _open_workspace(job_id, "review")
+
+        apply_button = next(button for button in at.button
+                            if button.label == "应用建议")
+        assert apply_button.disabled is False
+        assert not any(button.label == "应用建议并复审" for button in at.button)
+        apply_button.click()
+        at.run()
+
+        updated = core.load_job_state(job_id)
+        assert updated["pairs"][0]["target"] == "建议译文"
+        assert updated["findings"][0]["resolved"] is True
+        assert any("建议译文已应用。" in item.value for item in at.success)
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def test_legacy_no_review_retranslation_uses_translation_only_copy(tmp_path):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "phase3legacy02"
+        core.save_job_state(job_id, _state(
+            {0: 1}, review_required=False, legacy=True))
+        at = _open_workspace(job_id, "review", api_key="translator-key")
+
+        assert any(button.label == "重新翻译" for button in at.button)
+        assert not any(button.label == "重新翻译并复审" for button in at.button)
     finally:
         core.OUTPUT_DIR = old_output
