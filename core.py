@@ -5582,7 +5582,7 @@ def decide_translation_review_finding(
 
 def review_translation_segments(
     job_id, indexes, provider, api_key, model, target_lang, *, style_rules="",
-    call_llm_fn=None,
+    call_llm_fn=None, base_url=None,
 ):
     """Run the existing independent reviewer on current persisted segments."""
     from transpraxis import delivery as _delivery
@@ -5599,6 +5599,9 @@ def review_translation_segments(
                           and 0 <= int(index) < len(pairs)})
     if not segment_ids:
         return state, {"reviewed_segment_ids": [], "failed_segment_ids": []}
+    review_call = call_llm_fn or _model_roles.make_role_call(
+        call_llm, {"provider": provider, "api_key": api_key,
+                   "model": model, "base_url": base_url})
     glossary = normalize_glossary(
         state.get("glossary") or (state.get("glossary_frozen") or {}).get(
             "entries") or [])
@@ -5634,7 +5637,7 @@ def review_translation_segments(
             _translation_evidence.review_translation_batch_with_evidence(
                 [source], [target], glossary_text, style_rules, target_lang,
                 provider, api_key, model, evidence_index,
-                call_llm=call_llm_fn or call_llm, segment_ids=[segment_id],
+                call_llm=review_call, segment_ids=[segment_id],
                 translation_core_packet=packet)
         event_id = (
             f"translation-review-{job_id}-refresh-{segment_id}-"
@@ -5821,16 +5824,21 @@ def approve_delivery(job_id, note="", accept_blocking=False, actor="user",
 
 def retranslate_segments(job_id, indexes, provider, api_key, model, target_lang,
                          style_rules="", glossary=None, on_status=None,
-                         on_caption=None, actor="user"):
+                         on_caption=None, actor="user", reviewer_provider=None,
+                         reviewer_api_key=None, reviewer_model=None,
+                         reviewer_base_url=None):
     """定点重译（抽取自 scripts/fix_segments.py 的能力）。"""
     from transpraxis import delivery as _delivery
     state, fixed = _delivery.retranslate_segments(
         job_id, indexes, provider, api_key, model, target_lang,
         style_rules, glossary, on_status, on_caption, actor)
     if fixed and state.get("translation_core_review_required"):
+        review_provider = provider if reviewer_provider is None else reviewer_provider
+        review_api_key = api_key if reviewer_api_key is None else reviewer_api_key
+        review_model = model if reviewer_model is None else reviewer_model
         state, _ = review_translation_segments(
-            job_id, fixed, provider, api_key, model, target_lang,
-            style_rules=style_rules)
+            job_id, fixed, review_provider, review_api_key, review_model,
+            target_lang, style_rules=style_rules, base_url=reviewer_base_url)
     return state, fixed
 
 

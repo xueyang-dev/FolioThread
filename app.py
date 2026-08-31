@@ -23,6 +23,7 @@ from transpraxis import delivery as _delivery
 from transpraxis import finalization as _finalization
 from transpraxis import knowledge as _knowledge
 from transpraxis import literature_evidence as _literature_evidence
+from transpraxis import model_roles as _model_roles
 from transpraxis import report_evidence as _report_evidence
 from transpraxis import report_template as _report_template
 from transpraxis import compliance as _compliance
@@ -3027,6 +3028,8 @@ def _render_delivery_review_queue(
     job_id, state, target_lang, ai_provider, ai_model, api_key, style_rules,
 ):
     """Render the human review queue; delivery state changes stay in core.py."""
+    review_runtime = resolve_review_runtime()
+    review_required = bool(state.get("translation_core_review_required"))
     findings = _delivery.review_queue_findings(state)
     contexts = sorted(
         [_delivery.finding_context(state, finding) for finding in findings],
@@ -3127,11 +3130,17 @@ def _render_delivery_review_queue(
             job_id, selected_ids, "human_fixed", note or "人工核对后确认已处理")
         st.rerun()
     if action_cols[1].button(
-            "重新翻译选中段落", disabled=not selected_segments or not api_key,
+            "重新翻译选中段落",
+            disabled=(not selected_segments or not api_key or not ai_model
+                      or (review_required and not _review_runtime_ready(review_runtime))),
             key=f"fd_retranslate_{job_id}", width="stretch"):
         core.retranslate_segments(
             job_id, selected_segments, ai_provider, api_key, ai_model,
             target_lang, style_rules=style_rules,
+            reviewer_provider=review_runtime["provider"],
+            reviewer_api_key=review_runtime["api_key"],
+            reviewer_model=review_runtime["model"],
+            reviewer_base_url=review_runtime["base_url"],
             on_caption=lambda text: st.caption(text))
         st.rerun()
     if action_cols[2].button(
@@ -3147,8 +3156,10 @@ def _render_delivery_review_queue(
         for context in selectable:
             st.session_state.pop(f"fd_select_{job_id}_{context['finding_id']}", None)
         st.rerun()
-    if selected_segments and not api_key:
-        st.warning("重新翻译需要先在设置中配置 API Key；人工处理和确认保留仍可使用。")
+    if selected_segments and (not api_key or not ai_model):
+        st.warning("重新翻译需要先完成 AI 引擎配置；人工处理和确认保留仍可使用。")
+    elif selected_segments and review_required and not _review_runtime_ready(review_runtime):
+        st.warning(f"{_review_runtime_missing_message()}；人工处理和确认保留仍可使用。")
 
 
 def _render_delivery_gate(job_id, state, dstatus, target_lang="", provider="", model=""):
@@ -3277,6 +3288,36 @@ def _workspace_review_contexts(state):
 
 def _review_workbench(state):
     return _workbench_view.review_workbench_view(state)
+
+
+def resolve_review_runtime():
+    """Resolve the configured role that owns semantic review calls."""
+    return _model_roles.resolve_review_runtime(
+        reviewer_mode,
+        {"provider": ai_provider, "model": ai_model, "api_key": api_key,
+         "base_url": api_base},
+        {"provider": reviewer_provider, "model": reviewer_model,
+         "api_key": reviewer_api_key, "base_url": reviewer_base_url},
+    )
+
+
+def _review_runtime_ready(runtime):
+    return bool(runtime.get("provider") and runtime.get("model")
+                and runtime.get("api_key"))
+
+
+def _review_runtime_missing_message():
+    return ("需要先完成审校模型配置" if reviewer_mode == "separate"
+            else "需要先完成 AI 引擎配置")
+
+
+def _run_review_with_runtime(job_id, indexes, runtime, target_lang, style_rules):
+    kwargs = {"style_rules": style_rules}
+    if runtime.get("base_url"):
+        kwargs["base_url"] = runtime["base_url"]
+    return core.review_translation_segments(
+        job_id, indexes, runtime["provider"], runtime["api_key"],
+        runtime["model"], target_lang, **kwargs)
 
 
 def _set_workspace_flash(message, tone="success"):
@@ -4087,6 +4128,8 @@ def _explain_translation_segment(job_id, index, state):
 
 
 def _render_workspace_translation_context(job_id, state):
+    review_runtime = resolve_review_runtime()
+    review_required = bool(state.get("translation_core_review_required"))
     selected_segment = _translation_selected_segment(job_id, state)
     if selected_segment is None:
         st.markdown('<div class="tp-empty">翻译开始后，这里会显示选中段落。</div>',
@@ -4155,12 +4198,19 @@ def _render_workspace_translation_context(job_id, state):
             st.session_state.pop(edited_key, None)
             st.rerun()
     with retranslate_col:
-        if st.button("重新生成译文", icon=":material/auto_awesome:",
+        retranslate_label = "重新翻译并复审" if review_required else "重新翻译"
+        if st.button(retranslate_label, icon=":material/auto_awesome:",
                      key=f"translation_retranslate_{selected_id}",
-                     disabled=not api_key, width="stretch"):
+                     disabled=(not api_key or not ai_model
+                               or (review_required and not _review_runtime_ready(review_runtime))),
+                     width="stretch"):
             with st.spinner("正在重新翻译当前段落…"):
                 core.retranslate_segments(job_id, [index], ai_provider, api_key, ai_model,
                                            target_lang, style_rules=style_rules,
+                                           reviewer_provider=review_runtime["provider"],
+                                           reviewer_api_key=review_runtime["api_key"],
+                                           reviewer_model=review_runtime["model"],
+                                           reviewer_base_url=review_runtime["base_url"],
                                            on_caption=lambda text: st.caption(text))
             refreshed = core.load_job_state(job_id) or state
             segment_items = [item for item in _review_workbench(refreshed)["queue_items"]
@@ -4169,10 +4219,16 @@ def _render_workspace_translation_context(job_id, state):
             if any(item.get("kind") == "failed" for item in segment_items):
                 _set_workspace_flash(
                     f"第 {index + 1} 段已重新翻译，但审校未完成，请重试。", "warning")
-            else:
+            elif review_required:
                 _set_workspace_flash(f"第 {index + 1} 段已重新翻译并完成复审。")
+            else:
+                _set_workspace_flash(f"第 {index + 1} 段已重新翻译。")
             st.session_state.pop(edited_key, None)
             st.rerun()
+        if not api_key or not ai_model:
+            st.caption("重新翻译需要先完成 AI 引擎配置。")
+        elif review_required and not _review_runtime_ready(review_runtime):
+            st.caption(f"{_review_runtime_missing_message()}。")
     if pair.get("human_edited") and st.button("恢复原译", key=f"translation_restore_{selected_id}",
                                                 width="stretch"):
         _restore_translation_pair(job_id, index)
@@ -4701,6 +4757,10 @@ def _render_workspace_review(job_id, state):
     progress = view["progress"]
     items = view["queue_items"]
     primary = view["primary_action"]
+    review_runtime = resolve_review_runtime()
+    review_required = bool(state.get("translation_core_review_required"))
+    review_ready = _review_runtime_ready(review_runtime)
+    translator_ready = bool(api_key and ai_model)
     st.markdown('<div class="tp-review-head"><div><div class="tp-section-kicker">人工工作区</div>'
                 '<h2>审校工作台</h2></div>'
                 f'<div class="tp-review-count">{len(items):,} 项当前任务</div></div>',
@@ -4719,14 +4779,14 @@ def _render_workspace_review(job_id, state):
         f'<span><b>{progress["failed"]}</b> 审校未完成</span>'
         f'<span><b>{progress["missing"]}</b> 尚未审校</span>'
         '</div></div>', unsafe_allow_html=True)
-    primary_disabled = primary["kind"] == "review_segments" and not api_key
+    primary_disabled = primary["kind"] == "review_segments" and not review_ready
     if st.button(primary["label"], type="primary", disabled=primary_disabled,
                  key=f"review_primary_{job_id}_{primary['kind']}", width="stretch"):
         if primary["kind"] == "review_segments":
             with st.spinner("正在审校所选段落…"):
-                core.review_translation_segments(
-                    job_id, primary["segment_ids"], ai_provider, api_key, ai_model,
-                    target_lang, style_rules=style_rules)
+                _run_review_with_runtime(
+                    job_id, primary["segment_ids"], review_runtime, target_lang,
+                    style_rules)
             refreshed = core.load_job_state(job_id) or state
             selected = _workbench_view.select_queue_item(
                 _review_workbench(refreshed)["queue_items"])
@@ -4739,7 +4799,7 @@ def _render_workspace_review(job_id, state):
             st.session_state.workspace_section = "delivery"
         st.rerun()
     if primary_disabled:
-        st.caption("重新审校需要先在设置中配置 API Key。")
+        st.caption(f"{_review_runtime_missing_message()}。")
 
     if not items:
         _select_review_item(None)
@@ -4855,12 +4915,12 @@ def _render_workspace_review(job_id, state):
             action_label = {"failed": "重试审校此段", "stale": "重新审校此段",
                             "missing": "审校此段"}[selected["kind"]]
             review_col, edit_col = st.columns([1.35, 1], gap="small")
-            if review_col.button(action_label, type="primary", disabled=not api_key,
+            if review_col.button(action_label, type="primary", disabled=not review_ready,
                                  key=f'review_task_run_{selected["id"]}', width="stretch"):
                 with st.spinner(f"正在审校第 {segment_id + 1} 段…"):
-                    core.review_translation_segments(
-                        job_id, [segment_id], ai_provider, api_key, ai_model,
-                        target_lang, style_rules=style_rules)
+                    _run_review_with_runtime(
+                        job_id, [segment_id], review_runtime, target_lang,
+                        style_rules)
                 refreshed = core.load_job_state(job_id) or state
                 _select_next_review_item(refreshed, selected)
                 segment_items = [item for item in _review_workbench(refreshed)["queue_items"]
@@ -4879,8 +4939,8 @@ def _render_workspace_review(job_id, state):
                     job_id, segment_id, pair)
                 st.session_state.workspace_section = "translation"
                 st.rerun()
-            if not api_key:
-                st.caption("重新审校需要先在设置中配置 API Key；仍可先修改译文。")
+            if not review_ready:
+                st.caption(f"{_review_runtime_missing_message()}；仍可先修改译文。")
             return
 
         note_key = f"workspace_review_note_{selected['id']}"
@@ -4891,9 +4951,11 @@ def _render_workspace_review(job_id, state):
         action_disabled = not selected.get("decidable")
         decision_capable = (not selected.get("core_finding")
                             or selected.get("requires_human_confirmation"))
-        primary_label = ("应用建议并复审" if suggested_target else
+        primary_label = ("应用建议并复审" if suggested_target and review_required else
+                         "应用建议" if suggested_target else
                          "确认已解决" if decision_capable else "查看下一项")
-        primary_disabled = action_disabled or bool(suggested_target and not api_key)
+        primary_disabled = action_disabled or bool(
+            suggested_target and review_required and not review_ready)
         primary_col, edit_col, preserve_col = st.columns([1.55, 1, 1.2], gap="small")
         if primary_col.button(primary_label, type="primary", disabled=primary_disabled,
                               key=f'review_resolve_{selected["id"]}', width="stretch"):
@@ -4903,7 +4965,7 @@ def _render_workspace_review(job_id, state):
                 _select_review_item(_workbench_view.select_queue_item(items, next_id))
                 _set_workspace_flash("此建议已查看；它不会阻止交付。", "info")
                 st.rerun()
-            if selected.get("core_finding") and selected.get(
+            if review_required and selected.get("core_finding") and selected.get(
                     "requires_human_confirmation"):
                 core.decide_translation_review_finding(
                     job_id, selected["core_finding_id"],
@@ -4914,22 +4976,23 @@ def _render_workspace_review(job_id, state):
             if suggested_target and isinstance(segment_id, int):
                 core.save_translation_edit(job_id, segment_id, suggested_target,
                                            actor="reviewer")
-                if not selected.get("core_finding"):
+                if not review_required or not selected.get("core_finding"):
                     core.mark_findings_resolved(
                         job_id, [selected["finding_id"]], "human_fixed",
                         note or "应用建议译文")
-                core.review_translation_segments(
-                    job_id, [segment_id], ai_provider, api_key, ai_model,
-                    target_lang, style_rules=style_rules)
+                if review_required:
+                    _run_review_with_runtime(
+                        job_id, [segment_id], review_runtime, target_lang,
+                        style_rules)
                 message = ""
             elif decision_capable:
-                if not selected.get("core_finding"):
+                if not review_required or not selected.get("core_finding"):
                     core.mark_findings_resolved(
                         job_id, [selected["finding_id"]], "human_fixed",
                         note or "人工核对后确认问题已解决")
                 message = "已确认问题解决。该决定已记录。"
             refreshed = core.load_job_state(job_id) or state
-            if suggested_target:
+            if suggested_target and review_required:
                 segment_items = [item for item in _review_workbench(refreshed)["queue_items"]
                                  if item.get("segment_id") == segment_id]
                 if any(item.get("kind") == "failed" for item in segment_items):
@@ -4940,6 +5003,8 @@ def _render_workspace_review(job_id, state):
                                f" {len(segment_items)} 项当前任务。")
                 else:
                     message = f"建议译文已应用，第 {segment_id + 1} 段已完成重新审校。"
+            elif suggested_target:
+                message = "建议译文已应用。"
             _select_next_review_item(refreshed, selected)
             _set_workspace_flash(message, "warning" if "未完成" in message else "success")
             st.rerun()
@@ -4953,7 +5018,7 @@ def _render_workspace_review(job_id, state):
         if preserve_col.button("保留当前译文",
                                disabled=action_disabled or not decision_capable,
                                key=f'review_preserve_{selected["id"]}', width="stretch"):
-            if selected.get("core_finding") and selected.get(
+            if review_required and selected.get("core_finding") and selected.get(
                     "requires_human_confirmation"):
                 core.decide_translation_review_finding(
                     job_id, selected["core_finding_id"], "dismiss", "user",
@@ -4970,27 +5035,39 @@ def _render_workspace_review(job_id, state):
             st.warning("此发现来自临时定位，无法安全记录人工决定；请先修改或重新审校该段。")
         elif not decision_capable:
             st.caption("该建议不需要人工决定，也不会阻止交付；可修改译文、应用建议或查看下一项。")
-        elif suggested_target and not api_key:
-            st.caption("应用建议并复审需要已配置 API Key；也可以先修改译文或保留当前译文。")
+        elif suggested_target and review_required and not review_ready:
+            st.caption(f"{_review_runtime_missing_message()}；也可以先修改译文或保留当前译文。")
 
-        if st.button("重新翻译并复审", disabled=not api_key or action_disabled
-                     or not isinstance(segment_id, int),
+        retranslate_label = "重新翻译并复审" if review_required else "重新翻译"
+        retranslate_disabled = (not translator_ready or action_disabled
+                                or (review_required and not review_ready)
+                                or not isinstance(segment_id, int))
+        if st.button(retranslate_label, disabled=retranslate_disabled,
                      key=f'review_retranslate_{selected["id"]}', width="stretch"):
-            if selected.get("core_finding") and selected.get(
+            if review_required and selected.get("core_finding") and selected.get(
                     "requires_human_confirmation"):
                 core.decide_translation_review_finding(
                     job_id, selected["core_finding_id"], "request_revision", "user",
                     actor_type="human", note=note or "请求重新翻译并复审")
-            with st.spinner(f"正在重新翻译并审校第 {segment_id + 1} 段…"):
+            spinner_label = (f"正在重新翻译并审校第 {segment_id + 1} 段…"
+                             if review_required else
+                             f"正在重新翻译第 {segment_id + 1} 段…")
+            with st.spinner(spinner_label):
                 core.retranslate_segments(
                     job_id, [segment_id], ai_provider, api_key, ai_model,
                     target_lang, style_rules=style_rules,
+                    reviewer_provider=review_runtime["provider"],
+                    reviewer_api_key=review_runtime["api_key"],
+                    reviewer_model=review_runtime["model"],
+                    reviewer_base_url=review_runtime["base_url"],
                     on_caption=lambda text: st.caption(text))
             refreshed = core.load_job_state(job_id) or state
             _select_next_review_item(refreshed, selected)
             segment_items = [item for item in _review_workbench(refreshed)["queue_items"]
                              if item.get("segment_id") == segment_id]
-            if any(item.get("kind") == "failed" for item in segment_items):
+            if not review_required:
+                _set_workspace_flash("重新翻译完成。")
+            elif any(item.get("kind") == "failed" for item in segment_items):
                 _set_workspace_flash("重新翻译完成，但重新审校未完成，请重试。", "warning")
             else:
                 _set_workspace_flash("重新翻译完成，已完成重新审校。")
