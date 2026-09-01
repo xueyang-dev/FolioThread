@@ -4192,9 +4192,12 @@ def _render_workspace_translation_context(job_id, state):
             item = next((item for item in _review_workbench(changed)["queue_items"]
                          if item.get("segment_id") == index), None)
             _select_review_item(item)
+            edit_message = (
+                f"第 {index + 1} 段译文已修改；上一次审校已过期，需要重新审校。"
+                if review_required else f"第 {index + 1} 段译文已修改。"
+            )
             _set_workspace_flash(
-                f"第 {index + 1} 段译文已修改；上一次审校已过期，需要重新审校。",
-                "warning")
+                edit_message, "warning" if review_required else "success")
             st.session_state.pop(edited_key, None)
             st.rerun()
     with retranslate_col:
@@ -4232,8 +4235,12 @@ def _render_workspace_translation_context(job_id, state):
     if pair.get("human_edited") and st.button("恢复原译", key=f"translation_restore_{selected_id}",
                                                 width="stretch"):
         _restore_translation_pair(job_id, index)
+        restore_message = (
+            f"第 {index + 1} 段已恢复原译；当前内容需要重新审校。"
+            if review_required else f"第 {index + 1} 段已恢复原译。"
+        )
         _set_workspace_flash(
-            f"第 {index + 1} 段已恢复原译；当前内容需要重新审校。", "warning")
+            restore_message, "warning" if review_required else "success")
         st.session_state.pop(edited_key, None)
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)

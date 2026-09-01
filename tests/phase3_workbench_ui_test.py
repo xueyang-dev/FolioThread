@@ -403,3 +403,61 @@ def test_legacy_no_review_retranslation_uses_translation_only_copy(tmp_path):
         assert not any(button.label == "重新翻译并复审" for button in at.button)
     finally:
         core.OUTPUT_DIR = old_output
+
+
+def test_no_review_translation_edit_and_restore_feedback_has_no_review_claims(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "OUTPUT_DIR", tmp_path)
+    job_id = "phase3legacy03"
+    core.save_job_state(job_id, _state(
+        {0: 1}, review_required=False, legacy=True))
+
+    at = _open_workspace(job_id, "translation")
+    selected_id = assets.segment_id(job_id, 0)
+    editor_key = f"translation_editor_{selected_id}"
+    at.session_state[editor_key] = "修改后的译文"
+    next(button for button in at.button if button.label == "保存修改").click()
+    at.run()
+
+    updated = core.load_job_state(job_id)
+    assert updated["pairs"][0]["target"] == "修改后的译文"
+    assert any("译文已修改" in item.value for item in at.success)
+    assert not any(word in item.value
+                   for item in at.success for word in ("审校", "复审", "过期"))
+    view = review_workbench_view(updated)
+    assert view["readiness"]["status"] == "not_required"
+    assert not any(item["kind"] in {"stale", "missing", "failed"}
+                   for item in view["queue_items"])
+
+    next(button for button in at.button if button.label == "恢复原译").click()
+    at.run()
+
+    restored = core.load_job_state(job_id)
+    assert restored["pairs"][0]["target"] == "译文 1"
+    assert any("已恢复原译" in item.value for item in at.success)
+    assert not any(word in item.value
+                   for item in at.success for word in ("审校", "复审", "过期"))
+    restored_view = review_workbench_view(restored)
+    assert restored_view["readiness"]["status"] == "not_required"
+    assert not any(item["kind"] in {"stale", "missing", "failed"}
+                   for item in restored_view["queue_items"])
+
+
+def test_review_required_translation_edit_and_restore_feedback_keeps_rereview_copy(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "OUTPUT_DIR", tmp_path)
+    job_id = "phase3modern03"
+    core.save_job_state(job_id, _state({0: 1}, review_required=True))
+
+    at = _open_workspace(job_id, "translation")
+    selected_id = assets.segment_id(job_id, 0)
+    editor_key = f"translation_editor_{selected_id}"
+    at.session_state[editor_key] = "修改后的译文"
+    next(button for button in at.button if button.label == "保存修改").click()
+    at.run()
+
+    assert any("需要重新审校" in item.value for item in at.warning)
+    next(button for button in at.button if button.label == "恢复原译").click()
+    at.run()
+
+    assert any("需要重新审校" in item.value for item in at.warning)
