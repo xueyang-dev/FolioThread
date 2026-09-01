@@ -22,6 +22,16 @@ def normalize_role_config(
     }
 
 
+def resolve_review_runtime(
+    mode: str,
+    translator: Optional[Dict[str, Any]],
+    reviewer: Optional[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Select the configured runtime that should perform semantic review."""
+    config = reviewer if mode == "separate" else translator
+    return normalize_role_config(config)
+
+
 def public_role_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return an auditable role config with no API key."""
     config = normalize_role_config(config)
