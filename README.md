@@ -1,10 +1,8 @@
 # FolioThread
 
 <p align="center">
-  <img src="transpraxis/resources/brand/foliothread-logo.svg" alt="FolioThread" width="560">
+  <img src="transpraxis/resources/brand/foliothread-logo.png" alt="FolioThread Long-document Translation Workspace" width="360">
 </p>
-
-<p align="center"><strong>Long-document Translation Workspace</strong></p>
 
 FolioThread 是一套面向长文档的本地翻译工作空间：把文档结构、上下文、术语、译文、人工审校和交付资产放在同一条可恢复的工作线上。
 

@@ -40,4 +40,4 @@ include = ["transpraxis*"]
 dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools.package-data]
-transpraxis = ["resources/*.txt", "resources/brand/*.svg"]
+transpraxis = ["resources/*.txt", "resources/brand/*.svg", "resources/brand/*.png"]

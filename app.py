@@ -43,8 +43,11 @@ _PERSIST_STATE = (
 # ================= 页面全局设置 =================
 _APP_ROOT = Path(__file__).resolve().parent
 _BRAND_DIR = Path(_assets.__file__).resolve().parent / "resources" / "brand"
+_BRAND_LOGO = _BRAND_DIR / "foliothread-logo.png"
 _BRAND_MARK = _BRAND_DIR / "foliothread-mark.svg"
 _BRAND_FAVICON = _BRAND_DIR / "foliothread-favicon.svg"
+_BRAND_LOGO_URI = "data:image/png;base64," + base64.b64encode(
+    _BRAND_LOGO.read_bytes()).decode("ascii")
 _BRAND_MARK_URI = "data:image/svg+xml;base64," + base64.b64encode(
     _BRAND_MARK.read_bytes()).decode("ascii")
 
@@ -223,22 +226,9 @@ hr { border-color: var(--tp-line); }
  display: flex; flex-direction: column; align-items: center;
  padding: 8px 0 0; margin-bottom: 14px; text-align: center;
 }
-.tp-brand-mark {
- display: block; width: 116px; height: auto; object-fit: contain;
- margin: 0 auto 4px;
-}
-.tp-brand-copy strong {
- display: block; overflow: hidden; color: var(--tp-navy); font-size: 18px;
- font-weight: 700; letter-spacing: -.025em; line-height: 1.12; text-overflow: ellipsis;
- white-space: nowrap;
-}
-.tp-brand-copy b {
- display: block; margin-top: 3px; color: var(--tp-brand-ink); font-size: 12px;
- font-weight: 600; letter-spacing: .04em; line-height: 1.3;
-}
-.tp-brand > span {
- display: block; margin-top: 8px; color: #7c8799; font-size: 10px;
- font-weight: 400; line-height: 1.4; white-space: nowrap;
+.tp-brand-logo {
+ display: block; width: 184px; max-width: 100%; height: auto; object-fit: contain;
+ margin: 0 auto;
 }
 .tp-nav-label {
  margin: 18px 0 6px; color: #7c8799; font-size: 12px;
@@ -7400,9 +7390,8 @@ workspace_mode = st.session_state.get("workspace_mode", False)
 with st.sidebar:
     st.markdown(
                 '<div class="tp-brand" aria-label="FolioThread 长文档翻译工作空间">'
-                f'<img class="tp-brand-mark" src="{_BRAND_MARK_URI}" alt="">'
-                '<div class="tp-brand-copy"><strong>FolioThread</strong><b>长文档</b></div>'
-                '<span>Long-document Translation Workspace</span></div>',
+                f'<img class="tp-brand-logo" src="{_BRAND_LOGO_URI}" '
+                'alt="FolioThread Long-document Translation Workspace"></div>',
                 unsafe_allow_html=True)
     with st.container(key="new_task_action"):
         if st.button("新建任务", icon=":material/add:", width="stretch"):
