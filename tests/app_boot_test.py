@@ -132,12 +132,13 @@ def main():
         at.run()
         assert at.status and "风格" in at.status[0].label, \
             "智能画像执行时应显示进度状态，而不是白屏"
-        assert any("未配置 AI 引擎" in w.value for w in at.warning), \
-            "未配置 AI 引擎时画像应降级并给出明确提示"
+        assert any("API 凭据未配置" in w.value and "无法自动画像" in w.value
+                   for w in at.warning), \
+            "API 凭据未配置时画像应降级并给出明确提示"
         assert any("无法完成自动画像" in m.value for m in at.markdown), \
             "画像失败后应确定性降级为通用风格，而不是伪造推荐"
         assert any(b.label == "前往配置 API Key" for b in at.button), \
-            "未配置 AI 引擎时应提供前往配置入口"
+            "API 凭据未配置时应提供前往配置入口"
         assert any(b.label == "重试" for b in at.button), \
             "降级结果应允许重试"
         next(b for b in at.button if b.label == "调整").click()
@@ -187,10 +188,10 @@ def main():
                     if b.label == "01  文档与画像").icon == \
             ":material/check_circle:", "完成步骤应使用完成状态节点"
         assert all(any(text in m.value for m in at.markdown) for text in (
-            "快速生成可读初稿", "兼顾质量与效率", "适合需要完整过程证据的任务",
+            "快速生成可读初稿", "兼顾质量与效率", "适合需要研究过程材料的任务",
             "翻译 → 基础检查", "术语增强 → 翻译 → 基础检查",
-            "术语治理 → 翻译 → 独立审校 → 学术证据",
-            "最快", "成本最低", "术语更一致", "成本适中", "证据最完整", "耗时较长",
+            "全文理解 → 术语治理 → 翻译 → 独立审校 → 研究证据",
+            "最快", "成本最低", "术语更一致", "成本适中", "专用能力", "耗时较长",
             "推荐")), \
             "三个预设必须直接说明工作流、取舍与推荐项"
         assert any("tp-preset-tag" in m.value for m in at.markdown), \

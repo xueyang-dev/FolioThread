@@ -30,6 +30,7 @@ from transpraxis import compliance as _compliance
 from transpraxis import thesis_constraints as _thesis_constraints
 from transpraxis import translation_evidence as _translation_evidence
 from transpraxis import workbench_view as _workbench_view
+from transpraxis import workspace_view as _workspace_view
 
 # Older Streamlit versions (including the Python 3.9-compatible line) do not
 # expose persist_state; widget keys provide the fallback there.
@@ -42,8 +43,11 @@ _PERSIST_STATE = (
 # ================= 页面全局设置 =================
 _APP_ROOT = Path(__file__).resolve().parent
 _BRAND_DIR = Path(_assets.__file__).resolve().parent / "resources" / "brand"
+_BRAND_LOGO = _BRAND_DIR / "foliothread-logo.png"
 _BRAND_MARK = _BRAND_DIR / "foliothread-mark.svg"
 _BRAND_FAVICON = _BRAND_DIR / "foliothread-favicon.svg"
+_BRAND_LOGO_URI = "data:image/png;base64," + base64.b64encode(
+    _BRAND_LOGO.read_bytes()).decode("ascii")
 _BRAND_MARK_URI = "data:image/svg+xml;base64," + base64.b64encode(
     _BRAND_MARK.read_bytes()).decode("ascii")
 
@@ -65,6 +69,8 @@ if "provider_configured" not in st.session_state:
     st.session_state.provider_configured = False
 if "provider_connection_status" not in st.session_state:
     st.session_state.provider_connection_status = "unverified"
+if "reviewer_connection_status" not in st.session_state:
+    st.session_state.reviewer_connection_status = "unverified"
 # 从本地配置恢复 AI 引擎（保存过之后，重启应用无需重新填写）
 _saved_provider_cfg = core.load_provider_config()
 if _saved_provider_cfg:
@@ -220,22 +226,9 @@ hr { border-color: var(--tp-line); }
  display: flex; flex-direction: column; align-items: center;
  padding: 8px 0 0; margin-bottom: 14px; text-align: center;
 }
-.tp-brand-mark {
- display: block; width: 116px; height: auto; object-fit: contain;
- margin: 0 auto 4px;
-}
-.tp-brand-copy strong {
- display: block; overflow: hidden; color: var(--tp-navy); font-size: 18px;
- font-weight: 700; letter-spacing: -.025em; line-height: 1.12; text-overflow: ellipsis;
- white-space: nowrap;
-}
-.tp-brand-copy b {
- display: block; margin-top: 3px; color: var(--tp-brand-ink); font-size: 12px;
- font-weight: 600; letter-spacing: .04em; line-height: 1.3;
-}
-.tp-brand > span {
- display: block; margin-top: 8px; color: #7c8799; font-size: 10px;
- font-weight: 400; line-height: 1.4; white-space: nowrap;
+.tp-brand-logo {
+ display: block; width: 184px; max-width: 100%; height: auto; object-fit: contain;
+ margin: 0 auto;
 }
 .tp-nav-label {
  margin: 18px 0 6px; color: #7c8799; font-size: 12px;
@@ -1204,6 +1197,10 @@ label:has(input[type="checkbox"]:not([role="switch"]):focus-visible) > div:first
   width: var(--tp-sidebar-width); min-width: var(--tp-sidebar-width);
  }
  [data-testid="stMainBlockContainer"] { width: 100%; padding: 1rem .875rem 3rem; }
+ [data-testid="stMainBlockContainer"] {
+  width: calc(100% - var(--tp-sidebar-width)); max-width:none;
+  margin-left:var(--tp-sidebar-width);
+ }
  .tp-title h1 { font-size: 26px; }
  .tp-summary-grid { grid-template-columns: 1fr; gap: 14px; }
  .tp-confirm-card .tp-summary-grid { grid-template-columns: 1fr; }
@@ -1218,6 +1215,12 @@ label:has(input[type="checkbox"]:not([role="switch"]):focus-visible) > div:first
  .st-key-target_language_field, .st-key-termbase_attach, .st-key-termbase_picker,
  .st-key-termbase_attached { max-width: none; }
  .st-key-provider_status { position: static; width: auto; }
+ [data-testid="stMainBlockContainer"]:not(:has(.tp-workspace-shell)) [data-testid="stHorizontalBlock"] {
+  display:block !important;
+ }
+ [data-testid="stMainBlockContainer"]:not(:has(.tp-workspace-shell)) [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+  width:100% !important; max-width:none !important; min-width:0 !important; flex:none !important;
+ }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1553,6 +1556,14 @@ _WORKSPACE_CSS = """
 .tp-review-history-row strong { display:block; color:var(--tp-ink); font-size:11px; line-height:1.35; }
 .tp-review-history-row span { display:block; margin-top:2px; color:var(--tp-sub); font-size:10px; line-height:1.4; overflow-wrap:anywhere; }
 .st-key-workspace_main_col [class*="st-key-review_"] .stButton > button { min-height:44px; white-space:normal; }
+[class*="st-key-review_primary_action_"] { margin:0 0 10px; }
+[class*="st-key-review_primary_action_"] .stButton > button { min-height:38px; white-space:normal; }
+[class*="st-key-review_action_bar_"] {
+ position:sticky; top:8px; z-index:4; margin:0 0 14px; padding:8px 10px;
+ border:1px solid #c9dcfb; border-radius:10px; background:rgba(248,251,255,.96);
+ box-shadow:0 4px 14px rgba(24,55,105,.08); backdrop-filter:blur(7px);
+}
+[class*="st-key-review_action_bar_"] .stButton > button { min-height:40px; white-space:normal; }
 .tp-queue-item { padding:11px 10px; border-bottom:1px solid var(--tp-line-subtle); }
 .tp-queue-item strong { display:block; color:var(--tp-ink); font-size:13px; line-height:1.4; }
 .tp-queue-item span { display:block; margin-top:4px; color:var(--tp-sub); font-size:11px; line-height:1.35; }
@@ -1734,6 +1745,14 @@ _WORKSPACE_CSS = """
 .tp-qa-rule { border-radius:8px; }
 .tp-qa-source { margin-top:6px; color:var(--tp-faint); font-size:10px; line-height:1.45; }
 .tp-qa-rule .stExpander { margin-top:4px; }
+.tp-qa-work-summary { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin:0 0 10px; padding:13px 14px; border:1px solid #f0d5a1; border-left:3px solid #c47b00; border-radius:9px; background:#fffaf0; }
+.tp-qa-work-summary strong { color:#714c00; font-size:13px; }
+.tp-qa-work-summary span { color:#8a5a00; font-size:11px; text-align:right; }
+.tp-connection-summary { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:15px 0 20px; padding:13px 15px; border:1px solid var(--tp-line); border-radius:10px; background:#fbfcfe; }
+.tp-connection-summary div { min-width:0; }
+.tp-connection-summary span, .tp-connection-summary small { display:block; color:var(--tp-sub); font-size:11px; }
+.tp-connection-summary strong { display:block; margin:3px 0; color:var(--tp-ink); font-size:13px; }
+[class*="st-key-settings_connection_"] { margin:0 0 16px; }
 [class*="st-key-translation_search_"] input:focus:not([aria-invalid="true"]),
 [class*="st-key-translation_search_"] input:focus-visible:not([aria-invalid="true"]),
 [class*="st-key-case_search_"] input:focus:not([aria-invalid="true"]),
@@ -1749,23 +1768,68 @@ _WORKSPACE_CSS = """
  border-color:#69a7f8 !important;
  box-shadow:0 0 0 3px rgba(18,103,232,.14) !important;
 }
+@media (min-width: 761px) and (max-width: 1199px) {
+ [data-testid="stMainBlockContainer"]:has(.tp-workspace-shell) {
+  padding-left:24px; padding-right:24px;
+ }
+ [data-testid="stMainBlockContainer"]:has(.tp-workspace-shell) [data-testid="stHorizontalBlock"]:has(.st-key-workspace_nav_col) {
+  display:grid !important; grid-template-columns:minmax(118px,.82fr) minmax(0,4fr);
+  align-items:start; gap:12px;
+ }
+ [data-testid="stMainBlockContainer"]:has(.tp-workspace-shell) [data-testid="stHorizontalBlock"]:has(.st-key-workspace_nav_col) > .stColumn:has(.st-key-workspace_nav_col) { grid-row:1 / span 2; }
+ [data-testid="stMainBlockContainer"]:has(.tp-workspace-shell) [data-testid="stHorizontalBlock"]:has(.st-key-workspace_nav_col) > .stColumn:has(.st-key-workspace_main_col) { grid-column:2; }
+ [data-testid="stMainBlockContainer"]:has(.tp-workspace-shell) [data-testid="stHorizontalBlock"]:has(.st-key-workspace_nav_col) > .stColumn:has(.st-key-workspace_context_col) { grid-column:2; margin-top:4px; }
+ [data-testid="stMainBlockContainer"]:has(.tp-workspace-shell) [data-testid="stHorizontalBlock"]:has(.st-key-workspace_nav_col) > .stColumn { width:auto !important; min-width:0 !important; flex:none !important; }
+ .st-key-workspace_main_col { padding:0 10px; }
+ .st-key-workspace_context_col { padding-left:0; }
+ .st-key-workspace_nav_col { padding-right:12px; }
+ .tp-review-pane { min-height:440px; }
+}
+@media (max-width: 900px) {
+ [data-testid="stMainBlockContainer"]:has(.tp-workspace-shell) [data-testid="stHorizontalBlock"]:has(.st-key-workspace_nav_col) {
+  display:block !important;
+ }
+ [data-testid="stMainBlockContainer"]:has(.tp-workspace-shell) [data-testid="stHorizontalBlock"]:has(.st-key-workspace_nav_col) > .stColumn {
+  display:block !important; width:100% !important; max-width:none !important;
+  min-width:0 !important; flex:none !important;
+ }
+ .st-key-workspace_nav_col { position:static; min-height:auto; padding:0 0 12px; border-right:0; border-bottom:1px solid var(--tp-line-subtle); }
+ .st-key-workspace_nav .stButton > button { justify-content:flex-start; min-height:38px; white-space:nowrap; }
+ .tp-workspace-nav-caption { margin-bottom:6px; }
+ .st-key-workspace_nav { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:4px 8px; }
+ .st-key-workspace_nav > [data-testid="stLayoutWrapper"] { min-width:0; }
+ .st-key-workspace_nav [class*="st-key-workspace_nav_item_"] { margin:0; min-width:0; }
+ .st-key-workspace_nav [class*="st-key-workspace_nav_item_"] [data-testid="stHorizontalBlock"] { display:block !important; }
+ .st-key-workspace_nav [class*="st-key-workspace_nav_item_"] [data-testid="stHorizontalBlock"] > .stColumn {
+  width:100% !important; max-width:none !important; min-width:0 !important;
+ }
+ .st-key-workspace_nav [class*="st-key-workspace_nav_item_"] .stButton > button {
+  justify-content:center; min-height:34px; padding:0 4px; font-size:12px;
+ }
+ .st-key-workspace_nav [class*="st-key-workspace_nav_item_"] .tp-nav-state {
+  min-width:0; text-align:center;
+ }
+ .st-key-workspace_main_col { padding:14px 0 0; }
+ .st-key-workspace_context_col { padding:14px 0 0; margin-top:0; }
+}
 @media (max-width: 1050px) {
  [data-testid="stMainBlockContainer"]:has(.tp-workspace-shell) { padding:22px 24px 48px; }
  .st-key-workspace_main_col { padding:0 18px; }
  .st-key-workspace_context_col { padding-left:0; margin-top:20px; }
  .st-key-translation_inspector { padding-left:0; }
- .st-key-workspace_nav_col { position:static; min-height:auto; padding-right:0; padding-bottom:14px; border-right:0; border-bottom:1px solid var(--tp-line-subtle); }
  .tp-card-grid, .tp-stage-grid { grid-template-columns:1fr; }
  .tp-readiness-grid, .tp-impact-summary { grid-template-columns:repeat(2,minmax(0,1fr)); }
  .tp-dependency-panel { display:block; }
  .tp-dependency-panel span, .tp-dependency-panel small { display:block; margin-top:7px; text-align:left; }
  .tp-qa-profile b { margin-left:0; width:100%; }
+ .tp-connection-summary { grid-template-columns:1fr; }
 }
 @media (max-width: 760px) {
  [data-testid="stMainBlockContainer"]:has(.tp-workspace-shell) { padding:16px 14px 40px; }
  .tp-workspace-topbar { display:block; }
  .tp-workspace-status { padding-top:12px; }
- .st-key-workspace_main_col { padding:0; }
+ .st-key-workspace_main_col { padding:14px 0 0; }
+ .st-key-workspace_context_col { padding:14px 0 0; }
  .tp-readiness-grid, .tp-impact-summary { grid-template-columns:1fr; }
  .tp-readiness-head { display:block; }
  .tp-readiness-flag { display:inline-block; margin-top:10px; }
@@ -1776,6 +1840,7 @@ _WORKSPACE_CSS = """
  .tp-review-progress { text-align:left; }
  .tp-review-progress-grid { grid-column:auto; }
  .tp-review-compare-text { min-height:auto; }
+ [class*="st-key-review_action_bar_"] [data-testid="stHorizontalBlock"] { flex-direction:row; align-items:stretch; }
  .tp-report-overall-grid { grid-template-columns:1fr; gap:10px; }
  .tp-report-issues-head { display:block; }
  .tp-report-issues-summary { margin-top:9px; }
@@ -1786,6 +1851,8 @@ _WORKSPACE_CSS = """
  [class*="st-key-report_recommended_"] .stButton > button { width:100%; margin-top:13px; }
  .tp-report-focus { padding:16px 14px 18px; }
  .tp-report-body { padding:20px 17px; }
+ .tp-qa-work-summary { display:block; }
+ .tp-qa-work-summary span { display:block; margin-top:5px; text-align:left; }
 }
 """
 st.markdown("<style>" + _CSS + _WORKSPACE_CSS + "</style>", unsafe_allow_html=True)
@@ -1796,6 +1863,15 @@ _EVIDENCE_LABELS = {
     "project_override": "项目覆盖", "model_knowledge": "模型知识",
     "external": "外部来源",
 }
+_TERM_STATUS_LABELS = {
+    "candidate": "候选",
+    "provisional": "暂定",
+    "locked": "已锁定",
+    "rejected": "已拒绝",
+}
+_TERM_STATUS_VALUES = {label: value for value, label in _TERM_STATUS_LABELS.items()}
+_TERM_BEHAVIOR_LABELS = {"translate": "翻译", "preserve": "保留原文"}
+_TERM_BEHAVIOR_VALUES = {label: value for value, label in _TERM_BEHAVIOR_LABELS.items()}
 
 
 def _evidence_label(e):
@@ -1882,8 +1958,10 @@ def _df_to_entries(df):
             "preferred": _s("preferred") or _s("target") or _s("proposed_target"),
             "forbidden": [x.strip() for x in re.split(r"[;；]", _s("forbidden"))
                           if x.strip()],
-            "behavior": (_s("behavior") or "translate").lower(),
-            "status": (_s("status") or "provisional").lower(),
+            "behavior": _TERM_BEHAVIOR_VALUES.get(
+                _s("behavior"), (_s("behavior") or "translate").lower()),
+            "status": _TERM_STATUS_VALUES.get(
+                _s("status"), (_s("status") or "provisional").lower()),
             "domain": _s("domain"),
             "scope": _s("scope"),
             "note": _s("note"),
@@ -1894,6 +1972,16 @@ def _df_to_entries(df):
             base["confidence"] = 0.5
         entries.append(base)
     return entries
+
+
+def _humanize_glossary_editor(df):
+    """Keep persisted enum values out of the normal terminology editor."""
+    displayed = df.copy()
+    if "status" in displayed:
+        displayed["status"] = displayed["status"].map(_TERM_STATUS_LABELS).fillna("待确认")
+    if "behavior" in displayed:
+        displayed["behavior"] = displayed["behavior"].map(_TERM_BEHAVIOR_LABELS).fillna("翻译")
+    return displayed
 
 
 def _page_title(title, sub):
@@ -1924,6 +2012,7 @@ def _request_step(step):
 def _reset_provider_connection(preserve_models=False):
     st.session_state.provider_configured = False
     st.session_state.provider_connection_status = "unverified"
+    st.session_state.reviewer_connection_status = "unverified"
     st.session_state.pop("provider_test_feedback", None)
     if not preserve_models:
         provider = st.session_state.get("provider_choice")
@@ -1931,6 +2020,12 @@ def _reset_provider_connection(preserve_models=False):
             st.session_state.pop(f"fetched_models_{provider}", None)
             st.session_state.pop(f"preferred_fetched_model_{provider}", None)
         st.session_state.pop("model_fetch_feedback", None)
+
+
+def _reset_reviewer_connection():
+    st.session_state.provider_configured = False
+    st.session_state.reviewer_connection_status = "unverified"
+    st.session_state.pop("provider_test_feedback", None)
 
 
 def _open_provider_settings():
@@ -2062,9 +2157,9 @@ def _run_quick_profile_with_progress():
         model = st.session_state.get(f"model_choice_{provider}", "")
         target_lang = st.session_state.get("target_lang", "简体中文")
         if not api_key or not model:
-            status.update(label="未配置 AI 引擎，请手动选择风格",
+            status.update(label="模型已选择，但 API 凭据未配置；请手动选择风格",
                           state="complete")
-            warnings.append("未配置 AI 引擎，无法自动画像；可直接手动选择风格")
+            warnings.append("已选择 AI 模型，但 API 凭据未配置，无法自动画像；可直接手动选择风格")
             doc_profile = _models.default_document_profile()
             style_rec = _fallback_recommendation()
             st.session_state.style_profiling_needs_api = True
@@ -2592,6 +2687,8 @@ def _runtime_html(provider, model, connection_status, can_start):
     connection = {
         "connected": ("已连接", "is-success"),
         "error": ("连接失败", "is-error"),
+        "credentials_missing": ("API 凭据未配置", "is-warning"),
+        "not_selected": ("尚未选择模型", "is-neutral"),
         "unverified": ("未验证", "is-neutral"),
     }.get(connection_status, ("未验证", "is-neutral"))
     if not can_start:
@@ -2915,7 +3012,7 @@ def _render_terminology_version(state):
 
 def _render_knowledge_library(saved_jobs):
     st.subheader("待确认词条")
-    st.caption("这些词条来自翻译过程中的知识观察，默认不会成为锁定术语。")
+    st.caption("翻译过程中发现的候选术语会出现在这里；只有人工确认后才会加入术语库。")
     pending = []
     for job in saved_jobs:
         state = job["state"]
@@ -2924,7 +3021,7 @@ def _render_knowledge_library(saved_jobs):
         for candidate in candidates:
             pending.append((job, state, _knowledge.candidate_context(candidate, state)))
     if not pending:
-        st.info("当前没有待确认词条。通过审校的译文会在后续批次产生新的知识观察。")
+        st.info("当前没有待确认词条。后续翻译中发现的候选术语会出现在这里。")
         return
 
     query = st.text_input(
@@ -2983,7 +3080,7 @@ def _render_knowledge_library(saved_jobs):
                     if context["conflicts"]:
                         st.warning(
                             "与现有项目术语存在译名冲突：" + "；".join(
-                                f"{item['target']}（{item['status']}）"
+                                f"{item['target']}（{_TERM_STATUS_LABELS.get(str(item['status']), '待确认')}）"
                                 for item in context["conflicts"]))
                     else:
                         st.caption("未发现与当前项目术语的译名冲突。")
@@ -3014,8 +3111,7 @@ def _render_knowledge_library(saved_jobs):
                             st.rerun()
                         st.error(message)
                     st.caption(
-                        "可复用术语库：当前运行时没有全局术语库存储，因此不提供此操作。"
-                        "项目术语会保存在本任务的术语版本中。")
+                        "项目术语会保存在本任务的术语版本中；当前没有独立的全局术语库操作。")
     if len(pending) > visible_count:
         if st.button(
                 f"显示更多（还剩 {len(pending) - visible_count} 条）",
@@ -3290,6 +3386,39 @@ def _review_workbench(state):
     return _workbench_view.review_workbench_view(state)
 
 
+def _ai_configuration_view(review_required=True):
+    return _workspace_view.ai_configuration_view(
+        ai_provider, ai_model, api_key,
+        st.session_state.get("provider_connection_status", "unverified"),
+        reviewer_mode=reviewer_mode,
+        reviewer_provider=reviewer_provider,
+        reviewer_model=reviewer_model,
+        reviewer_api_key=reviewer_api_key,
+        reviewer_connection_status=st.session_state.get(
+            "reviewer_connection_status", "unverified"),
+        review_required=review_required,
+    )
+
+
+def _workspace_projection(state, job_id=""):
+    delivery_state, delivery_tone = _workspace_delivery_state(job_id, state) \
+        if job_id else (None, "neutral")
+    academic = state.get("academic_state") or {}
+    report_stale = any(
+        _finalization._artifact_status_value(academic, name)
+        in {"stale", "missing", "failed"}
+        for name in ("report", "final_docx_validation", "libreoffice_render")
+    )
+    if job_id:
+        report_stale = report_stale or core.dependency_impact_view(
+            job_id, state).get("status") == "stale"
+    return _workspace_view.project_workspace_state(
+        state, delivery_state=delivery_state, delivery_tone=delivery_tone,
+        delivery_ready=delivery_state == "可以冻结交付",
+        report_stale=report_stale,
+    )
+
+
 def resolve_review_runtime():
     """Resolve the configured role that owns semantic review calls."""
     return _model_roles.resolve_review_runtime(
@@ -3370,6 +3499,13 @@ def _select_next_review_item(state, completed_item):
 def _workspace_status(state, job_id=""):
     runtime_view = core.build_job_runtime_view(job_id, state) if job_id else {}
     runtime_status = runtime_view.get("runtime_status")
+    if runtime_status == "idle_incomplete" and job_id:
+        total = len(state.get("paras") or state.get("pairs") or [])
+        translated = sum(bool(str(pair.get("target") or "").strip())
+                         for pair in state.get("pairs") or [])
+        if not state.get("p2_done") or translated < total:
+            return "正在翻译", "neutral"
+        return _workspace_delivery_state(job_id, state)
     if runtime_status in {"resume_requested", "queued", "starting", "running",
                           "waiting_external", "cancelling",
                           "stalled", "interrupted", "failed", "cancelled",
@@ -3941,7 +4077,8 @@ def _render_workspace_nav(section, state, job_id=""):
     st.markdown('<div class="tp-workspace-nav-title">项目导航</div>'
                 '<div class="tp-workspace-nav-caption">从这里进入每个工作阶段。</div>',
                 unsafe_allow_html=True)
-    review_view = _review_workbench(state)
+    projection = _workspace_projection(state, job_id)
+    review_view = projection["review"]
     review_nav = review_view["nav"]
     case_views = _workspace_case_views(job_id, state) if job_id else []
     case_pending = sum(1 for item in case_views
@@ -3950,8 +4087,11 @@ def _render_workspace_nav(section, state, job_id=""):
                            and item.get("baseline_status") == "rejected"))
     compliance = _workspace_compliance_view(job_id, state) if job_id else {}
     qa = _finalization.normalize_final_qa(state.get("final_qa"))
-    terms_done = bool(state.get("glossary_frozen") or state.get("quality_bypass")
-                      or (state.get("auto_terms") and not state.get("quality_mode")))
+    terms_required = bool(state.get("quality_mode") or state.get("glossary")
+                          or state.get("glossary_frozen") or state.get("auto_terms"))
+    terms_done = not terms_required or bool(
+        state.get("glossary_frozen") or state.get("quality_bypass")
+        or (state.get("auto_terms") and not state.get("quality_mode")))
     compliance_counts = compliance.get("counts") or {}
     qa_required = bool(state.get("report_enabled"))
     delivery_label, _delivery_tone = _workspace_delivery_state(job_id, state) \
@@ -3976,13 +4116,17 @@ def _render_workspace_nav(section, state, job_id=""):
     nav_meta = {
         "overview": (("", "neutral", "当前任务全貌") if section == "overview" else
                      ("", "neutral", "回到任务概览")),
-        "translation": (("", "done", "翻译门禁已通过")
-                         if state.get("p2_done") else ("1 项", "pending", "翻译尚未完成")),
-        "terms": (("", "done", "术语已冻结") if terms_done else
+        "translation": (("", "done", "翻译已完成")
+                         if state.get("p2_done") and
+                         projection["translated_segments"] >= projection["total_segments"]
+                         else (f"{projection['translated_segments']} / {projection['total_segments']} 段",
+                               "pending", "翻译尚未完成")),
+        "terms": (("", "done", "无需确认术语") if not terms_required else
+                  ("", "done", "术语已冻结") if terms_done else
                   ("1 项", "pending", "术语仍需确认")),
         "review": (review_nav["label"], review_nav["tone"], review_nav["title"])
         if state.get("p2_done") else ("", "pending", "翻译完成后开始审校"),
-        "cases": ((f"{case_pending} 项", "attention", f"还有 {case_pending} 个案例未完成人工确认") if case_pending else
+        "cases": ((f"{case_pending} 项", "pending", f"还有 {case_pending} 个案例未完成人工确认") if case_pending else
                   ("", "done", "案例均已完成人工确认") if case_views else
                   ("", "pending", "案例选择产物尚未生成")),
         "report": (("", "done", "研究报告稿已生成") if state.get("p3_done") else
@@ -4031,16 +4175,23 @@ def _render_workspace_project_details(state):
         st.caption(f"段落：{len(state.get('paras') or []):,} · 目标语言：{state.get('target_lang') or '简体中文'}")
 
 
-def _translation_pair_status(pair):
-    return _translation_pair_status_label(pair)
+def _translation_pair_status(pair, state=None, index=None):
+    return _translation_pair_status_label(pair, state, index)
 
 
-def _translation_pair_status_label(pair):
+def _translation_pair_status_label(pair, state=None, index=None):
+    if state is not None and isinstance(index, int):
+        projection = _workspace_projection(state)
+        status = projection["segment_status"].get(index)
+        if status:
+            return status
+    if not state or not state.get("translation_core_review_required"):
+        return "已翻译" if str(pair.get("target") or "").strip() else "待翻译"
     if pair.get("human_edited"):
         return "已修改"
     if pair.get("reviewed"):
         return "已审校"
-    return "待审"
+    return "待审校"
 
 
 def _translation_pair_flags(state, pair):
@@ -4147,9 +4298,9 @@ def _render_workspace_translation_context(job_id, state):
          and issue.get("segment_index") == index), None)
     review_task = next((item for item in findings
                         if item.get("kind") in {"failed", "stale", "missing"}), None)
-    status_symbol = "!" if review_task else _translation_pair_status(pair)
+    status_symbol = "!" if review_task else _translation_pair_status(pair, state, index)
     status_label = review_task["status_label"] if review_task else \
-        _translation_pair_status_label(pair)
+        _translation_pair_status_label(pair, state, index)
 
     st.markdown(
         f'<div class="tp-translation-inspector-head"><div><h3>当前段落 · #{index + 1}</h3>'
@@ -4465,8 +4616,9 @@ def _render_workspace_context(job_id, state, section):
 
 
 def _render_workspace_overview(job_id, state):
-    review_view = _review_workbench(state)
-    readiness = review_view["readiness"]
+    projection = _workspace_projection(state, job_id)
+    review_view = projection["review"]
+    readiness = projection["review_readiness"]
     progress_view = review_view["progress"]
     contexts = review_view["queue_items"]
     status, tone = _workspace_status(state, job_id)
@@ -4474,41 +4626,60 @@ def _render_workspace_overview(job_id, state):
     st.markdown('<h2>概览</h2>'
                 '<div class="tp-section-lead">当前任务与项目进度</div>',
                 unsafe_allow_html=True)
-    _render_runtime_panel(job_id, state)
+    if core.build_job_runtime_view(job_id, state).get("runtime_status") not in {None, "idle", "completed"}:
+        _render_runtime_panel(job_id, state)
     impact = core.dependency_impact_view(job_id, state)
     compliance = _workspace_compliance_view(job_id, state)
     compliance_counts = compliance.get("counts") or {}
-    if not readiness["ready"]:
-        action_text = review_view["delivery"]["detail"] + "。"
+    report_required = bool(state.get("report_enabled"))
+    if not state.get("p2_done") or projection["translated_segments"] < projection["total_segments"]:
+        action_text = "正在翻译"
+        action_detail = (f'{projection["translated_segments"]} / {projection["total_segments"]} 段已完成')
+    elif not readiness["ready"] and readiness.get("status") in {"stale", "failed"}:
+        action_text = "需要你的处理"
+        action_detail = review_view["delivery"]["detail"] + "。"
+    elif blockers:
+        action_text = "需要你的处理"
+        action_detail = f"还有 {blockers} 个必须处理的问题。"
+    elif not readiness["ready"]:
+        action_text = "需要完成审校"
+        action_detail = review_view["delivery"]["detail"] + "。"
     elif impact.get("status") == "stale":
-        action_text = "当前译文已通过，但受影响的报告产物仍需重建。"
-    elif state.get("report_enabled") and not _delivery.report_ready(state):
-        action_text = "报告尚未完成，暂不满足交付条件。"
-    elif compliance_counts.get("fail") or compliance_counts.get("manual_review"):
-        action_text = "合规检查或人工复核尚未完成，暂不满足交付条件。"
+        action_text = "报告需要更新"
+        action_detail = "当前译文已变化，受影响的下游内容需要重建。"
+    elif report_required and not _delivery.report_ready(state):
+        action_text = "报告尚未完成"
+        action_detail = "完成报告后才能继续准备交付。"
+    elif report_required and (compliance_counts.get("fail") or compliance_counts.get("manual_review")):
+        action_text = "需要完成交付检查"
+        action_detail = "合规检查或人工复核仍有待处理项目。"
     else:
-        action_text = "当前没有交付阻塞，可以准备最终版本。"
+        action_text = "可以准备交付"
+        action_detail = "当前译文状态满足继续准备最终版本的条件。"
     st.markdown('<div class="tp-overview-hero">'
                 f'{_workspace_status_badge(status, tone)}'
                 f'<strong>{escape(action_text)}</strong>'
-                f'<p>已完成翻译 {len(state.get("pairs") or []):,} 段；'
-                f'{progress_view["current"]:,} / {progress_view["total"]:,} 段审校与当前译文一致。</p>'
+                f'<p>{escape(action_detail)}</p>'
+                f'<small>{projection["translated_segments"]:,} / {projection["total_segments"]:,} 段已翻译 · '
+                + (f'{progress_view["current"]:,} / {progress_view["total"]:,} 段已有最新审校结果。'
+                   if projection["review_required"] else "当前任务未启用独立审校。")
+                + '</small>'
                 '</div>', unsafe_allow_html=True)
 
-    total_segments = len(state.get("paras") or state.get("pairs") or [])
-    translated_segments = len(state.get("pairs") or []) if state.get("p2_done") else 0
-    reviewed_segments = progress_view["current"]
+    total_segments = projection["total_segments"]
+    translated_segments = projection["translated_segments"]
+    reviewed_segments = projection["review_coverage"]
     case_count = len((core.load_academic_artifact(job_id, "selected_cases") or {}).get("cases") or [])
     cards = [
         ("翻译", f"{translated_segments:,} / {total_segments:,} 段",
-         "完成" if state.get("p2_done") else "处理中", "查看翻译", "translation",
+         "已翻译" if state.get("p2_done") else "处理中", "查看翻译", "translation",
          "is-done" if state.get("p2_done") else "is-active"),
-        ("审校", f"{reviewed_segments:,} / {total_segments:,} 段",
-         readiness["label"],
+        ("审校", (f"{reviewed_segments:,} / {total_segments:,} 段" if projection["review_required"] else "不适用"),
+         readiness["label"] if projection["review_required"] else "当前任务未启用独立审校",
          review_view["primary_action"]["label"]
          if review_view["primary_action"]["kind"] != "delivery" else "查看审校",
          "review",
-         "is-done" if readiness["ready"] and not contexts else "is-active"),
+         "is-done" if not projection["review_required"] or readiness["ready"] and not contexts else "is-active"),
         ("报告", f"{case_count:,} 个案例",
          _workspace_report_stage(job_id, state), "查看报告", "report",
          "is-done" if state.get("p3_done") else
@@ -4530,8 +4701,8 @@ def _render_workspace_overview(job_id, state):
         ("原文处理", bool(state.get("p1_done")), False),
         ("术语提取", bool(state.get("auto_terms")), False),
         ("翻译", bool(state.get("p2_done")), False),
-        ("人工审校", bool(state.get("p2_done") and readiness["ready"]),
-         bool(state.get("p2_done") and not readiness["ready"])),
+        ("独立审校", (not projection["review_required"] or bool(state.get("p2_done") and readiness["ready"])),
+         bool(projection["review_required"] and state.get("p2_done") and not readiness["ready"])),
         ("报告草稿", bool(state.get("p3_done")), False),
         ("最终交付", _workspace_status(state, job_id)[0].startswith("已冻结交付"), False),
     ]
@@ -4564,6 +4735,7 @@ def _render_workspace_overview(job_id, state):
 
 def _render_workspace_translation(job_id, state):
     pairs = state.get("pairs") or []
+    projection = _workspace_projection(state)
     st.markdown('<h2>翻译</h2>'
                 '<div class="tp-section-lead">浏览、检查和编辑双语段落。</div>',
                 unsafe_allow_html=True)
@@ -4574,21 +4746,45 @@ def _render_workspace_translation(job_id, state):
     change_reason = ("当前译文已更新，相关下游需要重新检查"
                      if "CURRENT_TRANSLATION" in raw_change_reason
                      else raw_change_reason or "工作版本已更新")
-    change_note = (f"最近变更：第 {', '.join(str(int(x) + 1) for x in changed_indexes)} 段 · "
+    valid_changed_indexes = [x for x in changed_indexes
+                             if isinstance(x, int) and 0 <= x < len(pairs)]
+    change_note = (f"最近变更：第 {', '.join(str(int(x) + 1) for x in valid_changed_indexes)} 段 · "
                    f"{change_reason}"
-                   if changed_indexes else "尚未记录工作版本变更")
-    st.markdown(
-        '<div class="tp-truth-banner">'
-        '<div><span class="tp-truth-kicker">交付与审校依据</span>'
-        '<strong>当前译文 — 交付和审校的唯一来源</strong>'
-        f'<p>版本 v{truth["version"]} · {truth["segment_count"]:,} 段。报告、案例、附录和交付文件都只能读取这里的当前译文。</p>'
-        f'<small>{escape(change_note)}</small></div>'
-        '</div>', unsafe_allow_html=True)
-    reviewed = (state.get("review_stats") or {}).get("reviewed_segments", 0)
-    total = len(pairs)
-    st.caption(f"{total:,} 段 · {reviewed:,} 已审校 · {max(0, total - reviewed):,} 待审 · TM 复用 {state.get('tm_used_count', 0):,}")
+                   if valid_changed_indexes else "尚未记录当前译文变更")
+    has_current_translation = bool(pairs and any(
+        str(pair.get("target") or "").strip() for pair in pairs
+        if isinstance(pair, dict)))
+    if has_current_translation:
+        st.markdown(
+            '<div class="tp-truth-banner">'
+            '<div><span class="tp-truth-kicker">交付与审校依据</span>'
+            '<strong>当前译文 — 交付和审校的唯一来源</strong>'
+            f'<p>版本 v{truth["version"]} · {truth["segment_count"]:,} 段。报告、案例、附录和交付文件都只能读取这里的当前译文。</p>'
+            f'<small>{escape(change_note)}</small></div>'
+            '</div>', unsafe_allow_html=True)
+    total = projection["total_segments"]
+    if projection["review_required"]:
+        st.caption(f"{projection['translated_segments']:,} / {total:,} 段已翻译 · "
+                   f"{projection['review_coverage']:,} 段已有最新审校结果 · "
+                   f"{projection['missing_review_segments'] + projection['stale_segments'] + projection['failed_segments']:,} 段待处理 · "
+                   f"TM 复用 {state.get('tm_used_count', 0):,}")
+    else:
+        st.caption(f"{projection['translated_segments']:,} / {total:,} 段已翻译 · 当前任务未启用独立审校 · "
+                   f"TM 复用 {state.get('tm_used_count', 0):,}")
     if not pairs:
-        st.markdown('<div class="tp-empty">翻译尚未开始。</div>', unsafe_allow_html=True)
+        runtime = core.build_job_runtime_view(job_id, state)
+        runtime_status = runtime.get("runtime_status") or runtime.get("status")
+        if runtime_status in {"failed", "interrupted", "stalled"}:
+            st.error("翻译未完成；上次运行没有生成当前译文。")
+            st.caption("已保留任务进度，修复 AI 配置后可以重试翻译。")
+            if st.button("前往 AI 设置", key=f"translation_open_settings_{job_id}", width="stretch"):
+                st.session_state.app_view = "settings"
+                st.session_state.workspace_mode = False
+                st.rerun()
+            if runtime_status != "failed":
+                st.caption("也可以回到概览继续处理任务。")
+        else:
+            st.markdown('<div class="tp-empty">翻译尚未开始。</div>', unsafe_allow_html=True)
         return
     toolbar_search, toolbar_primary, toolbar_filter, toolbar_more = st.columns(
         [3.35, 2.35, 0.9, 0.9], gap="small")
@@ -4619,6 +4815,12 @@ def _render_workspace_translation(job_id, state):
         filter_terms=filter_terms, filter_edited=filter_edited,
         filter_issues=issue_only, filter_tm=filter_tm,
         issue_indexes=issue_indexes)
+    if filter_label == "待审":
+        visible_indexes = [index for index in visible_indexes
+                           if projection["segment_status"].get(index) != "已审校"]
+    elif filter_label == "已审校":
+        visible_indexes = [index for index in visible_indexes
+                           if projection["segment_status"].get(index) == "已审校"]
     records = _translation_segment_records(job_id, state)
     visible_records = [records[index] for index in visible_indexes]
     if not visible_indexes:
@@ -4631,7 +4833,7 @@ def _render_workspace_translation(job_id, state):
     if mode == "聚焦模式":
         pair = selected_segment["pair"]
         st.markdown(f'<div class="tp-focus-head"><span>第 {selected_index + 1} 段</span>'
-                    f'<span>{escape(_translation_pair_status_label(pair))} · {selected_index + 1} / {total}</span></div>',
+                    f'<span>{escape(_translation_pair_status_label(pair, state, selected_index))} · {selected_index + 1} / {total}</span></div>',
                     unsafe_allow_html=True)
         source_col, target_col = st.columns(2)
         with source_col:
@@ -4654,7 +4856,7 @@ def _render_workspace_translation(job_id, state):
         return
 
     rows = [{
-        "状态": _translation_pair_status(pair),
+        "状态": _translation_pair_status(pair, state, index),
         "#": f"#{index + 1}",
         "原文": _translation_preview(pair.get("source")),
         "当前译文": _translation_preview(pair.get("target")),
@@ -4703,10 +4905,12 @@ def _render_workspace_terms(job_id, state):
     if frozen:
         st.success(f"术语已冻结 · v{frozen.get('version')}")
     elif bypassed:
-        st.info("本任务跳过了人工冻结，当前使用 provisional 术语。")
+        st.info("本任务跳过了人工冻结，当前使用暂定术语。")
     elif not state.get("p2_done") and state.get("quality_mode"):
-        st.warning("术语尚未冻结；完成审核后才能继续翻译。")
+        st.warning("术语尚未冻结；完成人工确认后才能继续翻译。")
         _render_profile_editor(job_id, state)
+    if frozen and state.get("p2_done"):
+        st.info("当前术语版本已用于翻译；修改锁定术语后，相关译文或审校结果可能需要重新确认。")
     if not entries:
         st.markdown('<div class="tp-empty">暂无项目术语。</div>', unsafe_allow_html=True)
         return
@@ -4723,7 +4927,7 @@ def _render_workspace_terms(job_id, state):
         df = _glossary_dataframe(entries, state.get("paras") or [])
         visible = ["选择", "source", "proposed_target", "preferred", "status", "domain", "note", "id", "payload"]
         edited = st.data_editor(
-            df[[key for key in visible if key in df.columns]],
+            _humanize_glossary_editor(df[[key for key in visible if key in df.columns]]),
             key=f"workspace_glossary_editor_{job_id}", num_rows="dynamic",
             hide_index=True, width="stretch",
             column_config={
@@ -4733,7 +4937,7 @@ def _render_workspace_terms(job_id, state):
                 "proposed_target": st.column_config.TextColumn("建议译名"),
                 "preferred": st.column_config.TextColumn("首选译名"),
                 "status": st.column_config.SelectboxColumn(
-                    "状态", options=["candidate", "provisional", "locked", "rejected"]),
+                    "状态", options=list(_TERM_STATUS_LABELS.values())),
                 "domain": st.column_config.TextColumn("领域"),
                 "note": st.column_config.TextColumn("备注"),
                 "payload": st.column_config.TextColumn("payload", disabled=True),
@@ -4753,171 +4957,19 @@ def _render_workspace_terms(job_id, state):
             st.rerun()
     else:
         rows = [{"源术语": e.get("source", ""), "首选译名": e.get("preferred") or e.get("target", ""),
-                 "状态": e.get("status", "provisional"), "出现次数": len(e.get("occurrences") or [])}
+                 "状态": _TERM_STATUS_LABELS.get(str(e.get("status") or "provisional"), "待确认"),
+                 "出现次数": len(e.get("occurrences") or [])}
                 for e in entries]
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=430)
 
 
-def _render_workspace_review(job_id, state):
-    view = _review_workbench(state)
-    readiness = view["readiness"]
-    progress = view["progress"]
-    items = view["queue_items"]
-    primary = view["primary_action"]
-    review_runtime = resolve_review_runtime()
-    review_required = bool(state.get("translation_core_review_required"))
-    review_ready = _review_runtime_ready(review_runtime)
-    translator_ready = bool(api_key and ai_model)
-    st.markdown('<div class="tp-review-head"><div><div class="tp-section-kicker">人工工作区</div>'
-                '<h2>审校工作台</h2></div>'
-                f'<div class="tp-review-count">{len(items):,} 项当前任务</div></div>',
-                unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="tp-review-readiness is-{readiness["tone"]}">'
-        '<div><span>当前状态</span>'
-        f'<strong>{escape(readiness["label"])}</strong>'
-        f'<p>{escape(readiness["detail"])}</p></div>'
-        f'<div class="tp-review-progress"><b>{progress["current"]} / {progress["total"]}</b>'
-        '<span>段已完成当前审校</span></div>'
-        '<div class="tp-review-progress-grid">'
-        f'<span><b>{progress["blocking"]}</b> 必须处理</span>'
-        f'<span><b>{progress["actionable"]}</b> 建议检查</span>'
-        f'<span><b>{progress["stale"]}</b> 需要重新审校</span>'
-        f'<span><b>{progress["failed"]}</b> 审校未完成</span>'
-        f'<span><b>{progress["missing"]}</b> 尚未审校</span>'
-        '</div></div>', unsafe_allow_html=True)
-    primary_disabled = primary["kind"] == "review_segments" and not review_ready
-    if st.button(primary["label"], type="primary", disabled=primary_disabled,
-                 key=f"review_primary_{job_id}_{primary['kind']}", width="stretch"):
-        if primary["kind"] == "review_segments":
-            with st.spinner("正在审校所选段落…"):
-                _run_review_with_runtime(
-                    job_id, primary["segment_ids"], review_runtime, target_lang,
-                    style_rules)
-            refreshed = core.load_job_state(job_id) or state
-            selected = _workbench_view.select_queue_item(
-                _review_workbench(refreshed)["queue_items"])
-            _select_review_item(selected)
-            _set_workspace_flash("审校已完成；工作台已更新为当前结果。")
-        elif primary["kind"] == "handle_finding":
-            _select_review_item(next(item for item in items
-                                     if item["id"] == primary["item_id"]))
-        else:
-            st.session_state.workspace_section = "delivery"
-        st.rerun()
-    if primary_disabled:
-        st.caption(f"{_review_runtime_missing_message()}。")
-
-    if not items:
-        _select_review_item(None)
-        st.markdown('<div class="tp-empty">当前没有待处理审校任务。</div>',
-                    unsafe_allow_html=True)
-        return
-
-    filter_names = [
-        ("pending", "待处理"), ("rereview", "需复审"),
-        ("suggested", "建议"), ("reference", "参考"), ("all", "全部"),
-    ]
-    filter_options = [f"{label} {view['filter_counts'][name]}"
-                      for name, label in filter_names]
-    label_to_filter = {option: name for option, (name, _label)
-                       in zip(filter_options, filter_names)}
-    default_filter = ("rereview" if view["filter_counts"]["rereview"] else
-                      "pending" if view["filter_counts"]["pending"] else
-                      "suggested" if view["filter_counts"]["suggested"] else
-                      "reference" if view["filter_counts"]["reference"] else "all")
-    default_label = next(option for option, name in label_to_filter.items()
-                         if name == default_filter)
-    filter_key = f"workspace_review_filter_chips_{job_id}"
-    if st.session_state.get(filter_key) not in filter_options:
-        st.session_state[filter_key] = default_label
-    filter_value = st.segmented_control(
-        "筛选审校任务", filter_options, key=filter_key,
-        label_visibility="collapsed", width="stretch") or default_label
-    visible = _workbench_view.filter_queue_items(items, label_to_filter[filter_value])
-    if not visible:
-        _select_review_item(None)
-        st.info("当前筛选下没有审校任务。")
-        return
-    selected = _selected_review_item(view, visible)
-
-    queue_col, editor_col = st.columns([0.78, 2.72], gap="medium")
-    with queue_col:
-        st.markdown(f'<h3>工作队列 <span class="tp-review-queue-count">{len(visible)}</span></h3>',
-                    unsafe_allow_html=True)
-        st.caption("失败与过期任务优先，其次是当前必须处理的问题。")
-        queue_labels, label_to_id = [], {}
-        for item in visible:
-            detail = (item.get("summary") or "请检查当前任务")[:54]
-            if item.get("kind") == "finding":
-                detail = f'{item["status_label"]} · {detail}'
-            base = f'{item["title"]}\n{detail}'
-            label = base
-            occurrence = 1
-            while label in label_to_id:
-                occurrence += 1
-                label = f"{base} · 位置 {occurrence}"
-            queue_labels.append(label)
-            label_to_id[label] = item["id"]
-        queue_key = f"workspace_review_queue_{job_id}"
-        selected_label = next(label for label, item_id in label_to_id.items()
-                              if item_id == selected["id"])
-        if st.session_state.get(queue_key) not in label_to_id:
-            st.session_state[queue_key] = selected_label
-        selected_label = st.radio(
-            "审校队列", queue_labels, key=queue_key,
-            label_visibility="collapsed")
-        selected = next(item for item in visible
-                        if item["id"] == label_to_id[selected_label])
-        _select_review_item(selected)
-
-    with editor_col:
-        st.markdown(f'<div class="tp-segment-label">第 {selected["segment_number"]} 段 · '
-                    f'{escape(selected["status_label"])} · '
-                    f'{escape(selected.get("category_label") or "审校任务")}</div>',
-                    unsafe_allow_html=True)
-        if selected["kind"] == "stale":
-            st.warning("此段译文已在上次审校后修改；旧结果已保留为历史，但不再适用于当前译文。")
-        elif selected["kind"] == "failed":
-            st.error("上次独立审校未完成。当前译文尚未获得有效审校结果。")
-        elif selected["kind"] == "missing":
-            st.info("此段尚未完成独立审校。")
-        summary = selected.get("summary") or "请检查当前审校任务"
-        st.markdown('<div class="tp-review-diagnostic-label">问题是什么</div>'
-                    f'<div class="tp-review-diagnostic-copy tp-review-summary">{escape(summary)}</div>',
-                    unsafe_allow_html=True)
-        if selected.get("legacy_diagnostic"):
-            st.markdown('<div class="tp-review-legacy">旧版本审校记录：仅保留基础问题信息，'
-                        '请结合原文和当前译文人工判断。</div>', unsafe_allow_html=True)
-        source_markup, source_found = _review_highlight(
-            selected.get("source"), selected.get("source_span"))
-        target_markup, target_found = _review_highlight(
-            selected.get("target"), selected.get("target_span"))
-        source_col, target_col = st.columns(2, gap="medium")
-        with source_col:
-            st.markdown('<div class="tp-review-compare-label">原文</div>'
-                        f'<div class="tp-review-compare-text">{source_markup}</div>',
-                        unsafe_allow_html=True)
-            if selected.get("source_span") and not source_found:
-                st.caption("记录的原文片段无法在当前段落中可靠定位。")
-        with target_col:
-            st.markdown('<div class="tp-review-compare-label">当前译文</div>'
-                        f'<div class="tp-review-compare-text">{target_markup}</div>',
-                        unsafe_allow_html=True)
-            if selected.get("target_span") and not target_found:
-                st.caption("记录的译文片段无法在当前译文中可靠定位。")
-        suggested_target = selected.get("suggested_target") or ""
-        if suggested_target:
-            st.markdown('<div class="tp-review-suggestion"><span>系统建议</span>'
-                        f'<p>{escape(suggested_target)}</p></div>', unsafe_allow_html=True)
-        st.markdown('<div class="tp-review-diagnostic-label">为什么被标记</div>'
-                    f'<p class="tp-review-diagnostic-copy">{escape(selected.get("explanation") or selected.get("reason") or "该旧记录未保存完整判断依据。")}</p>',
-                    unsafe_allow_html=True)
-        st.markdown('<div class="tp-review-diagnostic-label">建议怎么处理</div>'
-                    f'<p class="tp-review-diagnostic-copy">{escape(selected.get("recommendation") or "核对原文和当前译文后，选择下方安全动作。")}</p>',
-                    unsafe_allow_html=True)
-
-        segment_id = selected.get("segment_id")
+def _render_review_item_actions(
+        job_id, state, selected, items, review_required, review_ready,
+        review_runtime, translator_ready):
+    """Keep the common human decisions beside the selected finding."""
+    segment_id = selected.get("segment_id")
+    suggested_target = selected.get("suggested_target") or ""
+    with st.container(key=f"review_action_bar_{selected['id']}"):
         if selected["kind"] in {"failed", "stale", "missing"}:
             action_label = {"failed": "重试审校此段", "stale": "重新审校此段",
                             "missing": "审校此段"}[selected["kind"]]
@@ -4947,8 +4999,8 @@ def _render_workspace_review(job_id, state):
                 st.session_state.workspace_section = "translation"
                 st.rerun()
             if not review_ready:
-                st.caption(f"{_review_runtime_missing_message()}；仍可先修改译文。")
-            return
+                st.caption(f"{_review_runtime_missing_message()}；仍可先修改译文，或前往 AI 设置。")
+            return True, ""
 
         note_key = f"workspace_review_note_{selected['id']}"
         with st.expander("处理说明（可选）", expanded=False):
@@ -5079,6 +5131,187 @@ def _render_workspace_review(job_id, state):
             else:
                 _set_workspace_flash("重新翻译完成，已完成重新审校。")
             st.rerun()
+    return False, note
+
+
+def _render_workspace_review(job_id, state):
+    view = _review_workbench(state)
+    readiness = view["readiness"]
+    progress = view["progress"]
+    items = view["queue_items"]
+    primary = view["primary_action"]
+    review_runtime = resolve_review_runtime()
+    review_required = bool(state.get("translation_core_review_required"))
+    review_ready = _review_runtime_ready(review_runtime)
+    translator_ready = bool(api_key and ai_model)
+    review_progress_value = (f"{progress['current']} / {progress['total']}"
+                             if review_required else "不适用")
+    review_progress_label = ("段已有最新审校结果"
+                             if review_required else "当前任务未启用独立审校")
+    st.markdown('<div class="tp-review-head"><div><div class="tp-section-kicker">人工工作区</div>'
+                '<h2>审校工作台</h2></div>'
+                f'<div class="tp-review-count">{len(items):,} 项当前任务</div></div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="tp-review-readiness is-{readiness["tone"]}">'
+        '<div><span>当前状态</span>'
+        f'<strong>{escape(readiness["label"])}</strong>'
+        f'<p>{escape(readiness["detail"])}</p></div>'
+        f'<div class="tp-review-progress"><b>{review_progress_value}</b>'
+        f'<span>{review_progress_label}</span></div>'
+        '<div class="tp-review-progress-grid">'
+        f'<span><b>{progress["blocking"]}</b> 必须处理</span>'
+        f'<span><b>{progress["actionable"]}</b> 建议检查</span>'
+        f'<span><b>{progress["stale"]}</b> 需要重新审校</span>'
+        f'<span><b>{progress["failed"]}</b> 审校未完成</span>'
+        f'<span><b>{progress["missing"]}</b> 尚未审校</span>'
+        '</div></div>', unsafe_allow_html=True)
+    if not review_required:
+        if not items:
+            st.info("当前任务未启用独立审校，此页不适用。当前译文可直接进入交付。")
+            if st.button("前往交付", type="primary", key=f"review_not_required_delivery_{job_id}", width="stretch"):
+                st.session_state.workspace_section = "delivery"
+                st.rerun()
+            return
+        st.info("当前任务未启用独立审校；以下是基础检查发现，仅需人工处理，不会触发独立审校。")
+    primary_disabled = primary["kind"] == "review_segments" and not review_ready
+    if primary["kind"] != "handle_finding":
+        with st.container(key=f"review_primary_action_{job_id}"):
+            if st.button(primary["label"], type="primary", disabled=primary_disabled,
+                         key=f"review_primary_{job_id}_{primary['kind']}"):
+                if primary["kind"] == "review_segments":
+                    with st.spinner("正在审校所选段落…"):
+                        _run_review_with_runtime(
+                            job_id, primary["segment_ids"], review_runtime, target_lang,
+                            style_rules)
+                    refreshed = core.load_job_state(job_id) or state
+                    selected = _workbench_view.select_queue_item(
+                        _review_workbench(refreshed)["queue_items"])
+                    _select_review_item(selected)
+                    _set_workspace_flash("审校已完成；工作台已更新为当前结果。")
+                else:
+                    st.session_state.workspace_section = "delivery"
+                st.rerun()
+        if primary_disabled:
+            st.warning(f"{_review_runtime_missing_message()}，无法运行审校。")
+            if st.button("前往 AI 设置", key=f"review_open_settings_{job_id}", width="stretch"):
+                st.session_state.app_view = "settings"
+                st.session_state.workspace_mode = False
+                st.rerun()
+
+    if not items:
+        _select_review_item(None)
+        st.markdown('<div class="tp-empty">当前没有待处理审校任务。</div>',
+                    unsafe_allow_html=True)
+        return
+
+    filter_names = [
+        ("pending", "待处理"), ("rereview", "需复审"),
+        ("suggested", "建议"), ("reference", "参考"), ("all", "全部"),
+    ]
+    filter_options = [f"{label} {view['filter_counts'][name]}"
+                      for name, label in filter_names]
+    label_to_filter = {option: name for option, (name, _label)
+                       in zip(filter_options, filter_names)}
+    default_filter = ("rereview" if view["filter_counts"]["rereview"] else
+                      "pending" if view["filter_counts"]["pending"] else
+                      "suggested" if view["filter_counts"]["suggested"] else
+                      "reference" if view["filter_counts"]["reference"] else "all")
+    default_label = next(option for option, name in label_to_filter.items()
+                         if name == default_filter)
+    filter_key = f"workspace_review_filter_chips_{job_id}"
+    if st.session_state.get(filter_key) not in filter_options:
+        st.session_state[filter_key] = default_label
+    filter_value = st.segmented_control(
+        "筛选审校任务", filter_options, key=filter_key,
+        label_visibility="collapsed", width="stretch") or default_label
+    visible = _workbench_view.filter_queue_items(items, label_to_filter[filter_value])
+    if not visible:
+        _select_review_item(None)
+        st.info("当前筛选下没有审校任务。")
+        return
+    selected = _selected_review_item(view, visible)
+    action_terminal, note = _render_review_item_actions(
+        job_id, state, selected, items, review_required, review_ready,
+        review_runtime, translator_ready)
+    if action_terminal:
+        return
+
+    queue_col, editor_col = st.columns([0.78, 2.72], gap="medium")
+    with queue_col:
+        st.markdown(f'<h3>工作队列 <span class="tp-review-queue-count">{len(visible)}</span></h3>',
+                    unsafe_allow_html=True)
+        st.caption("失败与过期任务优先，其次是当前必须处理的问题。")
+        queue_labels, label_to_id = [], {}
+        for item in visible:
+            detail = (item.get("summary") or "请检查当前任务")[:54]
+            if item.get("kind") == "finding":
+                detail = f'{item["status_label"]} · {detail}'
+            base = f'{item["title"]}\n{detail}'
+            label = base
+            occurrence = 1
+            while label in label_to_id:
+                occurrence += 1
+                label = f"{base} · 位置 {occurrence}"
+            queue_labels.append(label)
+            label_to_id[label] = item["id"]
+        queue_key = f"workspace_review_queue_{job_id}"
+        selected_label = next(label for label, item_id in label_to_id.items()
+                              if item_id == selected["id"])
+        if st.session_state.get(queue_key) not in label_to_id:
+            st.session_state[queue_key] = selected_label
+        selected_label = st.radio(
+            "审校队列", queue_labels, key=queue_key,
+            label_visibility="collapsed")
+        selected = next(item for item in visible
+                        if item["id"] == label_to_id[selected_label])
+        _select_review_item(selected)
+
+    with editor_col:
+        st.markdown(f'<div class="tp-segment-label">第 {selected["segment_number"]} 段 · '
+                    f'{escape(selected["status_label"])} · '
+                    f'{escape(selected.get("category_label") or "审校任务")}</div>',
+                    unsafe_allow_html=True)
+        if selected["kind"] == "stale":
+            st.warning("此段译文已在上次审校后修改；旧结果已保留为历史，但不再适用于当前译文。")
+        elif selected["kind"] == "failed":
+            st.error("上次独立审校未完成。当前译文尚未获得有效审校结果。")
+        elif selected["kind"] == "missing":
+            st.info("此段尚未完成独立审校。")
+        summary = selected.get("summary") or "请检查当前审校任务"
+        st.markdown('<div class="tp-review-diagnostic-label">问题是什么</div>'
+                    f'<div class="tp-review-diagnostic-copy tp-review-summary">{escape(summary)}</div>',
+                    unsafe_allow_html=True)
+        if selected.get("legacy_diagnostic"):
+            st.markdown('<div class="tp-review-legacy">旧版本审校记录：仅保留基础问题信息，'
+                        '请结合原文和当前译文人工判断。</div>', unsafe_allow_html=True)
+        source_markup, source_found = _review_highlight(
+            selected.get("source"), selected.get("source_span"))
+        target_markup, target_found = _review_highlight(
+            selected.get("target"), selected.get("target_span"))
+        source_col, target_col = st.columns(2, gap="medium")
+        with source_col:
+            st.markdown('<div class="tp-review-compare-label">原文</div>'
+                        f'<div class="tp-review-compare-text">{source_markup}</div>',
+                        unsafe_allow_html=True)
+            if selected.get("source_span") and not source_found:
+                st.caption("记录的原文片段无法在当前段落中可靠定位。")
+        with target_col:
+            st.markdown('<div class="tp-review-compare-label">当前译文</div>'
+                        f'<div class="tp-review-compare-text">{target_markup}</div>',
+                        unsafe_allow_html=True)
+            if selected.get("target_span") and not target_found:
+                st.caption("记录的译文片段无法在当前译文中可靠定位。")
+        suggested_target = selected.get("suggested_target") or ""
+        if suggested_target:
+            st.markdown('<div class="tp-review-suggestion"><span>系统建议</span>'
+                        f'<p>{escape(suggested_target)}</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="tp-review-diagnostic-label">为什么被标记</div>'
+                    f'<p class="tp-review-diagnostic-copy">{escape(selected.get("explanation") or selected.get("reason") or "该旧记录未保存完整判断依据。")}</p>',
+                    unsafe_allow_html=True)
+        st.markdown('<div class="tp-review-diagnostic-label">建议怎么处理</div>'
+                    f'<p class="tp-review-diagnostic-copy">{escape(selected.get("recommendation") or "核对原文和当前译文后，选择下方安全动作。")}</p>',
+                    unsafe_allow_html=True)
 
         if selected.get("category") == "style":
             with st.expander("保存为项目风格规则", expanded=False):
@@ -5162,8 +5395,8 @@ def _render_workspace_cases(job_id, state):
     st.markdown(
         '<div class="tp-truth-banner">'
         '<div><span class="tp-truth-kicker">案例引用依据</span>'
-        '<strong>当前译文 — 案例引用的交付真值</strong>'
-        f'<p>所有案例的“当前译文”都来自工作译文 v{truth["version"]}；案例只保存来源与分析用途，不另造终稿。</p>'
+        '<strong>案例引用以当前译文为准</strong>'
+        f'<p>所有案例的“当前译文”都来自工作译文 v{truth["version"]}；修改当前译文后，受影响的案例会提示重新确认。</p>'
         '</div></div>', unsafe_allow_html=True)
     if not views:
         st.markdown('<div class="tp-empty">尚未生成案例选择产物。</div>', unsafe_allow_html=True)
@@ -5337,9 +5570,9 @@ def _render_workspace_cases(job_id, state):
             else:
                 st.caption("没有已确认的作者事后解释。")
         if item.get("review_note"):
-            st.caption(f'审核说明：{item["review_note"]}')
+            st.caption(f'人工确认说明：{item["review_note"]}')
         if item.get("reviewed_at"):
-            st.caption(f'审核记录：{item.get("reviewed_at")} · {item.get("review_actor") or "user"}')
+            st.caption(f'人工确认记录：{item.get("reviewed_at")} · {item.get("review_actor") or "user"}')
         if stale:
             st.warning("当前译文或输入已变化，此案例需要重新检查；旧批准不能直接交付。")
         action_a, action_b, action_c, action_d = st.columns(4)
@@ -5429,6 +5662,17 @@ def _render_workspace_qa(job_id, state):
                      _compliance.DEFAULT_PROFILE_ID)
     profile = _compliance.compliance_profile(profile_id)
     counts = compliance.get("counts") or {}
+    qa = _finalization.normalize_final_qa(state.get("final_qa"))
+    structural = _workspace_structural_qa(job_id, state)
+    render_status = qa.get("libreoffice_render")
+    failed_count = int(counts.get("fail", 0) or 0) + int(structural == "FAIL") + int(render_status == "FAIL")
+    manual_count = int(counts.get("manual_review", 0) or 0)
+    manual_count += int(qa.get("author_visual_review") != "CONFIRMED")
+    manual_count += int(qa.get("word_final_review") != "CONFIRMED")
+    not_run_count = int(counts.get("not_checked", 0) or 0)
+    not_run_count += int(structural in {"NOT_RUN", "STALE"})
+    not_run_count += int(render_status in {None, "NOT_RUN", "STALE"})
+    attention_count = failed_count + manual_count + not_run_count
     source_mapping_label = {
         "reference_template_mapped": "已登记匿名参考模板",
     }.get(profile.get("authority_mapping_status"), "院校特殊要求需人工确认")
@@ -5437,6 +5681,22 @@ def _render_workspace_qa(job_id, state):
         f'<span>{escape(str(profile.get("display_name") or "默认 MTI 实践报告规范"))} · {escape(source_mapping_label)}</span>'
         f'<b>通过 {counts.get("pass", 0)} · 失败 {counts.get("fail", 0)} · 人工复核 {counts.get("manual_review", 0)} · 未检查 {counts.get("not_checked", 0)}</b>'
         '</div>', unsafe_allow_html=True)
+    if attention_count:
+        summary_parts = []
+        if failed_count:
+            summary_parts.append(f"{failed_count} 项自动检查失败")
+        if manual_count:
+            summary_parts.append(f"{manual_count} 项需要人工复核")
+        if not_run_count:
+            summary_parts.append(f"{not_run_count} 项尚未运行")
+        with st.container(key=f"qa_work_summary_{job_id}"):
+            st.markdown(
+                '<div class="tp-qa-work-summary"><strong>还有 '
+                f'{attention_count} 项需要处理</strong><span>{" · ".join(summary_parts)}</span></div>',
+                unsafe_allow_html=True)
+            if st.button("处理阻塞项", type="primary", key=f"qa_focus_{job_id}", width="stretch"):
+                st.session_state[f"qa_focus_rules_{job_id}"] = True
+                st.rerun()
     with st.expander("查看规则集技术依据", expanded=False):
         st.markdown(
             f'**规则集内部标识**：`{escape(str(profile.get("profile_id") or "—"))}`')
@@ -5451,6 +5711,7 @@ def _render_workspace_qa(job_id, state):
         for source in profile.get("implementation_sources") or []:
             st.caption(f'项目实现依据（非规范来源）：{source.get("document") or source.get("file") or "—"}')
     st.markdown('<h3 class="tp-qa-heading">合规检查清单</h3>', unsafe_allow_html=True)
+    focus_rules = bool(st.session_state.get(f"qa_focus_rules_{job_id}"))
     for index, rule in enumerate(compliance.get("rules") or []):
         status = str(rule.get("status") or "not_checked")
         label = {"pass": "通过", "fail": "失败", "manual_review": "手动复核",
@@ -5484,7 +5745,7 @@ def _render_workspace_qa(job_id, state):
                 f'<div class="tp-qa-rule is-{status}"><div><strong>{escape(str(rule_label))}</strong>'
                 f'<p>{escape(str(rule.get("message") or ""))}</p>'
                 f'</div><span>{escape(label)}</span></div>', unsafe_allow_html=True)
-            with st.expander("查看来源与技术细节", expanded=False):
+            with st.expander("查看来源与技术细节", expanded=focus_rules and status in {"fail", "manual_review", "not_checked"}):
                 st.caption(f'规则来源：{rule_source} · 页码/条款：{rule.get("page_or_clause") or source.get("page") or "待提供"}')
                 source_url = rule.get("source_url") or source.get("url") or ""
                 if source_url and has_rule_source:
@@ -5495,8 +5756,6 @@ def _render_workspace_qa(job_id, state):
                 if implementation_source:
                     st.caption(f'项目实现依据（非规范来源）：{implementation_source} · {implementation_clause or "—"}')
                 st.caption(f'内部状态：{status} · 规则标识：{rule.get("rule_id") or rule.get("id") or "—"}')
-    qa = _finalization.normalize_final_qa(state.get("final_qa"))
-    structural = _workspace_structural_qa(job_id, state)
     if structural in {"PASS", "FAIL", "NOT_RUN"} and structural != qa.get("structural_qa"):
         qa["structural_qa"] = structural
         state["final_qa"] = qa
@@ -6287,7 +6546,7 @@ def _render_report_status_card(job_id, view):
     if runtime.get("progress_total"):
         progress_pct = round(min(1.0, runtime["progress_completed"] /
                                  runtime["progress_total"]) * 100)
-        progress_html = (f'<div class="tp-report-status-progress" aria-label="报告进度 {escape(progress)}">'
+        progress_html = (f'<div class="tp-report-status-progress" aria-label="报告生成步骤 {escape(progress)}">'
                           f'<i style="width:{progress_pct}%"></i></div>')
     st.markdown(
         f'<div class="tp-report-overall is-{view["tone"]}">'
@@ -6297,7 +6556,7 @@ def _render_report_status_card(job_id, view):
         f'{_workspace_status_badge(view["overall_label"], view["tone"])}</div>'
         '<div class="tp-report-overall-grid">'
         f'<div><span>当前阶段</span><strong>{escape(current_step)}</strong></div>'
-        f'<div><span>当前进度</span><strong>{escape(progress)}</strong></div>'
+        f'<div><span>生成步骤</span><strong>{escape(progress)}</strong></div>'
         f'<div><span>最近运行信号</span><strong>{escape(_runtime_clock(signal))}</strong></div>'
         f'</div>{progress_html}<p class="tp-report-overall-detail">{escape(detail)}</p>'
         '</div>', unsafe_allow_html=True)
@@ -6686,11 +6945,14 @@ def _render_workspace_delivery(job_id, state):
                                core.load_academic_artifact(job_id, "report"))
     affected_count = len(impact.get("affected") or [])
     reusable_count = len(impact.get("reusable") or [])
+    review_gate = _workspace_view.delivery_review_gate_copy(
+        bool(review_readiness.get("required")), translation_gate_pass,
+        review_view["delivery"]["detail"])
+    review_gate_status = review_gate["status"]
+    review_gate_detail = review_gate["detail"]
     readiness = [
-        ("翻译审校", "已完成" if translation_gate_pass else "需要处理",
-         "当前译文已完成审校，可以继续准备交付" if translation_gate_pass else
-         review_view["delivery"]["detail"],
-         "pass" if translation_gate_pass else "warning"),
+        ("独立审校", review_gate_status, review_gate_detail,
+         "pass" if not review_readiness.get("required") or translation_gate_pass else "warning"),
         ("学术产物同步", "当前任务未启用" if not report_workflow_enabled else
          "需要更新" if (impact.get("status") == "stale" or
                                           report_stale or final_export_stale) else
@@ -6847,7 +7109,7 @@ def _render_workspace_delivery(job_id, state):
         next_detail = "当前报告还不能作为最终学术产物交付。"
         next_button = "打开报告"
         next_target = "report"
-    elif qa.get("author_visual_review") != "CONFIRMED" or qa.get("word_final_review") != "CONFIRMED":
+    elif finalization_qa_required and (qa.get("author_visual_review") != "CONFIRMED" or qa.get("word_final_review") != "CONFIRMED"):
         next_title = "完成最终人工复核"
         next_detail = "作者视觉复核和 Word 最终复核都必须分别记录。"
         next_button = "打开合规与 QA"
@@ -7128,15 +7390,14 @@ workspace_mode = st.session_state.get("workspace_mode", False)
 with st.sidebar:
     st.markdown(
                 '<div class="tp-brand" aria-label="FolioThread 长文档翻译工作空间">'
-                f'<img class="tp-brand-mark" src="{_BRAND_MARK_URI}" alt="">'
-                '<div class="tp-brand-copy"><strong>FolioThread</strong><b>长文档</b></div>'
-                '<span>Long-document Translation Workspace</span></div>',
+                f'<img class="tp-brand-logo" src="{_BRAND_LOGO_URI}" '
+                'alt="FolioThread Long-document Translation Workspace"></div>',
                 unsafe_allow_html=True)
     with st.container(key="new_task_action"):
         if st.button("新建任务", icon=":material/add:", width="stretch"):
             st.session_state.update(app_view="new", workspace_mode=False, task_step=1)
             st.rerun()
-    if workspace_mode or st.session_state.get("active_job_id"):
+    if st.session_state.get("active_job_id"):
         if st.button("当前任务", width="stretch", type="primary" if app_view == "workspace" else "secondary"):
             st.session_state.app_view = "workspace"
             st.rerun()
@@ -7172,10 +7433,14 @@ with st.sidebar:
             st.rerun()
     with st.container(key="provider_status"):
         provider_col, manage_col = st.columns([3, 1])
+        ai_view = _ai_configuration_view()
         connection_status = st.session_state.get("provider_connection_status", "unverified")
-        provider_col.markdown(f'<div class="tp-provider is-{connection_status}">'
+        # Keep the legacy class for existing CSS/tests while exposing the
+        # more useful configuration state in the visible copy.
+        provider_col.markdown(f'<div class="tp-provider is-{connection_status} is-{ai_view["state"]}">'
                               f'<strong>{escape(str(ai_provider))}</strong>'
-                              f'<span>{escape(str(ai_model or "未配置模型"))}</span></div>',
+                              f'<span>{escape(str(ai_model or "尚未选择模型"))} · '
+                              f'{escape(ai_view["label"])}</span></div>',
                               unsafe_allow_html=True)
         if manage_col.button("管理", key="manage_provider"):
             st.session_state.app_view = "settings"
@@ -7352,7 +7617,8 @@ with setup_placeholder.container():
                                      **_PERSIST_STATE)
         else:
             api_base = None
-        st.markdown("### 独立审校模型（可选）")
+        st.markdown("### 独立审校模型")
+        st.caption("可选：不单独配置时，审校会使用翻译模型。")
         reviewer_mode = st.radio(
             "审校模型",
             ["same", "separate"],
@@ -7360,6 +7626,7 @@ with setup_placeholder.container():
             format_func=lambda value: "与翻译模型相同" if value == "same" else "单独配置",
             key="reviewer_mode",
             horizontal=True,
+            on_change=_reset_reviewer_connection,
             **_PERSIST_STATE,
         )
         if reviewer_mode == "separate":
@@ -7370,20 +7637,42 @@ with setup_placeholder.container():
                 if st.session_state.get("reviewer_provider_choice", ai_provider) in providers
                 else providers.index(ai_provider),
                 key="reviewer_provider_choice",
+                on_change=_reset_reviewer_connection,
                 **_PERSIST_STATE,
             )
-            reviewer_model = st.text_input(
-                "审校模型", key="reviewer_model",
-                placeholder="例如 gpt-4.1-mini",
-                **_PERSIST_STATE,
-            )
+            reviewer_provider_cfg = core.PROVIDERS[reviewer_provider]
+            reviewer_model_opts = sorted(
+                reviewer_provider_cfg.get("models") or [], key=str.casefold)
+            if reviewer_model_opts:
+                reviewer_default = reviewer_provider_cfg.get("default_model")
+                if reviewer_default not in reviewer_model_opts:
+                    reviewer_default = reviewer_model_opts[0]
+                reviewer_current = st.session_state.get(
+                    "reviewer_model", reviewer_default)
+                if reviewer_current not in reviewer_model_opts:
+                    reviewer_current = reviewer_default
+                    st.session_state.reviewer_model = reviewer_current
+                reviewer_model = st.selectbox(
+                    "审校模型", reviewer_model_opts,
+                    index=reviewer_model_opts.index(reviewer_current),
+                    key="reviewer_model", on_change=_reset_reviewer_connection,
+                    **_PERSIST_STATE)
+            else:
+                reviewer_model = st.text_input(
+                    "审校模型", key="reviewer_model",
+                    placeholder=reviewer_provider_cfg.get("model_hint") or "例如 gpt-4.1-mini",
+                    on_change=_reset_reviewer_connection,
+                    **_PERSIST_STATE,
+                )
             reviewer_api_key = st.text_input(
                 "审校 API 密钥", type="password", key="reviewer_api_key",
+                on_change=_reset_reviewer_connection,
                 **_PERSIST_STATE,
             )
             reviewer_base_url = st.text_input(
                 "审校 API 地址（可选）", key="reviewer_base_url",
                 placeholder="留空使用服务商默认地址",
+                on_change=_reset_reviewer_connection,
                 **_PERSIST_STATE,
             )
         else:
@@ -7391,6 +7680,17 @@ with setup_placeholder.container():
             reviewer_model = ""
             reviewer_api_key = ""
             reviewer_base_url = ""
+        ai_view = _ai_configuration_view()
+        reviewer_view = ai_view["reviewer"]
+        reviewer_label = ("使用翻译模型" if reviewer_mode == "same"
+                          else reviewer_view["label"])
+        st.markdown(
+            '<div class="tp-connection-summary">'
+            f'<div><span>翻译模型</span><strong>{escape(ai_view["label"])}</strong>'
+            f'<small>{escape(str(ai_provider))} · {escape(str(ai_model or "尚未选择模型"))}</small></div>'
+            f'<div><span>独立审校</span><strong>{escape(reviewer_label)}</strong>'
+            f'<small>{escape("与翻译模型共用连接" if reviewer_mode == "same" else reviewer_view["label"])}</small></div>'
+            '</div>', unsafe_allow_html=True)
         can_fetch_models = provider_cfg.get("kind") in ("openai", "openai_compat") \
             and (provider_cfg.get("custom_base_url") or not model_opts)
         if can_fetch_models:
@@ -7436,16 +7736,25 @@ with setup_placeholder.container():
                 st.toast("AI 引擎配置已保存，重启应用后仍会保留")
         with test_btn:
             if st.button("测试连接", type="primary", width="stretch",
-                         disabled=not (api_key and ai_model)):
+                         disabled=not save_ready):
                 with st.spinner("正在验证连接…"):
                     ok, msg = core.test_provider(ai_provider, api_key,
                                                  ai_model, base_url=api_base)
+                    reviewer_ok, reviewer_msg = True, ""
+                    if ok and reviewer_mode == "separate":
+                        reviewer_ok, reviewer_msg = core.test_provider(
+                            reviewer_provider, reviewer_api_key, reviewer_model,
+                            base_url=reviewer_base_url or None)
                 if ok:
                     core.mark_onboarded()
-                st.session_state.provider_configured = ok
+                st.session_state.provider_configured = ok and reviewer_ok
                 st.session_state.provider_connection_status = \
                     "connected" if ok else "error"
-                st.session_state.provider_test_feedback = (ok, msg)
+                st.session_state.reviewer_connection_status = (
+                    "connected" if reviewer_ok else "error")
+                if ok and not reviewer_ok:
+                    msg = f"翻译连接正常；审校连接失败：{reviewer_msg}"
+                st.session_state.provider_test_feedback = (ok and reviewer_ok, msg)
                 st.rerun()
         if feedback := st.session_state.get("provider_test_feedback"):
             ok, msg = feedback
@@ -7644,7 +7953,7 @@ with setup_placeholder.container():
             _step_title(3, "交付内容", "选择要生成的文件与附加成果")
             output_config = st.session_state.output_config
             with st.container(key="deliver_translation"):
-                st.markdown('<div class="tp-output-section-head"><strong>译文</strong>'
+                st.markdown('<div class="tp-output-section-head"><strong>译文文件</strong>'
                             '<span>选择要生成的译文文件</span></div>',
                             unsafe_allow_html=True)
                 trans_a, trans_b = st.columns(2)
@@ -7703,8 +8012,8 @@ with setup_placeholder.container():
                         help="双语段落 JSONL，便于后续处理", **_PERSIST_STATE)
             enable_annotate = output_config["enable_annotate"]
             with st.container(key="deliver_academic"):
-                st.markdown('<div class="tp-output-section-head"><strong>研究资产（专用能力）</strong>'
-                            '<span>可选的过程证据、案例与报告产物</span></div>',
+                st.markdown('<div class="tp-output-section-head"><strong>研究与报告 · 专用能力</strong>'
+                            '<span>仅在需要研究产物时开启；不会影响普通译文交付</span></div>',
                             unsafe_allow_html=True)
                 st.toggle("生成实践报告", value=output_config["enable_report"],
                           key="output_report", on_change=_set_output_option,
@@ -7791,7 +8100,9 @@ with setup_placeholder.container():
                     else "用户调整"
             connection_status = st.session_state.get(
                 "provider_connection_status", "unverified")
-            can_start = bool(task_files and api_key and ai_model) and not bool(
+            task_review_required = bool(strategy_config.get("enable_review"))
+            ai_view = _ai_configuration_view(task_review_required)
+            can_start = bool(task_files and _workspace_view.task_ai_ready(ai_view)) and not bool(
                 st.session_state.get("report_template_error"))
             if st.session_state.get("report_template_error"):
                 st.warning("请移除或重新上传可解析的报告模板后再开始任务。")
@@ -7799,18 +8110,18 @@ with setup_placeholder.container():
                                       glossary_name, strategy_config, output_config,
                                       style_template, style_source),
                         unsafe_allow_html=True)
-            st.markdown(_runtime_html(ai_provider, ai_model, connection_status,
+            st.markdown(_runtime_html(ai_provider, ai_model, ai_view["state"],
                                       can_start), unsafe_allow_html=True)
-            if not api_key:
+            if ai_view["state"] == "credentials_missing":
                 with st.container(key="engine_setup_banner"):
                     message_col, action_col = st.columns([4, 1])
                     message_col.warning(
-                        "尚未配置 AI 引擎。开始任务前，请先完成服务商与 API 密钥设置。",
+                        "已选择 AI 模型，但 API 凭据未配置。开始任务前，请先完成凭据设置。",
                         icon=":material/warning:")
                     action_col.button("前往设置", key="open_engine_settings",
                                       on_click=_open_provider_settings,
                                       width="stretch")
-            elif connection_status == "error":
+            elif ai_view["state"] == "error":
                 with st.container(key="engine_connection_banner"):
                     message_col, action_col = st.columns([4, 1])
                     message_col.error(
@@ -7819,11 +8130,11 @@ with setup_placeholder.container():
                     action_col.button("检查设置", key="open_engine_settings_error",
                                       on_click=_open_provider_settings,
                                       width="stretch")
-            elif connection_status != "connected":
+            elif ai_view["state"] != "connected":
                 with st.container(key="engine_connection_banner"):
                     message_col, action_col = st.columns([4, 1])
                     message_col.warning(
-                        "AI 引擎尚未验证。建议先测试连接，确认可用后再开始任务。",
+                        "模型已配置，但连接尚未验证。建议先测试连接，确认可用后再开始任务。",
                         icon=":material/warning:")
                     action_col.button("测试连接", key="open_engine_settings_unverified",
                                       on_click=_open_provider_settings,
@@ -7873,36 +8184,42 @@ if app_view == "history":
                 hc1, hc2 = st.columns([4, 1])
                 filename = escape(str(job["state"].get("filename", "?")))
                 runtime_view = core.build_job_runtime_view(job["job_id"], job["state"])
-                status = escape(runtime_view["headline_status"])
-                business_status = escape(core.task_status_label(job["state"], job["job_id"]))
                 recovery = core.recovery_summary(job["job_id"], job["state"])
+                delivery_label, _ = _workspace_delivery_state(
+                    job["job_id"], job["state"])
+                history = _workspace_view.history_copy(
+                    job["state"], delivery_state=delivery_label,
+                    snapshot_current=core.delivery_snapshot_status(
+                        job["job_id"], job["state"]).get("current", False))
+                runtime_status = runtime_view.get("runtime_status") or runtime_view.get("status")
+                if runtime_status in {"running", "waiting_external", "starting", "queued", "resume_requested"}:
+                    history = {"status": "正在处理", "detail": "任务仍在运行，可打开查看进度", "action": "打开任务"}
+                elif runtime_status in {"failed", "interrupted", "stalled", "cancelled"} or (
+                        runtime_status == "idle_incomplete" and recovery.get("current_batch")):
+                    history = {"status": "处理中断" if runtime_status in {"interrupted", "idle_incomplete"} else "运行未完成",
+                               "detail": "已保留当前进度，可以继续处理", "action": "继续处理"}
                 hc1.markdown(f'<div class="tp-history-copy"><strong>{filename}</strong>'
-                             f'<span>{status} · 业务阶段：{business_status}</span></div>',
+                             f'<span>{escape(history["status"])} · {escape(history["detail"])}</span></div>',
                              unsafe_allow_html=True)
-                action = "继续处理" if "resume" in runtime_view.get("available_actions", []) \
-                    else "打开"
+                action = history["action"]
                 if hc2.button(action, key=f"open_history_{job['job_id']}", width="stretch"):
                     st.session_state.update(active_job_id=job["job_id"], app_view="workspace",
                                             workspace_mode=True)
+                    target_section = {
+                        "继续审校": "review", "查看交付": "delivery",
+                        "更新报告": "report",
+                    }.get(action)
+                    if target_section:
+                        st.session_state.workspace_section = target_section
                     if action == "继续处理":
                         _resume_job(job["job_id"], job["state"])
                     st.rerun()
-                st.caption(
-                    f"自动保存已开启 · 最近保存进度 {_format_saved_at(recovery['last_saved_at'])} · "
-                    f"已完成 {recovery['completed_batch_count']}/{recovery['total_batches']} 个处理批次")
-                if runtime_view.get("current_operation"):
-                    st.caption(f"当前步骤：{runtime_view['current_operation']}")
-                if runtime_view.get("progress"):
-                    completed, total = runtime_view["progress"]
-                    st.caption(f"报告工作流：已完成 {completed} / {total} 个检查点")
+                st.caption(f"最近更新 {_format_saved_at(recovery['last_saved_at'])} · 自动保存已开启")
                 if recovery.get("current_batch"):
                     current = recovery["current_batch"]
                     st.warning(
-                        f"第 {current['number']} 个处理批次中断，已保存到本批次 "
-                        f"{current['completed_segments']}/{current['segment_count']} 段；"
-                        "继续时只会重新执行未完成批次。")
-                if recovery.get("recovered_tm_entries"):
-                    st.caption(f"已恢复 {recovery['recovered_tm_entries']} 条翻译记忆同步记录。")
+                        f"处理中断：当前批次已保存 {current['completed_segments']}/{current['segment_count']} 段；"
+                        "继续后只处理未完成内容。")
                 _render_snapshot_versions(job["job_id"], job["state"], "history")
     st.stop()
 if app_view == "new" and not workspace_mode and not run_clicked:
@@ -8036,7 +8353,7 @@ if active and not (app_view == "workspace" and st.session_state.get("active_job_
         box.markdown(_glossary_status_chips(entries), unsafe_allow_html=True)
         fc1, fc2, fc3 = box.columns([2, 1, 1])
         filter_status = fc1.selectbox(
-            "状态筛选", ["全部", "locked", "provisional", "candidate", "rejected"],
+            "状态筛选", ["全部", *(_TERM_STATUS_LABELS.values())],
             key=f"gfilter_status_{active}")
         only_conflicts = fc2.checkbox("只看冲突项", key=f"gfilter_conflict_{active}")
         filter_text = fc3.text_input("搜索源术语", key=f"gfilter_text_{active}")
@@ -8044,7 +8361,7 @@ if active and not (app_view == "workspace" and st.session_state.get("active_job_
         df = _glossary_dataframe(entries, astate.get("paras") or [])
         view_mask = pd.Series(True, index=df.index)
         if filter_status != "全部":
-            view_mask &= df["status"].eq(filter_status)
+            view_mask &= df["status"].eq(_TERM_STATUS_VALUES[filter_status])
         if only_conflicts:
             view_mask &= df["冲突"].eq("冲突")
         if filter_text.strip():
@@ -8054,7 +8371,7 @@ if active and not (app_view == "workspace" and st.session_state.get("active_job_
             box.caption(f"已按条件筛选：显示 {len(df_view)} / {len(df)} 条术语。")
 
         edited = box.data_editor(
-            df_view,
+            _humanize_glossary_editor(df_view),
             key=f"glossary_editor_{active}",
             num_rows="dynamic",
             hide_index=True,
@@ -8068,9 +8385,9 @@ if active and not (app_view == "workspace" and st.session_state.get("active_job_
                 "preferred": st.column_config.TextColumn("首选译名"),
                 "forbidden": st.column_config.TextColumn("禁止译名（;分隔）"),
                 "behavior": st.column_config.SelectboxColumn(
-                    "行为", options=["translate", "preserve"]),
+                    "行为", options=list(_TERM_BEHAVIOR_LABELS.values())),
                 "status": st.column_config.SelectboxColumn(
-                    "状态", options=["candidate", "provisional", "locked", "rejected"]),
+                    "状态", options=list(_TERM_STATUS_LABELS.values())),
                 "domain": st.column_config.TextColumn("领域"),
                 "scope": st.column_config.TextColumn("范围"),
                 "note": st.column_config.TextColumn("备注"),

@@ -296,6 +296,12 @@ def _nav_copy(readiness: Mapping[str, Any], counts: Mapping[str, int]) -> Dict[s
         return {"label": f"{missing} 待审", "tone": "pending", "title": "还有段落尚未审校"}
     if readiness.get("status") == "not_required":
         return {"label": "不适用", "tone": "neutral", "title": "当前任务未启用独立审校"}
+    if counts.get("actionable"):
+        return {"label": f"{counts['actionable']} 建议", "tone": "pending",
+                "title": "有建议检查项，不影响交付"}
+    if counts.get("informational"):
+        return {"label": f"{counts['informational']} 参考", "tone": "neutral",
+                "title": "有可供参考的审校信息"}
     return {"label": "✓", "tone": "done", "title": "当前译文审校已完成"}
 
 

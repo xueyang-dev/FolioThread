@@ -113,6 +113,40 @@ def _queue(at):
     return next(item for item in at.radio if item.label == "审校队列")
 
 
+def test_blocking_review_decisions_are_reachable_before_finding_evidence(
+        tmp_path):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "phase3actionbar01"
+        core.save_job_state(job_id, _state({0: 1}))
+        at = _open_workspace(job_id, "review", api_key="translator-key")
+        labels = [button.label for button in at.button]
+
+        assert "继续处理 1 个必须处理的问题" not in labels
+        for label in ("确认已解决", "修改译文", "保留当前译文", "重新翻译并复审"):
+            assert label in labels
+        assert labels.index("确认已解决") < labels.index("重新翻译并复审")
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def test_legacy_no_review_delivery_gate_is_not_applicable(tmp_path):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "phase3deliverylegacy1"
+        core.save_job_state(job_id, _state(
+            {0: 1}, review_required=False, legacy=True))
+        at = _open_workspace(job_id, "delivery", api_key="translator-key")
+        rendered = "\n".join(item.value for item in at.markdown)
+
+        assert "当前任务未启用独立审校（翻译审校不适用）" in rendered
+        assert "翻译审校已完成" not in rendered
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
 def test_suggested_target_action_edits_rereviews_and_clears_current_work(
         tmp_path, monkeypatch):
     old_output = core.OUTPUT_DIR
