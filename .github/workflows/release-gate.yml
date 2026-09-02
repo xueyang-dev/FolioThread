@@ -76,7 +76,7 @@ jobs:
               "transpraxis/resources/en_common.txt",
               "transpraxis/resources/brand/foliothread-favicon.svg",
               "transpraxis/resources/brand/foliothread-mark.svg",
-              "transpraxis/resources/brand/foliothread-logo.svg",
+              "transpraxis/resources/brand/foliothread-logo.png",
           )
           assert all(any(name.endswith(path) for name in wheel_names) for path in required)
           assert all(any(name.endswith(path) for name in sdist_names) for path in required)
@@ -105,7 +105,7 @@ jobs:
           assert Path(gui.ROOT, "transpraxis", "resources", "en_common.txt").is_file()
           assert Path(gui.ROOT, "transpraxis", "resources", "brand", "foliothread-favicon.svg").is_file()
           assert Path(gui.ROOT, "transpraxis", "resources", "brand", "foliothread-mark.svg").is_file()
-          assert Path(gui.ROOT, "transpraxis", "resources", "brand", "foliothread-logo.svg").is_file()
+          assert Path(gui.ROOT, "transpraxis", "resources", "brand", "foliothread-logo.png").is_file()
           print("installed imports and resources: OK")
           PY
           "$RUNNER_TEMP/foliothread/bin/foliothread" --help
