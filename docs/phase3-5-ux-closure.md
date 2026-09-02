@@ -45,6 +45,9 @@ The human vocabulary is deliberately small:
   distinct recovery state.
 - Review explicitly marks no-review tasks as not applicable. Legacy findings
   remain actionable without inventing an independent re-review step.
+- Review decision actions sit beside the selected finding in a compact sticky
+  action bar; the blocking queue no longer spends the first viewport on a
+  redundant full-width “continue” CTA.
 - Delivery readiness separates translation review, academic artifacts, case
   confirmation, compliance, document structure, page rendering, author review,
   Word review, and the freeze action. Clean no-report tasks do not receive a
@@ -65,6 +68,8 @@ The human vocabulary is deliberately small:
 Translator and reviewer configuration are evaluated independently. A selected
 model with an empty key is `API 凭据未配置`, not “AI engine not configured”; the
 new-task confirmation and style-profile fallback both point back to AI settings.
+New-task readiness is task-scoped: Quick and Standard evaluate only the
+translator, while Academic Enhanced evaluates both translator and reviewer.
 Changing a reviewer provider, model, key, endpoint, or mode invalidates its
 connection status until it is tested again. Separate reviewer credentials are
 used for review calls and are required before starting a task that enables an
@@ -91,8 +96,8 @@ can finish terminology or other prerequisites first.
 
 The branch was verified with:
 
-- `python3 -m pytest -q`: 427 passed;
-- Python 3.10 and 3.12 isolated environments: 427 passed each;
+- `python3 -m pytest -q`: 434 passed;
+- Python 3.10 and 3.12 isolated environments: 434 passed each;
 - Python 3.10/3.11/3.12 critical-module compilation;
 - `python3 -m build`, archive contents/forbidden-runtime-artifact checks;
 - fresh-wheel import/resource smoke test and `foliothread --help`;

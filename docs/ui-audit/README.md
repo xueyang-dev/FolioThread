@@ -195,6 +195,8 @@ These supplemental captures were taken from the updated real Streamlit app after
 | [802-live-report-stale-980.png](18-phase3-5-live/802-live-report-stale-980.png) | 980px · stale report | Readable compact nav/main layout |
 | [803-live-review-stale-760.png](18-phase3-5-live/803-live-review-stale-760.png) | 760px · review workspace | Stacked narrow navigation with no vertical labels |
 | [804-live-settings-760.png](18-phase3-5-live/804-live-settings-760.png) | 760px · AI settings | Provider and reviewer fields fully reachable beside sidebar |
+| [805-live-review-action-bar-1440.png](18-phase3-5-live/805-live-review-action-bar-1440.png) | 1440px · blocking Review | Human decision actions are adjacent to the finding and visible before evidence |
+| [806-live-review-action-bar-760.png](18-phase3-5-live/806-live-review-action-bar-760.png) | 760px · blocking Review | Narrow layout keeps the decision bar readable and reachable without vertical labels |
 
 The history cards also show runtime completion labels alongside business-stage labels. This pack treats the business-stage text as the state evidence and keeps that distinction visible; it is not logged as a product defect because these jobs are locally synthesized for audit coverage.
 
@@ -205,7 +207,8 @@ This is a screenshot-first product audit. It covers visible hierarchy, copy, sta
 ## Final verification
 
 - [x] Baseline `main` commit recorded above; Phase 3.5 work is on the feature branch.
-- [x] `python3 -m pytest -q` passed: 427 tests.
+- [x] `python3 -m pytest -q` passed: 434 tests.
+- [x] Phase 3.5 policy regressions pass within the 434-test suites on Python 3.10, 3.11, and 3.12.
 - [x] All 63 accepted PNGs are viewport screenshots with descriptive three-digit filenames.
 - [x] Desktop and required 980px/760px responsive subset captured.
 - [x] README links and fixture names are relative to this directory.

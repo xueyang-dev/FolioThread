@@ -4,8 +4,10 @@ import json
 from transpraxis.translation_core import fingerprint
 from transpraxis.workspace_view import (
     ai_configuration_view,
+    delivery_review_gate_copy,
     history_copy,
     project_workspace_state,
+    task_ai_ready,
 )
 
 
@@ -109,6 +111,56 @@ def test_ai_projection_separates_missing_credentials_from_connection_failure():
     assert failed["label"] == "连接失败"
     assert connected["ready"] is True
     assert connected["label"] == "连接正常"
+
+
+def test_task_ai_readiness_ignores_unused_reviewer_configuration():
+    kwargs = {
+        "reviewer_mode": "separate",
+        "reviewer_provider": "OpenAI",
+        "reviewer_model": "reviewer-model",
+        "reviewer_api_key": "",
+        "reviewer_connection_status": "unverified",
+    }
+    no_review = ai_configuration_view(
+        "DeepSeek", "translator-model", "translator-key", "connected",
+        review_required=False, **kwargs)
+    needs_review = ai_configuration_view(
+        "DeepSeek", "translator-model", "translator-key", "connected",
+        review_required=True, **kwargs)
+
+    assert no_review["state"] == "connected"
+    assert task_ai_ready(no_review) is True
+    assert needs_review["state"] == "credentials_missing"
+    assert task_ai_ready(needs_review) is False
+
+
+def test_task_ai_readiness_requires_reviewer_only_when_review_is_enabled():
+    ready_translation = ai_configuration_view(
+        "DeepSeek", "translator-model", "translator-key", "connected",
+        reviewer_mode="separate", reviewer_provider="OpenAI",
+        reviewer_model="reviewer-model", reviewer_api_key="",
+        review_required=False)
+    blocked_review = ai_configuration_view(
+        "DeepSeek", "translator-model", "translator-key", "connected",
+        reviewer_mode="separate", reviewer_provider="OpenAI",
+        reviewer_model="reviewer-model", reviewer_api_key="",
+        review_required=True)
+
+    assert task_ai_ready(ready_translation) is True
+    assert task_ai_ready(blocked_review) is False
+
+
+def test_no_review_delivery_gate_never_claims_review_completion():
+    no_review = delivery_review_gate_copy(False, True, "unused detail")
+    reviewed = delivery_review_gate_copy(True, True)
+
+    assert no_review == {
+        "status": "不适用",
+        "detail": "当前任务未启用独立审校（翻译审校不适用）",
+    }
+    assert "翻译审校已完成" not in no_review["detail"]
+    assert reviewed["status"] == "已完成"
+    assert "独立审校已完成" in reviewed["detail"]
 
 
 def test_actionable_and_informational_findings_are_visible_without_blocking_delivery():

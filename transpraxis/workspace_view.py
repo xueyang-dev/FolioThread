@@ -70,8 +70,14 @@ def ai_configuration_view(
     reviewer_mode: str = "same", reviewer_provider: Any = None,
     reviewer_model: Any = None, reviewer_api_key: Any = None,
     reviewer_connection_status: Any = "unverified",
+    review_required: bool = True,
 ) -> Dict[str, Any]:
-    """Project translator and reviewer configuration without persisting state."""
+    """Project translator and reviewer configuration without persisting state.
+
+    ``review_required`` scopes readiness to the current task; settings and the
+    sidebar keep the default global view so an optional reviewer can still be
+    configured without blocking a translation-only task.
+    """
     translator = _connection_state(
         provider=provider, model=model, api_key=api_key,
         connection_status=connection_status)
@@ -83,13 +89,14 @@ def ai_configuration_view(
             api_key=reviewer_api_key,
             connection_status=reviewer_connection_status)
         reviewer["mode"] = "separate"
-    if translator["state"] == "error" or reviewer["state"] == "error":
+    considered = [translator, reviewer] if review_required else [translator]
+    if any(item["state"] == "error" for item in considered):
         overall_state, overall_label, tone = "error", "连接失败", "danger"
-    elif translator["state"] == "credentials_missing" or reviewer["state"] == "credentials_missing":
+    elif any(item["state"] == "credentials_missing" for item in considered):
         overall_state, overall_label, tone = "credentials_missing", "API 凭据未配置", "warning"
-    elif translator["state"] == "unverified" or reviewer["state"] == "unverified":
+    elif any(item["state"] == "unverified" for item in considered):
         overall_state, overall_label, tone = "unverified", "尚未验证连接", "warning"
-    elif translator["state"] == "not_selected" or reviewer["state"] == "not_selected":
+    elif any(item["state"] == "not_selected" for item in considered):
         overall_state, overall_label, tone = "not_selected", "尚未选择模型", "neutral"
     else:
         overall_state, overall_label, tone = "connected", "连接正常", "success"
@@ -102,12 +109,36 @@ def ai_configuration_view(
         "translator": translator,
         "reviewer": reviewer,
         "reviewer_mode": reviewer_mode,
+        "review_required": review_required,
         "state": overall_state,
         "label": overall_label,
         "tone": tone,
         "ready": overall_state == "connected",
         "recovery_action": action,
     }
+
+
+def task_ai_ready(view: Mapping[str, Any]) -> bool:
+    """Return whether the current task has the AI roles it actually uses."""
+    translator = view.get("translator") or {}
+    reviewer = view.get("reviewer") or {}
+    return bool(
+        translator.get("credentials_configured") and
+        translator.get("model_selected") and
+        (not view.get("review_required") or
+         reviewer.get("credentials_configured") and reviewer.get("model_selected"))
+    )
+
+
+def delivery_review_gate_copy(
+    review_required: bool, translation_gate_pass: bool, pending_detail: str = "",
+) -> Dict[str, str]:
+    """Keep delivery review copy truthful for both review policies."""
+    if not review_required:
+        return {"status": "不适用", "detail": "当前任务未启用独立审校（翻译审校不适用）"}
+    if translation_gate_pass:
+        return {"status": "已完成", "detail": "当前译文的独立审校已完成，可以继续准备交付"}
+    return {"status": "需要处理", "detail": f"翻译审校：{pending_detail or '当前译文的审校尚未完成'}"}
 
 
 def _translated_count(state: Mapping[str, Any]) -> int:
