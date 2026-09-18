@@ -809,6 +809,13 @@ def test_external_evidence_attack_and_prompt_scan():
         if any(endpoint in line for endpoint in (
                 "https://api.deepseek.com", "https://opencode.ai/zen/go/v1")):
             continue
+        # 本机回环地址是本地开发/验证工具的默认目标，不是 prompt 里的引用 URL
+        if any(host in line for host in (
+                "http://127.0.0.1", "http://localhost", "http://0.0.0.0")):
+            continue
+        # 品牌资产渲染脚本的字体样式表是本地排版输入，不进入任何 prompt
+        if "fonts.googleapis.com" in line:
+            continue
         prompt_files.append(line)
     assert not prompt_files, f"发现可疑 URL 引用：{prompt_files}"
     print("  ✓ external evidence：伪造 URL 清除/无 URL 降级/离线 provider/无引用生成 prompt")

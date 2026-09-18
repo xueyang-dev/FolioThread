@@ -1594,7 +1594,7 @@ def build_research_model(
     default_rqs = [
         f"在{domain}文本的英汉翻译中，如何识别并处理长句论证链与信息结构难点？",
         f"如何依据上下文一致处理 {term_examples} 等概念术语，并避免概念关系弱化？",
-        "如何在无人机视觉与行星共同体相关论述中再现隐喻、评价色彩及其论证功能？",
+        "如何在当前文本的重点论述中再现隐喻、评价色彩及其论证功能？",
     ]
     rqs = provided_rqs or default_rqs
     template_contract = settings.get("report_template_contract") or \

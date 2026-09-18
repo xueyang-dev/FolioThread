@@ -1,8 +1,10 @@
 # FolioThread
 
 <p align="center">
-  <img src="transpraxis/resources/brand/foliothread-logo.png" alt="FolioThread Long-document Translation Workspace" width="360">
+  <img src="transpraxis/resources/brand/foliothread-source-lockup.png" alt="FolioThread — Agentic Translation Workspace 智能体翻译工作台" width="420">
 </p>
+
+<p align="center"><sub>Logo 与配色的唯一基准见 <a href="docs/brand.md">docs/brand.md</a>；当前 logo 直接裁切自用户提供的品牌图，保持原始比例。</sub></p>
 
 FolioThread 是一套面向长文档的本地翻译工作空间：把文档结构、上下文、术语、译文、人工审校和交付资产放在同一条可恢复的工作线上。
 
@@ -17,6 +19,16 @@ FolioThread 的一级产品定位是 **长文档翻译工作空间**，主路径
 ```
 
 “研究与报告”是可选的专用能力，服务于需要过程证据、案例分析或 MTI 翻译实践报告的任务；它不占据普通翻译任务的首屏，也不定义 FolioThread 的唯一使用场景。
+
+## 当前能力与下一步
+
+当前本地开发已推进项目管理、语言资产、工作台、人工审校与可恢复交付。TM 提供精确/归一化复用和基础 TMX 导入导出；当前 DOCX 导出属于生成式输出，尚不承诺保留原文件 package、复杂结构或全部格式。
+
+近期计划：完成 UI 全面打磨后发布正式版，并在 GitHub、小红书和 X 发布与宣传；版本号与日期待定。随后优先完成 DOCX 原格式写回闭环，再推进 TM V2 与文档版本更新。这些是未来计划，不是当前版本的能力声明。
+
+- [开发蓝图与当前进度](docs/foliothread-agentic-native-blueprint.md)
+- [近期正式版发布计划](docs/release-plan.md)
+- [DOCX Contract v1：支持范围与验收](docs/docx-contract-v1.md)
 
 ## Quick Start
 
@@ -63,7 +75,7 @@ v0.4 的 Python 模块命名空间仍为 `transpraxis`，旧的 `transpraxis` co
 
 ### 1. 文档与上下文
 
-支持按版面重建 PDF/DOCX 段落，并处理页眉、页脚、页码和断词。长文翻译阶段使用章节、语义单元和相邻段落构建上下文；已确认的译文可用于后续批次的上下文参考。
+PDF 路径支持版面段落恢复及页眉、页脚、页码和断词处理；DOCX 当前主要提取正文段落，不代表复杂结构完整提取或原格式保真写回。长文翻译阶段使用章节、语义单元和相邻段落构建上下文；已确认的译文可用于后续批次的上下文参考。
 
 ### 2. 术语与翻译记忆
 
@@ -114,7 +126,7 @@ python scripts/translate_pdf.py "文档.pdf" --target-lang 简体中文 --qualit
 
 ## 架构边界
 
-Phase 1 只完成产品重定位，不改核心 runtime 行为。v0.4 基础设施、MTI 专用能力和 v0.5 演化方向见[架构边界说明](docs/architecture-boundaries.md)。
+FolioThread 的长期方向是 Agentic Native Translation Studio：由 Agent 执行受边界约束的翻译工作，由人类控制语言质量和交付责任。完整的产品与架构蓝图见[Agentic Native Translation Studio 开发蓝图](docs/foliothread-agentic-native-blueprint.md)。当前 v0.4 的兼容边界和 MTI 专用能力见[架构边界说明](docs/architecture-boundaries.md)。
 
 ## 使用说明与限制
 
@@ -122,6 +134,12 @@ AI 生成的译文和实践报告仅作为工作稿，提交前应人工核对�
 
 ## 文档
 
+- [翻译工作台：Agent Inspector 交互契约](docs/agent-inspector-workspace.md)
+- [历史任务：Translation Task 列表](docs/history-task-list.md)
+- [Project：任务、术语、风格规则与已审校记忆的长期容器](docs/project-memory.md)
+- [翻译吞吐实测](docs/translation-throughput.md)
+- [控制台闭环](docs/console-loop.md)
+- [场景验收门禁](docs/scenario-gate.md)
 - [架构边界说明](docs/architecture-boundaries.md)
 - [学术写作架构](docs/academic-writing-architecture.md)
 - [文献证据链](docs/literature-evidence-spine.md)
@@ -135,3 +153,8 @@ python -m pip install ".[test]" build
 python -m pytest -q
 python -m build
 ```
+
+三个端到端验收场景（20 页 DOCX、100 页 PDF、术语密集文档）由
+`tests/scenario_gate_test.py` 离线验证，随 `python -m pytest -q` 一起运行；
+源文档由 `python scripts/make_scenario_fixtures.py --out tmp/scenarios` 生成。
+详见[场景验收门禁](docs/scenario-gate.md)。

@@ -195,7 +195,17 @@ def normalize_state_findings(state: Dict[str, Any]) -> Dict[str, Any]:
         if SEVERITY_ORDER.get(finding.get("severity"), 99) < \
                 SEVERITY_ORDER.get(existing.get("severity"), 99):
             existing["severity"] = finding["severity"]
-    state["findings"] = merged
+    # Update the list in place; never rebind it.  `translate_stage` holds
+    # `findings_all = state.setdefault("findings", [])` as a document-lifetime
+    # alias (core.py:1566), and this function runs from `save_job_state`, which
+    # `_commit_translation_batch` calls once per batch.  Rebinding here orphans
+    # that alias, so every finding recorded after the first batch is silently
+    # dropped from state (while `review_stats`/`has_blocking`, computed from the
+    # orphan, keep counting them).
+    if isinstance(state.get("findings"), list):
+        state["findings"][:] = merged
+    else:
+        state["findings"] = merged
     return state
 
 

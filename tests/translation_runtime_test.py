@@ -760,3 +760,63 @@ def test_re_review_clean_supersedes_stale_decision_and_unblocks_delivery(tmp_pat
         assert ok and not errors and approved["delivery_status"] == "final"
     finally:
         core.OUTPUT_DIR = old_output
+
+
+def test_batch_plan_is_configurable_and_recorded(tmp_path):
+    """批次大小必须可配置、可审计，且默认保持既有行为。
+
+    长文档耗时主要来自"批次数 × 每次调用延迟"。批次参数此前是写死的模块常量，
+    现在按任务配置并写入 state，恢复任务才能沿用同一套批次划分。
+    """
+    import importlib.util
+    from pathlib import Path as _Path
+
+    old_output, old_call = core.OUTPUT_DIR, core.call_llm
+    core.OUTPUT_DIR = tmp_path
+    sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    spec = importlib.util.spec_from_file_location(
+        "offline_provider", _Path(__file__).resolve().parent / "offline_provider.py")
+    offline = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(offline)
+    try:
+        paragraphs = [f"Sentence number {i} " + "word " * 30 for i in range(30)]
+        state = core.new_job_state("plan.docx")
+        # p1 已完成：本用例只关心阶段二的批次划分，不需要真实源文件
+        state.update({"paras": paragraphs, "pairs": [], "p1_done": True,
+                      "p2_done": False, "target_lang": "简体中文"})
+        core.save_job_state("plan", state)
+
+        # 默认（不传参）→ 沿用模块常量，行为不变
+        core.call_llm = offline.OfflineProvider()
+        core.run_job_pipeline(
+            "plan", "plan.docx", None, provider="DeepSeek", api_key="k", model="m",
+            target_lang="简体中文", auto_term=False, enable_report=False,
+            translation_theory="", user_glossary=[], style_rules="",
+            enable_review=False, enable_annotate=False, use_tm=False,
+            enable_understanding=False, delivery_config={"deliver_report": False})
+        default_plan = core.load_job_state("plan")["batch_plan"]
+        assert default_plan["batch_size"] == core.BATCH_SIZE
+        assert default_plan["max_batch_chars"] == core.TRANSLATION_MAX_BATCH_CHARS
+        assert default_plan["batch_count"] > 0
+
+        # 显式配置 → 生效并记录
+        configured = core.new_job_state("plan2.docx")
+        configured.update({"paras": paragraphs, "pairs": [], "p1_done": True,
+                           "p2_done": False, "target_lang": "简体中文"})
+        core.save_job_state("plan2", configured)
+        core.call_llm = offline.OfflineProvider()
+        core.run_job_pipeline(
+            "plan2", "plan2.docx", None, provider="DeepSeek", api_key="k", model="m",
+            target_lang="简体中文", auto_term=False, enable_report=False,
+            translation_theory="", user_glossary=[], style_rules="",
+            enable_review=False, enable_annotate=False, use_tm=False,
+            enable_understanding=False, delivery_config={"deliver_report": False},
+            batch_size=6, max_batch_chars=4800)
+        plan = core.load_job_state("plan2")["batch_plan"]
+        assert plan["batch_size"] == 6 and plan["max_batch_chars"] == 4800
+        assert plan["batch_count"] < default_plan["batch_count"], \
+            "更大的批次必须产生更少的批次"
+        # 批次参数随任务保存，恢复时沿用同一配置
+        assert core.load_job_state("plan2")["pipeline_config"]["batch_size"] == 6
+    finally:
+        core.OUTPUT_DIR, core.call_llm = old_output, old_call

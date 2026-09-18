@@ -125,7 +125,17 @@ Phase 2 adds no agent loop, workflow engine, second state store, broad retrieval
 layer, translation-execution rewrite, checkpoint replacement, delivery replacement,
 or academic/MTI redesign.
 
-## Phase 3 follow-ups
+## Current planning note (2026-09-14)
+
+This document records completed Phase 2 scope, not the current release sequence.
+The [blueprint](foliothread-agentic-native-blueprint.md#7-当前进度与开发路线)
+now prioritizes UI polish and a formal release, followed by the planned
+[DOCX Contract v1](docx-contract-v1.md), TM V2, and source updates.
+Reuse these review/decision/freshness contracts; do not create a parallel truth
+store. Existing stale propagation does not establish cross-version correspondence,
+and a historical TM approval does not approve its use in a new context.
+
+## Historical Phase 3 follow-ups
 
 Future work can deepen canonical glossary decisions, reviewed TM retrieval and
 promotion, more selective dependency scopes, and richer delivery reporting. Any

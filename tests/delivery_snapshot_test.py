@@ -327,7 +327,7 @@ def test_workspace_delivery_lists_exact_configured_assets():
         assert not at.exception, at.exception
         assert [button.label for button in at.download_button] == [
             "下载", "下载 manifest"]
-        assert any("JSONL 双语段落" in item.value for item in at.markdown)
+        assert any("结构化数据" in item.value for item in at.markdown)
         assert any("delivery_manifest.json" in item.value for item in at.markdown)
         assert not any("TBX 术语库" in item.value for item in at.markdown)
     finally:

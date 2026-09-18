@@ -94,8 +94,8 @@ def test_delivery_review_ui():
         at.run()
         assert not at.exception, f"交付队列渲染异常：{at.exception}"
         assert any("人工工作区" in x.value and "审校" in x.value for x in at.markdown)
-        assert any(button.label == "返回任务列表" for button in at.button)
-        assert any(button.label == "回到主页" for button in at.button)
+        assert any(button.label == "任务列表" for button in at.button)
+        assert any(button.label == "主页" for button in at.button)
         filter_control = next(x for x in at.segmented_control
                               if x.label == "筛选审校任务")
         assert "待处理 1" in filter_control.options
@@ -173,7 +173,7 @@ def test_delivery_review_ui():
         assert not at.exception, f"切换最终交付后异常：{at.exception}"
         assert any("最终交付" in x.value for x in at.markdown)
 
-        next(button for button in at.button if button.label == "返回任务列表").click()
+        next(button for button in at.button if button.label == "任务列表").click()
         at.run()
         assert not at.exception, f"返回任务列表异常：{at.exception}"
         assert at.session_state["app_view"] == "history"
@@ -182,7 +182,7 @@ def test_delivery_review_ui():
         at.session_state["workspace_mode"] = True
         at.session_state["workspace_section"] = "review"
         at.run()
-        next(button for button in at.button if button.label == "回到主页").click()
+        next(button for button in at.button if button.label == "主页").click()
         at.run()
         assert not at.exception, f"返回主页异常：{at.exception}"
         assert at.session_state["app_view"] == "new"

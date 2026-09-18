@@ -56,11 +56,11 @@ def test_clean_review_projection_is_shared_and_read_only():
     state["review_evidence"] = [_event(0, "review-0"), _event(1, "review-1")]
     before = json.dumps(state, ensure_ascii=False, sort_keys=True)
 
-    view = project_workspace_state(state, delivery_state="可以冻结交付",
+    view = project_workspace_state(state, delivery_state="可以准备交付",
                                    delivery_ready=True)
-    history = history_copy(state, delivery_state="可以冻结交付")
+    history = history_copy(state, delivery_state="可以准备交付")
 
-    assert view["stage_label"] == "可以冻结交付"
+    assert view["stage_label"] == "可以准备交付"
     assert view["segment_status"] == {0: "已审校", 1: "已审校"}
     assert view["review_coverage"] == 2
     assert history == {"status": "可以交付", "detail": "译文已完成审校",

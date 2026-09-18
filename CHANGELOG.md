@@ -4,6 +4,1158 @@
 
 ## [Unreleased]
 
+### 修复：Project Context 与 Project Center 不再共用一个大型 Modal
+
+上一轮把两个条目归并进了同一个「项目」分组，但它们的**交互结果仍然是同一件事**：
+点上下文 selector 打开大型「切换项目」Modal，点「项目中心」也打开同一个 Modal。
+视觉上分了主次，行为上没有分职责。
+
+这一轮把 state action 与 navigation 彻底分开：
+
+- **上下文 selector 展开轻量下拉面板**（搜索 / 项目列表 / ＋ 新建项目），不再是
+  全屏 Modal。面板就地展开在触发器下方，选中后立即收起；收起时不渲染任何一行，
+  因此空闲成本为零（列表数据一次约 0.38 s，不适合常驻渲染）；
+- **「项目中心」是纯导航项**：进入管理页路由，不展开面板、不弹 Modal、**也不改变
+  当前 Project Context**。`active_project_id` 不再兼任"路由"，进管理页不再把上下文
+  清空——侧栏 selector 不会因为在管理页上而翻成「未选择项目」；
+- **退休大型「切换项目」Modal**：删除它的状态位、渲染器、调用点与整组 dialog CSS；
+  「管理所有项目」随之下线（侧栏「项目中心」已经是唯一的管理入口，同一个页面里
+  两个指向管理页的按钮会被读成两套系统）。`新建 / 导入 / 重命名 / 编辑 / 归档 /
+  删除` 这些低频且需要输入的动作仍留在 Modal 里；
+- 正文的 `[更改]` / `[选择项目]` 迁移到同一份切换列表（就近锚点）：两处锚点共用一份
+  实现，同一时刻只展开一个，因此不存在两套并行的 project switching UX。
+
+路由与状态：新增 `projects_route`（`list` / `detail`）表达"在看列表还是某个项目"，
+Project Context（`active_project_id`）与 Task 归属（`task_project_id`）的单一来源不变，
+面板开合只是 UI chrome。回归见 `tests/sidebar_project_switcher_test.py`。
+
+同一规则的可见后果：从「未分类任务」点「返回项目中心」也**不再清掉当前上下文**——
+换的是路由，不是"我在哪个项目里工作"。该入口文案相应从「← 返回项目」改为
+「← 返回项目中心」（旧文案会被读成"回到某个项目"，而它其实是 navigation）。
+
+### 打磨：侧栏把 Project Context 与 Project Management 收进同一个「项目」分组
+
+侧栏此前把同一件事拆成两处：顶部「项目上下文」负责读，底部「工作区 → 项目中心」
+负责管。于是它读起来像两套系统，而「项目中心」还和「历史任务」「术语与翻译记忆」
+排在一列，被当成第三个资料库。
+
+这一轮把 Project 在侧栏收敛成**一个分组**：
+
+- 分组标题从「项目上下文」改成「项目」，组内按读 / 管排：上下文 selector 在上，
+  「项目中心」紧贴其下，中间不插分隔线；
+- 组内是主次而不是并列：selector 仍是填充控件（42px、`primary-soft` 底、650 字重），
+  「项目中心」降为扁平行（36px、透明底、500 字重、灰图标）——不再是第二颗主按钮；
+- 「项目中心」的"当前页"标记只在 `/projects` 列表页出现（中性面 + 左侧 3px 竖条）。
+  打开某个项目详情后当前态归 selector（它显示项目名），同组不会同时亮两个"你在这儿"；
+- 「工作区」只留 历史任务 / 术语与翻译记忆 / 设置 —— 它是全局导航，不承载 Project；
+  「当前任务」四步仍是独立的 task flow 分组。
+
+正文侧不改实现：新建任务第 1 步的「项目上下文」块仍是只读的归属说明，`[更改]` /
+`[选择项目]` 打开的正是侧栏那一个 switcher，因此不存在"侧栏说 A、正文说 B"。
+
+### 打磨：Inbox 与 Project 的语义分离，项目卡降密度
+
+「未分类任务」此前和真实项目**共用同一套元素语法**：实线边框、白面、几乎一样的
+圆角，只差一句副标题。于是它在项目列表里读起来像"又一个项目"，在新建任务页里
+像"一张小项目卡"。这一轮把它按 **system collection** 处理，与用户创建的
+**Project** 明确分开。
+
+**Project Center 变成两个区块。** 页面结构固定为「搜索 / 筛选 / 视图切换」→
+「系统任务区」→「我的项目」。「系统任务区」有自己的区块标题和一句
+`系统工作区 · 不属于任何项目`，未分类入口在它下面：虚线边框 + sunken 底色 +
+零阴影 + 72px 高 + 中性灰图标（不再是主色蓝），并且始终没有 overflow menu ——
+它不能被重命名、归档或删除，因为用户并没有创建它。左侧图标与「查看 →」保留，
+整条仍然可点，落点是**未分类任务列表**，不是任何项目详情页。
+
+**英文 Inbox 不再当标题。** 它退成状态行右侧 11px 的低对比小标签；新建任务页的
+「项目上下文」区块也一样：顶上一行小标签说明这是"项目上下文"，状态行以
+`未分类任务` 为主，`Inbox` 只做容器名。说明文案改成面向后果的一句话：
+`任务将保存到系统工作区，不继承项目术语、翻译记忆与规则`。
+
+**项目卡瘦身成三段式。** 身份（图标 / 名称 / 状态）→ 状态（任务摘要 + 一行辅助
+说明）→ 行动（CTA / 知识摘要 / 最近更新）。具体做法：内边距 14/16 → 18/20px、
+最小高度 126 → 152px、**去掉静置状态的阴影**（只保留 hover），底部加一条 hairline
+把"操作 + 元信息"与正文分开，知识摘要与更新时间收成一组整体右对齐，更新时间降到
+卡上最低对比度。空项目那句长说明
+（`创建第一个翻译任务，开始积累术语、规则和项目记忆。`）换成一行
+`可开始积累术语与翻译记忆`，占据的正是"有任务时最近工作"那一行，让两种状态的
+卡片节奏一致。
+
+**底部 CTA 是同一个槽位的两种动词。** 尚无任务 → `+ 创建任务`（进创建流程并自动
+带上本项目）；已经有任务 → `查看项目`（进项目概览）。两者位置、视觉权重、
+与整卡点击层的 z-index 关系完全一致，因此读起来是"同一个按钮换了动词"。
+
+**归属规则不变。** 未选择项目时任务落到系统工作区（落盘 `project_id: null`），
+已选择项目时继承该项目的术语 / 翻译记忆 / 规则。这一轮把它们补成了回归测试。
+
+### 重构：Project 信息架构收敛为 Workspace ▸ Project ▸ Task ▸ Run
+
+侧栏里曾经有三个都叫"项目"的入口：顶部「当前项目 / 选择项目」、工作区里的
+「项目」、新建任务正文里的「所属项目」。它们各自维护一份状态，于是"侧栏说 A、
+任务说 B"是可以真实发生的。这一轮把三种语义拆开，并让它们共用**一个**来源。
+
+**「当前项目」→「项目上下文」（Context）。** 它只回答"我现在在哪个项目里工作"，
+并为后续 Task 提供术语 / 翻译记忆 / 风格规则。选中时显示项目名，未选择时显示
+`未选择项目 ▾`——同一个 compact 控件的中性态，不再是"大面积虚线卡片"，也不再
+同时渲染「未选择」+「选择项目」两行重复语义。打开一个任务时，上下文跟着任务走
+（层级里 Task 在 Project 之下），不再停留在"上次看过的项目"。
+
+**「工作区 → 项目」→「项目中心」（Management）。** 它只进入项目管理页：查看所有
+项目、新建 / 重命名 / 归档 / 删除。**不做** project switching。
+
+**新建任务页不再有第二个 Project Selector。** 原先的「所属项目」下拉框换成只读的
+上下文卡：已选项目 = 项目名 +「继承项目术语、翻译记忆和规则」+ `[更改]`；未选
+项目 =「未分类任务」+ `[选择项目]`。两个按钮打开的正是侧栏那一个 switcher；在
+创建流程里切换或新建项目不会把用户拽去项目详情页。任务流程内的 inline 建项目
+入口随之移除，统一走 switcher 里的「新建项目」。
+
+**单一数据源。** 新增 `_apply_project_context()`（唯一写入口）与
+`_sync_task_project_context()`（每次运行对齐）：`task_project_id` 从此是 Project
+Context 的**投影**，不是第二份状态。归档 / 已删除的上下文会显式回落到系统工作区
+并给出提示，不再让侧栏继续显示一个本次任务用不上的项目。
+
+回归测试：`tests/project_context_hierarchy_test.py`（18 项，覆盖未选择 / 已选择
+创建任务、切换上下文、项目中心进入项目、任务继承上下文、以及"导航全程不允许出现
+两份互相矛盾的选择"）。
+
+### 重构：Project Detail 统一为一套视觉与结构系统
+
+前几轮分别改过概览、Header、Tabs 与项目卡，但**整个 Project Detail 子系统仍然
+缺少统一性**：概览 / 任务 / 项目知识 / 设置四个 tab 各自像独立设计，容器层级
+不统一（什么内容都包一个大白盒），CTA 体系混乱，空状态重复，overflow menu 重
+得像侧面板，切换项目 modal 大得像页面。这一轮不再逐页打补丁，而是把这一片区域
+统一成**一套** page shell / header / tabs / section / card / empty state / menu /
+modal 体系。
+
+**统一 shell 与容器层级。** 所有真实项目详情页固定为
+`Header → Tabs → Tab Content`，并引入三级容器规则：Level A（shell / section）
+只负责结构与留白、不加重卡片；Level B（primary surface）用于主要内容区块，一页
+只出现两三块；Level C（compact row）用于 task row / info row / knowledge metric /
+menu item，靠分隔线而不是边框分组。禁止 card inside card。
+
+**统一 spacing rhythm。** Header → Tabs 24px、Tabs → Content 30px、
+Section → Section 34px、Card padding 20–24px、Compact row 12–16px。此前 section
+head 的 22px 上边距叠加 16px gap 得到 38px，与其他区块的 16 / 24px 混在一起，
+于是"每个 tab 像不同产品"。
+
+**统一按钮体系。** Primary（蓝底）只保留两个：Header 的 `+ 新建任务` 与 Empty
+Project 的 `创建第一个任务`。Secondary（描边 / 轻底）用于 `设置项目知识` /
+`返回项目` / `编辑项目资料`。Tertiary（文字 / 小按钮）用于 `查看全部` /
+`管理所有项目` / 导出。设置页不再出现连续两个大按钮都像 primary；菜单里每一项
+不再是白色大按钮；modal 底部的低频动作不再是强 CTA。
+
+**项目知识：从"说明文"变成结构化页。** 此前是一整段长说明 + 四个 metric +
+一整张表 + 页面底部一个全宽导出按钮，读起来像"关于项目知识的文档"。现在固定为
+`项目知识 + [导出 JSON]` → `术语 N · 规则 N · 决定 N · 记忆 N` → 四个 compact
+module（锁定术语 / 风格规则 / 人工决定 / 已审核记忆），每个模块给出 count、一句
+说明、当前状态或 empty hint、以及对应入口，详情默认收起。整项目导出从页面底部的
+全宽大按钮降级为右上角的小按钮。知识全空时只给一段**短**总说明，不再用四段话
+重复同一件事。
+
+**设置：去重 + 分组。** 此前「编辑名称与描述」与「重命名」并排成两个大按钮，两者
+高度重叠；归档又单独占一张卡，但它和「状态」说的是同一件事。现在收敛成四段：
+项目资料（名称、描述、**一个** `编辑项目资料` 动作）、状态（活动中 / 已归档 +
+归档或恢复）、高级信息（Project ID / UUID / 创建时间 / 最近更新）、危险操作
+（删除，单独一组并做视觉区分）。设置页不再提供「重命名」入口——它只是编辑流程的
+子集。
+
+**任务页：空态与移入表单不再互相冲突。** 此前「这个项目还没有翻译任务」的空态与
+「把任务移入本项目」的多选表单同时铺在页面上，等于让一个二级操作与主内容抢位置，
+页面同时出现两个主要内容块。现在空态是页面**唯一**的主内容（compact surface，
+不再是一个巨大 dashed 空框），移入功能收进一个**默认收起**的 collapsible panel；
+有任务时它同样作为 secondary 功能存在。
+
+**overflow menu 收紧。** 从"每项一个大白按钮 + 一条分隔线"改成轻量 popover menu
+card：宽度 214px、padding 6px、菜单项 32px 紧凑行（透明底、hover 才上浅色）、
+`项目操作` 作为一行 caption 标题、divider 分组、删除单独一组且为 destructive
+红色文字。项目卡上的 ⋯ 复用同一套 menu 视觉，整个系统的 Menu 组件只有一种长相。
+
+**切换项目 modal 收紧。** 宽度收到 440px、dialog padding 收到 18 / 12px、行高
+从 58px 收到 52px、列表高度限制在 46vh / 360px 以内。每个项目是一行 selectable
+row（图标 + 项目名 + `当前` / `系统工作区` 标记 + 次信息），当前项高亮即可；底部
+`新建项目` / `管理所有项目` 弱化为 secondary action row。
+
+宽度规则打的是 `section[role="dialog"]`：Streamlit 1.63 的 dialog 外壳是
+`section` 而不是 `div`，此前写成 `div[role="dialog"]` 的规则从未命中，modal 实际
+一直是默认的 500px。同时把 `st.divider()` 默认的 32px 上下边距收到 10 / 8px——
+它把紧凑 modal 撑出了约 80px 空白，实测 modal 高度从 700px 收到 654px。
+
+**空状态策略。** 一个页面最多一个主要 empty state：Empty Project 概览一个
+onboarding、Empty Task Tab 一个任务空态、Empty Knowledge Module 一个模块内轻量
+提示、Settings 不需要 empty state（只给空字段说明）。Project Detail 内不再出现
+连续的多个大虚线空框。
+
+**响应式。** 补齐 980 档（summary 折 2 列、知识模块入口换行、Tabs 横向滚动而不是
+挤压），并复核 1440 / 1280 / 980 / 760 四档：Header 右侧 `+ 新建任务` 与 `···`
+始终同行不换行，onboarding 宽度受控（≤680px），settings 分组不失衡，modal 与
+menu 跟着窗口收。
+
+760 档实测发现 Streamlit 在窄容器下会把 `stHorizontalBlock` 的
+`flex-direction` 切成 `column`，但列上仍留着百分比宽度，于是两件事同时坏掉：
+Tabs 折成四行、「查看全部 →」被压成 67px 宽截断成「查...」。767 档因此显式恢复
+`flex-direction: row` + 按内容宽度分配列宽，知识页头部与知识模块仍按「标题一行 +
+入口一行」换行。
+
+**没有改任何业务逻辑。** 这一轮只改 presentation / layout / action hierarchy /
+section structure：`core` 与 `transpraxis.project` 的数据模型、persistence、
+canonical task state、system workspace 模型、Project Hub 首页结构、Uncategorized
+Inbox 基本模型全部保持原样（`core.py` 本轮零改动，文件 mtime 也停在上一轮）。
+
+**新增回归测试。** 新增 `tests/project_detail_visual_system_test.py`（27 项），
+覆盖：Header CTA 与 overflow 同行、Empty / Active Overview 的分别处理、summary
+只在 Active Project 渲染且说明保持短句、Task tab 空态默认不展开移入表单且面板
+可展开、Knowledge tab 的四个模块结构与导出去 CTA 化、Settings 动作合并与四段
+分组、Overview 不暴露身份信息、Settings 显示高级信息、overflow menu 轻量化、
+switch-project modal 的 compact row list 与收紧的分隔线、容器层级 /
+spacing rhythm / 响应式断点。
+
+**同步更新了 5 条旧断言。** 这次重构改的是**版式**，所以有 5 条写死旧版式的
+断言必须跟着走，而不是反过来把新版式改回去：
+
+- `project_task_navigation_test.py::test_overview_uses_real_project_data`：
+  summary card 的说明从"已锁定 / 已确认术语""项目风格与翻译规则""已审校可复用"
+  这类长文案改成"已确认""已审核"短句；断言改为逐张卡的
+  `label / 主值 / note` 三元组，比原来按句子片段匹配更严格。
+- `project_task_navigation_test.py::test_knowledge_tab_shows_confirmed_knowledge_only`：
+  知识页骨架从"四个 metric + 常驻表格 + expander"改成"四个 module + 详情默认收起"；
+  断言改为先点入口展开，再验证同一张真实表格与候选过滤——守住的语义边界没变。
+- `project_memory_test.py::test_ui_projects_surface_lists_and_opens_a_project`：
+  同样撞上 `"已锁定 / 已确认术语"` 旧文案，按同一方式改为三元组断言。
+- `project_memory_test.py::test_ui_project_can_adopt_system_memory`：
+  「并入本项目」与"不会自动共享"现在住在「已审核记忆」模块里且默认收起；
+  断言先展开该模块。能力与文案都没有被删掉，只是按需求收进了二级面板。
+- `project_memory_test.py::test_ui_project_exports_and_imports_memory`：**未改**。
+  导出按钮按需求只做"降级 + 移位"，因此保留原标签
+  `导出项目记忆（JSON）`（放在右上角 32px 小按钮里），旧断言自然继续成立。
+
+导出按钮保留原标签后，知识页头部列宽从 `[5, 1]` 调成 `[4, 2]`，让内容宽度的小
+按钮放得下；实测 1440 / 1280 / 980 / 760 四档按钮右边缘都与模块右边缘对齐
+（1400 / 1240 / 952 / 746），不溢出、不换行。
+
+**测试结果。** `tests/project_detail_visual_system_test.py` 27 项全绿；
+`tests/` 全套 **835 passed, 0 failed（4 分 24 秒）**。
+（此前该套件在本机跑一轮要 4–5 小时，原因是沙箱的文件代理被 Streamlit 启动时的
+component manifest 扫描放大成 292 次 IPC 往返 ≈ 13.7s／每个 AppTest 实例；
+用 `env -u PYTHONPATH` 去掉 shim 后降到 0.36s，属于本机环境问题，与产品无关。）
+
+### 重构：Project Overview 拆成 EMPTY PROJECT / ACTIVE PROJECT 两种状态
+
+上一版把真实项目详情做成了 Project Command Center，但**空项目和有任务的项目共用
+同一套四卡片 dashboard**：一个刚建好、还没有任何任务的项目，打开后看到的是
+"任务 0 / 术语 0 / 规则 0 / 记忆 0" 的报表，下面再并排两个大 dashed 空框
+（`还没有任务` + `项目知识尚未建立`），每个框下面还各挂一个按钮。这一版把概览的
+信息架构修掉：**EMPTY PROJECT = ONBOARDING，ACTIVE PROJECT = COMMAND CENTER**，
+两者不再互相冒充。
+
+**状态判断只用真实数据。** 判据是 `core.list_project_jobs(project_id)` 的长度，
+不是 summary 文案、也不是"计数是不是 0"这类 UI 推断。空项目**整段跳过** summary
+dashboard，不再渲染 任务 / 术语 / 规则 / 记忆 四张卡。
+
+**EMPTY PROJECT：一个 onboarding surface。** 删掉了"任务空状态 + 创建按钮 +
+项目知识空状态 + 查看知识按钮"的多段空页面，收成一个 block：
+`开始使用这个项目` → 一句说明（创建任务后会积累术语、规则、项目决定与审核记忆）→
+一个 medium 的 `+ 创建第一个任务` → 一个次要入口 `设置项目知识 →`。
+空项目不再出现第二块 `项目知识尚未建立`——onboarding 文案已经说过同一件事。
+
+**ACTIVE PROJECT：顺序固定。** `工作概览`（四张 summary card，只在有 task 时才有
+意义）→ `进行中的任务` → `最近任务`（+`查看全部 →`）→ `项目知识`摘要。
+**没有进行中的任务时整节不渲染**：直接给「最近任务」，不再补一个
+`没有进行中的任务，所有任务都已交付。` 的大空框。
+
+**Summary card 不再有"空值文案"分支。** 空项目根本不出这四张卡，所以
+`0` 就是 `0`，配一句短注（`尚未建立` / `尚未设置` / `暂无已审核记忆`）；
+不再把 `还没有任务` 这种长句子填进数字卡里。
+
+**项目知识在概览里只是摘要。** 一级 tab 已经有完整的「项目知识」，概览只给一行
+`术语 N · 规则 N · 决定 N · 记忆 N` + `查看项目知识 →`；Active Project 但知识
+全为空时也只给**一行 compact row**（`项目知识尚未形成`），不再用巨大 dashed 空框。
+
+**Header 重新组织。** `← 返回项目` 与身份行收进同一个 `project_detail_header`：
+Project Name（32px 主标题）+ 紧跟其后的状态 badge + 描述（为空则整行省略，不写
+「暂无描述」）；右侧 `+ 新建任务` 与 `···` **同属一个 flex + nowrap 的容器**，
+overflow 不会再单独掉到下一行。UUID / Project ID / 类型 / 创建·更新时间一律不在
+概览出现（它们只在设置 → 高级信息）。归档说明也移进 header 内部，Header 与 Tabs
+之间不插任何东西。
+
+**Tabs 收紧。** 四个 tab 从"四等分页面宽度、每个都挂 count"改成 **compact
+left-aligned**：宽度由内容决定、间距 28px、下划线只横跨 tab 组本身；只有「任务」
+带 count（`任务 8`）——只有它在回答"有多少工作"。Header → Tabs 固定 24px，
+Tabs → 正文固定 30px。
+
+**页面级 Primary CTA 只剩一个。** Header 的 `+ 新建任务` 是唯一的页面级主操作；
+onboarding 里的 `创建第一个任务` 调用**完全相同的 action**（`_begin_new_task`，
+自动带上当前项目），视觉上是 medium 按钮。侧栏「新建任务」在进入 Project Detail
+后退成 secondary（新的 `new_task_action_in_project` 状态），不再和 Header CTA
+抢层级；未分类 Task Inbox 没有页面级 CTA，那里保持 primary。
+
+**Section title 提一档。** Project Detail 内的 section 标题从与正文同号（14px）
+提到 18px，避免"每一层都是同一档字号 + 粗体"。
+
+`core` / `transpraxis.project` 的**数据模型未做任何修改**：Project model、Task
+model、Uncategorized Inbox、Project Hub、canonical task state、persistence 与
+项目知识数据模型全部保持原样，这一版只改 Project Detail 的 presentation / layout。
+
+### 打磨：Project Hub 的视觉比例、密度与节奏
+
+Project Hub 的信息架构已经定稿，这一轮只做视觉收口——不改任何 IA、路由或数据模型。
+
+- **Page Header 的 CTA 回到 compact 比例**：`+ 新建项目 ▾` 从占满整列（300px+）
+  改为 `min-width: 160px` × `44px`。它是 page header 的动作，不该在视觉权重上盖过
+  page title；标题与按钮仍属于同一个 page container。
+- **Grid / List 变成一个 segmented control**：不再表现为两个独立的小方块按钮，
+  而是一个带统一外框、内部无缝、选中态用主色实底的 view mode selector。
+  两个入口仍写同一个 `project_view_mode` state（逻辑未变）。
+- **空项目卡改成明确的 onboarding**：删掉含混的
+  `打开项目创建第一个翻译任务 →`（它同时暗示"打开项目"和"创建任务"两个动作），
+  改为 `尚无任务` → `创建第一个翻译任务，开始积累术语、规则和项目记忆。` →
+  一个 lightweight ghost CTA `+ 创建任务`（透明底 + 主色文字，不抢主 CTA）。
+  该 CTA 是**独立按钮**且 z-index 高于整卡点击层：点它进入新建任务并**自动选定
+  本项目**，不会触发整卡导航；点卡片主体仍然进入项目详情。有任务的项目卡保持原设计。
+- **未分类入口不再重复 count**：之前标题行右侧的 `20` 与副标题的
+  `20 个任务尚未归入项目` 说的是同一件事。现在 count 只出现一次（标题行右侧，
+  与 `查看 →` 同一行），副标题只说明这是什么（`尚未归入任何项目的任务`）。
+- **Sidebar current-project selector 去掉冗余语义**：没有真实项目时不再同时渲染
+  静态的「未选择」+「选择项目」两行，只保留一个 `选择项目 ▾`（虚线中性态——
+  没有项目时不该看起来像选中了一个）；进入真实项目后显示 `📁 项目名 ▾`。
+  「正在查看未分类任务」的 context hint 保留在 selector 下方。
+- **Vertical rhythm 统一**：hub 自己的 flex gap 归零，段间距由各处显式控制——
+  Header 30 / Toolbar 18 / 未分类入口 30 / 「我的项目」标题 16。修掉了此前
+  「有的 46px、有的 16px」的不一致（根因是 `gap` 与 `margin` 叠加）。
+- **Toolbar 控件统一 44px 高**（search / status / sort / segmented control），
+  不再出现三种不同高度。
+- **Project card hover 只加强边框 + 一级很轻的阴影**，移除 `translateY(-1px)`：
+  卡片不再在网格里"浮起来"。
+- 顺带修掉两个真实缺陷：卡内 ghost CTA 被整卡点击层规则压成 0 宽（`inset:0`
+  沿后代选择器命中了 CTA 的按钮容器）；侧栏 selector 的样式整体失效
+  （带 `help=` 的按钮被 Streamlit 包进 tooltip span，`> button` 匹配不到）。
+
+### 重构：真实项目详情成为 Project Command Center
+
+系统工作区已经独立成 Task Inbox 之后，真实项目的详情页还是"项目元数据 + 统计卡 +
+最近任务"：打开项目先看到的是一张 `基本信息` 表（Project ID / 类型 / 状态 /
+创建时间 / 最近更新 / 描述），而不是"这个项目现在是什么状态"。这一版把
+`/projects/:projectId` 重构成 **Project Command Center**。
+
+**一级 IA：项目记忆 → 项目知识。** FolioThread 的项目级知识本来就有四类——术语、
+风格规则、项目决定、已审校翻译记忆——因此第三个一级 tab 改名为「项目知识」，tab
+上给出四类知识的总数，页内复用既有的记忆视图（底层能力与数据模型未改）。
+
+**Header 只回答身份与下一步。** `← 返回项目` + 项目名称（32px）+ subtle 状态 badge
+（活动中 / 已归档）+ 描述（为空时整行省略，不写"无描述"），右侧是
+`[ + 新建任务 ]` 与 secondary `⋯` 菜单（编辑项目 / 导出项目 / 归档 / 删除）。
+UUID、类型、创建时间、更新时间**不再出现在 header 或概览**。
+
+**概览 = 工作概览 + 进行中的任务 + 最近任务 + 项目知识。**
+
+- 工作概览：任务 / 术语 / 规则 / 记忆四张 compact summary card（96–104px，medium
+  宽度折成 2 列）。计数为 0 时不再渲染一排 0，而是"尚未建立 / 尚未设置 /
+  暂无已审核记忆 / 还没有任务"。
+- 进行中的任务：优先于最近任务，展示未交付的任务（翻译中 / 需要处理 / 待交付），
+  紧凑整行可点。
+- 最近任务：最多 5 条 + `查看全部 →` 跳「任务」tab，完整列表留在任务 tab。
+- 项目知识：四类知识计数 + 真实的项目提升事件（来自 `promotion_log`，没有事件
+  数据时只显示计数，不 mock）+ `查看项目知识 →`。
+- 空项目：`还没有任务` onboarding + `创建第一个任务`（直接带当前项目进入创建流程）
+  + `项目知识尚未建立`。
+
+**抽取共享 Task Row。** 未分类 Inbox、项目概览、项目任务三个列表此前各有一套行
+UI（有的还是大号 `打开任务` 按钮）。现在共用同一份 view model（`_task_row_view`）、
+同一份 markup（`_task_row_markup`）、同一套 toolbar 与过滤（`_render_task_list_toolbar`
+/ `_filter_task_rows`）与同一个整行点击渲染器（`_render_task_rows`）——标题 / 状态 /
+进度 / 段落数 / 文件类型 / 相对时间 / 点击语义完全一致，只有 key 前缀不同。
+
+**设置承接数据库信息。** 设置为四段：项目资料（名称、描述、编辑/重命名；描述为空
+时显示"添加项目描述"）、状态（活动中 / 已归档）、高级信息（Project ID、创建时间、
+最近更新——UUID 只在这里出现）、危险操作（归档 / 恢复 / 删除）。
+
+**归档项目不允许无提示创建任务。** 归档项目的主 CTA 从「新建任务」变成「恢复项目」，
+概览不再提供「创建第一个任务」；即使从侧栏点「新建任务」，也会回落到系统工作区并
+弹出说明（新建流程首屏现在会渲染队列里的提示）。
+
+**性能与一致性。** 详情页的派生数据只加载一次：`_project_detail_summary` 复用已
+加载的 `jobs`，不再让 summary / recent / task count 各触发一次 `list_project_jobs`。
+另外统一了「已完成」的语义：项目卡片的分布此前把"译文翻完"当成已完成，现在与详情
+的 canonical lifecycle 一致——只有**已冻结交付**才算完成，避免同一个项目在列表上
+写"2 已完成"、进详情却是"3 进行中"。
+
+`core` / `transpraxis.project` 的数据模型**未做任何修改**。
+
+### 重构：系统工作区「未分类」改为 Task Inbox（不再渲染成项目详情）
+
+Project Hub 首屏已经把「未分类」降级成了轻量入口，但点击它之后仍然进入旧的
+generic Project Detail，重新把「未分类」渲染成一个正式项目：标题、Project ID /
+UUID、概览 / 任务 / 项目记忆 / 设置 四个 tab、锁定术语 / 风格规则 / 已审核记忆、
+基本信息、创建/更新时间。
+
+这一版把系统工作区的**目的地模型**修掉：
+
+- **路由分流**：`_render_projects_surface` 里，`project.is_system == true` 时不再
+  调用 `render_project_detail`，改走 `render_uncategorized_tasks_workspace`；真实
+  项目才进 `render_project_detail`。真实 Project Detail 本身**没有改动**。
+- **未分类任务页面 = Task Inbox**：header 只有「未分类任务 + 数量 + 一句说明」，
+  一个轻量 toolbar（搜索 / 状态 / 排序），然后是紧凑 Task Row（标题 + 状态 · 段落 ·
+  文件类型 + 相对时间 + →），整行 hover + click 打开任务——不再每行一个巨大的
+  「打开任务」按钮。
+- **状态复用 canonical task state**：行上的状态词来自 `_task_overview_state` /
+  `_workspace_delivery_state`（已交付 / 需要处理问题 / 运行失败 / 正在翻译 / 尚未
+  开始 …），百分比来自段落完成度，有才显示、没有不编造。
+- **不暴露任何项目概念**：页面不渲染 UUID / Project ID / 基本信息 / 创建·更新时间 /
+  锁定术语 / 风格规则 / 决定 / 已审核记忆 / 项目记忆 / 设置 tab。
+- **任务可移入项目**：每行 `⋯` 菜单提供「打开任务 / 移入项目」，移入复用
+  `core.assign_jobs_to_project`（正在运行的任务会被跳过）。「新建项目并移入」记为
+  follow-up。
+- **Sidebar 保持正确**：进入 Inbox 后「当前项目 = 未选择」，并显示「正在查看未分类
+  任务」；这条提示只属于项目视图，一旦打开某个任务进入工作区就消失。
+- **`core` / `transpraxis.project` 未改**：系统工作区仍保留真实 UUID 与
+  `is_system=true` 的持久化模型，只改 UI 与 navigation 的表达。
+
+### 重构：项目页成为 Project Hub
+
+上一版把「项目」页变整齐了，但信息架构仍然有硬伤：`未分类` 被做成一张和正式项目
+同级的大卡片，项目卡面积大而信息密度低，搜索/筛选/排序像三个散落的表单控件，
+导入项目在页面底部展开一张长表单。这一版按 **Project Hub / 项目工作中心** 重排：
+进入页面后要能快速「找到项目 → 看到最近状态 → 进入项目 → 新建 → 管理 → 查看未
+分类任务」。
+
+**「未分类」降级为轻量系统入口，不再是项目。** 它本质是「没有归属任何项目的任务
+收纳区」，因此不再使用项目卡的结构与视觉权重，改成 toolbar 下方一条 72–88px 的
+`未分类任务` strip：名称 + 「N 个任务尚未归入项目」+ 数量 + `查看 →`，整条可点进入
+未分类任务列表。它没有 overflow menu，也不展示术语/记忆统计。
+`core` 里的数据模型**不变**——未分类任务仍然落在真实持有 UUID 的系统工作区里。
+
+**侧栏「当前项目」不再显示「未分类」。** 没有进入任何真实项目时显示 `未选择`，
+并保留一个 `选择项目` 入口；正在浏览未分类任务工作区时补一句 `正在查看未分类任务`。
+`当前项目` 与未分类任务从此不再互相冒充。
+
+**统一 page container 与 toolbar。** 主内容区收敛到 `1240px`，标题与「新建项目」
+属于同一个 page header（按钮不再漂到 viewport 最右侧）。搜索 / 状态 / 排序 / Grid-List
+切换合并成一个 toolbar：状态选项改为「全部 / 活动中 / 已归档」（默认活动中），排序
+改为显式动词「最近更新 / 最早更新 / 名称 A-Z / 任务最多」，并新增 Grid / List 视图
+切换（List View 为项目数量增长后的扫读形态，数据与动作与 Grid 完全一致）。
+
+**项目卡重写：先回答「这个项目现在在做什么」。** 卡片从 `min-height: 178px` 收到
+`126px`（约 −29%），信息优先级固定为：
+
+1. 项目名称（+ 归档 chip）；
+2. 任务分布：`8 个任务 · 2 进行中 · 6 已完成`（只渲染非零分桶）；
+3. 最近工作：`最近 <任务名> · <状态> <百分比>`，状态来自 canonical 交付状态，
+   百分比来自段落完成度——没有进度数据就只显示状态，不编造；
+4. 知识资产压成一行：`术语 126 · 规则 4 · 记忆 18`，全为 0 时整行隐藏；
+5. 相对更新时间。
+
+空项目不再渲染 `0 个任务 / 0 术语 / 0 规则 / 0 决定 / 0 记忆` 这种数据库报表，
+改为 `尚无任务` + `打开项目创建第一个翻译任务 →`，知识行直接隐藏。整卡任意位置
+可点进入项目概览；右上角 `⋯` 只承担 secondary actions（重命名 / 编辑 / 归档 /
+导出 / 删除），不再重复「打开项目」，删除仍有二次确认。
+
+**新建与导入都回到 modal。** 「新建项目」变成一个 compact menu（`新建空白项目` /
+`导入项目`）；空白项目走原有 modal，导入项目迁移到独立 modal（拖入 `.json` +
+名称覆盖 + 描述 + 只增不改的冲突记录，业务能力一项不减）。页面底部
+`更多 → 导入项目` 的 Accordion 被删除。项目卡 overflow menu 里新增了每个项目自己的
+「导出项目」入口。
+
+数据模型与 API **未做任何修改**：`core` / `transpraxis.project` 的签名与持久化格式
+不变，卡片上的任务分布是为了列表聚合而做的只读投影；任务自身的权威状态仍然只由
+`_task_overview_state` 渲染。
+
+### 文档：当前进度、正式发布与 CAT 内核路线
+
+- 同步本地实现基线，区分已有 TM/TMX、确定性 QA 与尚未实现的 CAT 内核能力。
+- 记录近期 UI 全面打磨后发布正式版、在 GitHub / 小红书 / X 发布与宣传的计划；版本号与日期待定。
+- 新增 DOCX Contract v1，明确 surgical round-trip、身份/定位/版本对应边界、支持矩阵和计划验收。
+- 后续顺序为 DOCX 完整闭环 → TM V2 → Source Update 与分析；这些文档更新不代表新运行时能力已交付。
+
+### 改版：新版 logo 成为唯一视觉基准
+
+品牌换成了新 logo（两页叠放的文档 + 覆盖其上的指针光标，页面标 **文** / **A**），
+并且**只保留这一个 logo**：侧栏、README、标签页全部指向同一份品牌图，
+不再存在"某个角落还挂着旧图标"的可能。
+
+- **界面与 README 用原图裁切**：`foliothread-source-lockup.png`（横向组合）与
+  `foliothread-source-icon.png`（标签页），直接裁自用户提供的品牌图，没有重绘、
+  重新排字、变形或重采样；CSS 只给宽度，高度按原比例自适应。
+- **向量版作为可缩放补充**：`transpraxis/resources/brand/foliothread-mark.svg`
+  （彩色图标）与 `foliothread-mark-mono.svg`（单色，`currentColor` + 字形镂空）
+  是同一 logo 的向量真源，供深色底材料、App 图标与任意缩放场景使用；对应 PNG
+  由新增的 `scripts/render_brand_assets.py` 用本机 Chromium 渲染生成，不再手工
+  导出——手工导出的位图会漂移，很快就不再等于向量源。该脚本不触碰裁切资产。
+- **色板收敛到 logo 取色**：新增设计系统 token `--tp-navy:#000D2D`（字标/深色底）、
+  `--tp-azure:#0088FD`（渐变中段）、`--tp-cyan:#00E8FE`（渐变亮端），主色由
+  `#1267E8` 改为 logo 的钴蓝 `#004CFD`（hover/active 同色系加深），
+  `--tp-brand-ink` 收敛为 `#0B1F3B`。Streamlit 主题 `--theme.primaryColor`
+  与 `gui.py` 同步改成 `#004cfd`，避免界面出现两套蓝。
+- **副标题与定位**：品牌位副标题统一为 `Agentic Translation Workspace` /
+  `智能体翻译工作台`，替代原先的 `Long-document Translation Workspace`；
+  窗口标题（`FolioThread · 长文档翻译工作空间`）保持不变。
+- **基准文档**：重写 `docs/brand.md`，写清品牌来源与裁切框、资产矩阵、色板、
+  字体，以及"换品牌图 / 改向量版"两条互不混淆的流程。
+- **回归约束**：新增 `tests/brand_assets_test.py`，把"只有一个 logo"变成可执行
+  断言——裁切资产与派生位图存在且尺寸正确（有人手工换图会立刻失败）、
+  图标源结构与无障碍标题、单色版不混入彩色、`app.py` token 等于 logo 取色、
+  hover/active 是同色更深阶、侧栏用裁切资产而非重绘版、README 引用真实存在的
+  文件。测试不依赖浏览器，因此能在 CI 里跑。
+
+### 重构：Project 生命周期与信息架构
+
+Project 是任务、术语、风格规则、人工决定与已审校翻译记忆的**长期上下文容器**。
+这一版把它的身份模型、生命周期与界面结构一次性定死——此前它更像"任务卡片上的
+一个标签"，而不是一个可以管理的实体。
+
+**系统工作区「未分类」取代「默认项目」。**
+
+- `"default"` 不再作为虚拟 project id 存在。所有没有 `projectId` 的任务
+  （字段缺失的旧任务、显式 `null`、历史数据里的 `"default"`）统一归入一个
+  **真实项目**：系统工作区「未分类」，它有持久化 UUID（`uuid5` 确定性派生）、
+  `is_system=true`，并真实落盘到 `outputs/projects/<uuid>/project.json`。
+- 系统工作区不允许重命名、归档或删除：它是所有无归属任务的容器。
+- 历史别名 `"default"` 在任何入口（导航、导出、删除、归档、TM 路径）都先归一到
+  系统项目 UUID，因此 `ValueError: 项目不存在：default` 这条路径被彻底修掉。
+  `projects/default/` 旧目录会在变更路径上搬到 UUID 目录，旧记录读取时即完成迁移。
+- 旧的全局翻译记忆文件 `outputs/translation_memory.json` 仍是系统工作区的 TM
+  权威位置，既有任务的数据与行为完全不变。
+
+**Project ID 统一为不可变 UUID。**
+
+- 新建项目的 ID 由 `uuid.uuid4()` 现场生成，**不再由名称派生**。改名不换 ID，
+  任务归属、项目记忆目录与任何链接都不受影响。
+- Display name 只是标签（可改、可中文、可用于人工入口检索），**不是主键**，
+  也不出现在磁盘路径或路由里。名称唯一性（重名、保留词、系统工作区名）在
+  `core.validate_project_name` 一处校验。
+
+**`/projects` 重构为 workspace/project hub。**
+
+- 首屏 = Page Header → compact 系统工作区 → `我的项目` toolbar → responsive 两列项目卡片。
+- 系统工作区只展示 inbox icon、`系统` badge、任务 / 术语 / 记忆数字和 `打开`，项目首页不再
+  暴露 UUID、创建/精确更新时间或技术实现说明。
+- 普通项目使用整卡可点击的响应式网格，展示任务、术语、规则、人工决定、已审校记忆和相对
+  更新时间；搜索、排序、活动/归档/全部统一为同一 horizontal toolbar。
+- 新建项目 CTA 与页面标题处于同一 header container；项目卡片保留 overflow menu，项目生命周期
+  管理仍进入详情或项目管理流程。
+- 新建项目仍使用 modal（name + description），创建成功后**直接进入项目详情**；归档项目从
+  默认活动列表移出，统一从状态筛选进入并可一键恢复。
+
+**`/projects/:projectId` 有四个一级 tab：概览 / 任务 / 项目记忆 / 设置。**
+
+- **概览**：基本信息（真实项目 ID、类型、状态、创建/更新时间、描述）、记忆统计、
+  最近 5 个任务；
+- **任务**：只列出**属于当前项目**的任务，支持搜索/筛选，并保留"把其它任务移入
+  本项目"的批量动作；
+- **项目记忆**：锁定术语、风格规则、人工决定、已审校记忆、待决冲突与导出；
+- **设置**：项目名称与描述（编辑 / 重命名）、归档与恢复、危险操作。
+
+**生命周期：归档可恢复，删除是永久的。**
+
+- 归档只改 `status=archived` / `archived_at`：不删除任务、不删除项目记忆，可随时
+  恢复；系统工作区拒绝归档。
+- 删除仍含任务的项目**被拒绝**，弹窗提示"请先把这些任务移到其它项目，或删除任务"，
+  并提供前往「任务」tab 的入口。第一版刻意不提供"删项目顺手挪任务"的一键动作。
+- 没有任务的项目仍需二次确认（逐字输入项目名称），删除前自动写可恢复备份。
+
+**侧栏：context switcher 与 project manager 彻底分开。**
+
+- 「当前项目」收敛为一个 compact selector（优先"正在看的项目"，其次是当前任务所属
+  项目，最后是系统工作区「未分类」），点击整块控件打开轻量「切换项目」modal；项目
+  行整体可点，当前 / 系统状态用浅色 row、check icon 与 badge 表示，切换后即时关闭并
+  显示 toast；
+- switcher 只负责 context switching；「新建项目」直接打开创建 dialog，创建后自动
+  切换；「管理所有项目」进入 `/projects`，重命名 / 归档 / 删除继续由项目管理页承担；
+- 原来的「资料库」改为「工作区」，其下的「项目」是管理入口，与上面的上下文职责不再
+  重叠；「术语库与记忆」相应更名为「术语与记忆」。
+
+**全局反馈与状态同步。** 所有 Project 操作走统一的 flash 队列 → `st.toast` 渲染
+（成功 / 失败 / 提示），操作成功后侧栏「当前项目」、项目列表与新建任务的 picker
+都与磁盘保持一致；loading / empty / error 三态在每个 tab 都有明确呈现。
+
+**API 与测试。** `core` 补齐 Project CRUD：`create_project(name, description)`、
+`require_project`、`rename_project`、`update_project`、`archive_project` /
+`restore_project`、`delete_project`、`project_sections`、`project_summary`、
+`resolve_project_ref`、`system_project_view`；`delete_job` 增加"运行中拒绝删除"
+保护。新增 `tests/project_lifecycle_test.py`（18 项），重写
+`tests/project_task_navigation_test.py`（40 项），`tests/project_memory_test.py`
+（45 项）同步到新语义。
+
+### 重构：Task Overview 的 canonical 状态模型
+
+概览页此前同时存在多套状态推导：顶栏读 `workspace_progress()["verdict"]`
+（可以说 `Ready for delivery`）、侧栏自己按 `issues.blocking` 决定颜色、Hero 另算
+一份 `_workspace_status` + 交付判断、pipeline 再按 `p2_done` 拼 ✓/○。于是同一页会
+同时出现「Ready for delivery」「暂不满足交付条件」「可以准备交付」，而"独立审校
+未启用"的 optional 阶段还会画上绿色 ✓。
+
+- **单一推导入口 `transpraxis/task_overview.py::derive_task_overview_state(task, facts)`**：
+  纯函数，输入任务状态 + 运行时收集的 job facts（交付快照 / 依赖影响 / 合规 / 案例
+  门禁 / QA），输出唯一 canonical 状态。顶栏、侧栏、Hero、卡片、pipeline、翻译页
+  Inspector、交付页标题全部渲染这一份，任何表面都不得再自行推导。
+- **生命周期**：`DRAFT → TRANSLATING → NEEDS_ATTENTION → READY_FOR_DELIVERY_PREP
+  → PREPARING_DELIVERY → DELIVERY_READY → DELIVERED`。`READY_FOR_DELIVERY_PREP`
+  的文案固定为「可以准备交付」（可以开始准备），只有 `DELIVERY_READY` 才是
+  「可以正式交付」（最终交付资产已生成并通过检查）。**`Ready for delivery` 不再
+  用于前者**，`DELIVERY_LIFECYCLE_STATES` 明确限定只有后两者能声称交付就绪。
+- **optional 阶段五态**：`completed / current / pending / skipped / blocked`。
+  未启用的独立审校与研究报告是 `skipped`（灰色 `—`），永远不显示绿色 ✓；
+  失败的审校是 `blocked`（`!`）。
+- **pipeline 只保留必经生命周期**：原文处理 → 翻译 → 独立审校 → 交付准备 →
+  最终交付。术语提取与研究报告是辅助能力，移出主 pipeline，改由 Hero 的禁用摘要
+  （「独立审校未启用 · 报告未启用」）与「辅助能力」轻量条（术语治理 / 案例复核 /
+  合规与 QA）承载。
+- **Hero 只显示一套 canonical 状态**：状态点 + 状态 + 一句细节 + 补充事实行 +
+  至多两个动作。`blocking > 0` 时 primary CTA 变成「查看 N 个必须处理的问题」，
+  页面上不再出现任何交付 CTA；只有建议（actionable）时文案为
+  「0 项必须处理 · N 项建议检查；建议不会阻止交付。」，绝不写成 blocking。
+- **卡片只为已启用阶段生成**：未启用功能没有卡片、也没有强 CTA；
+  「查看审校」只在审校启用时出现，「查看报告」只在报告启用且确有内容时出现。
+- **颜色收敛为一套 palette**：green=completed/可交付、blue=进行中、
+  amber=建议/attention（不阻断）、red=blocking、gray=pending/skipped/未启用。
+  同一 canonical 状态在顶栏 pill、侧栏状态 chip、Hero、pipeline 使用同一 tone，
+  经 `SURFACE_TONES` 单一映射落到各表面的 class。
+- **交付页与历史卡文案同源**：`_workspace_delivery_state` 改为 canonical 适配器，
+  「可以冻结交付 / 暂不满足交付条件」退出工作区词汇。
+- 新增 `tests/task_overview_state_test.py`（35 项状态矩阵：生命周期 × tone ×
+  可选阶段 × 动作 × 只读性 × 畸形状态）与 `tests/task_overview_ui_test.py`
+  （真实 Streamlit 页面验收：skipped 不画 ✓、报告未启用无 CTA、blocking 无交付
+  CTA、建议不写成 blocking、顶栏/侧栏/Hero 同色同文案）。
+
+### 历史任务页：对象语义、卡片布局与导航状态收口
+
+原来的历史页是"任务记录列表"：主标题直接是完整源文件名
+（`Part 3提取The Sensorium Of The Drone And Communities (Kathrin Maurer).docx`），
+右侧按钮既是唯一的选中方式又是导航入口，而且文案由一条独立的 copy 规则决定，
+和状态脱节（纯翻译任务会显示"更新报告"）。
+
+**对象语义：这一页列出的是 Translation Tasks。**
+
+- 页面与左侧导航都叫「历史任务」，**不**因为 Task 属于 Project 就把 Task list
+  命名为「历史项目」。页面标题、导航项、搜索标签、空状态、工作区回退文案里的
+  「历史项目」全部改回「历史任务」，并加了源码级回归（`app.py` 里不得再出现
+  「历史项目」）。
+- 左侧导航保持 `当前项目 <active project>` + `资料库 / 项目 / 历史任务 /
+  术语库与记忆`。「当前项目」显示当前任务所属的 Project，点击进入
+  **Project Overview**（不是任务 Overview）；任务没有项目时如实显示
+  「当前任务未归入项目」，不回落成任务标题——那会让这一栏在文案层面把两个实体
+  混成一个。
+
+**卡片布局：CTA 回到卡片内部。**
+
+- 删掉卡片左侧那一列分离的「准备交付 / 打开任务 / 继续审校」按钮列。contextual
+  CTA 现在渲染在卡片容器（`history_cardframe_*`）内的右下角，与整卡点击层是
+  **兄弟节点**且 `z-index` 更高，所以点 CTA 不会触发整卡导航。
+- 分层（自下而上）：`.tp-hcard`（视觉，`pointer-events:none`）
+  ← `history_card_*`（铺满整卡 → Task Overview）
+  ← `history_cta_*`（卡片内 CTA → 对应 workflow）。
+- 卡片固定四行：display title / author · source type · target language · domain /
+  status chip · segment progress · issue count / 最近更新 + CTA →
+  新增独立的 issue count；项目归属降为元信息行里的次级标签，不进入身份行。
+- **密度**：普通卡片 **116.7px**（目标 105–120px），1280 / 1440 / 1536 三档实测
+  一致且**无横向溢出**。压缩点：Streamlit 给 markdown `h3` 的锚点 padding 会把
+  18px 的行撑到 47px（显式清零）；meta / foot 行不再继承 16px 正文字号。
+- **修掉一个布局陷阱**：定位容器若叫 `history_card_box_*`，会被
+  `[class*="st-key-history_card_"]` 的子串规则一起绝对定位，容器高度变成整页
+  （900px），CTA 锚到页面底部。容器前缀因此是 `history_cardframe_*`。
+
+**标题与顶部控件。**
+
+- 标题优先 `task.display_name`，其次文档画像 `display_name`，再由文件名派生。
+  内部 identifier（`audit-blocking-no-suggestion` 这类"分隔串 + audit/fixture/test
+  等标记词"）**不作为标题**，显示「未命名任务」；标识保留在 hover 与搜索里。
+  普通分隔串（`field-notes-2026`）humanize 成 `Field Notes 2026`，不再被误判丢弃。
+  另外修掉噪声词剥离后残留的坏标题（`audit-translation-in-progress` 曾变成
+  `audit--in-progress`）。
+- 顶部 search 是主控件（`st.columns([5.5, 2.3, 2.2])`，实测 55.7%），status / sort
+  为紧凑 select，三者**不等宽**。
+
+**保留的既有约定。**
+
+- 统一导航入口 `_open_job(job_id, state, destination)`：标题点击、卡片空白点击、
+  卡片内 CTA 全部走它，落点由状态决定（运行中→查看进度、中断→继续处理（真的恢复
+  任务）、未译完→继续翻译、有 blocker→继续审校、报告待更新→更新报告、
+  已冻结→查看交付、其余→准备交付/打开任务）。CTA 直接进对应流程，**不先经过
+  Overview**。
+- 状态 chip 语义色：blocking→红、actionable/report stale→琥珀、运行中/待审校→蓝、
+  已完成/已交付→绿。视觉保持浅 surface + hairline + low shadow；hover 时底色/边框/
+  标题有变化，键盘聚焦有焦点环。
+- **修掉一处错误引导**：`dependency_impact` 只要译文变了就把所有下游标成 stale，
+  包括这个任务根本不适用的报告产物，于是纯翻译任务的历史卡会挂出「更新报告」。
+  现在只有 `report_enabled` / `p3_done` / `academic_state.artifacts` 之一为真才显示。
+
+- 新增 `tests/history_library_test.py`（32 项）覆盖标题解析与 display_name 优先级、
+  内部标识判定、humanize、issue count、chip/CTA 映射、报告 CTA 的适用性、
+  搜索/筛选/排序谓词、页面与导航命名、CTA 在卡片容器内的结构契约、顶部比例，
+  以及"点 CTA 进对应 workflow 而不是 Overview"。测试总数 577 → 643，全绿。
+- 新增 `docs/history-task-list.md`（取代 `docs/history-project-library.md`）。
+
+
+### 重构：Project 与 Translation Task 的创建信息架构
+
+此前「新建任务」与「新建项目」是两套并列的创建入口，语义重叠：项目页首屏是
+一个大型「新建项目」输入区域，与项目列表争抢注意力，而那个输入区域看起来又像
+"开始一次新翻译"。现在产品模型被固定为：**Project** 是长期存在、跨任务复用的
+workspace/container（术语、风格、人工确认记忆、项目级设置）；**Translation
+Task** 是一次具体文档翻译执行，一个 Project 可以包含多个 Tasks，Task 也可以
+不属于任何 Project。
+
+- **Task 的 `project_id` 可空**。字段**缺失**仍是迁移前旧任务，归入默认项目
+  （既有归属与全局翻译记忆完全不变）；**显式 null** 表示用户选了「无项目」，
+  不再静默回落到默认项目。`_project_memory_injection` 对空归属不注入任何项目
+  记忆，`promote_job_to_project` 对空归属直接报错而不是把术语写进默认项目。
+- **全局主 CTA 不变**：左侧「＋ 新建任务」仍是主要创建入口，权重不降。用户
+  带着待翻译文档时优先从这里开始。
+- **新建任务第 1 步的「所属项目」升级为统一 Project picker**：`无项目` /
+  已有项目列表 / `＋ 创建新项目`，默认 `无项目`。选择「＋ 创建新项目」时在
+  **当前任务创建流程内 inline 创建**，不导航离开页面，创建成功后自动选中。
+  用户不必先去项目页建项目。
+- **修复**：旧 picker 在输入框里每敲一个字就调用一次 `create_project`，于是
+  输入"无人机论文"会留下"无"、"无人"…等一串项目。现在只有点击「创建空项目」
+  才落盘，空名称给出明确错误。
+- **项目页重新定位为「管理长期 Project workspace」**：顶部是 `项目` +
+  `＋ 创建项目`，副标题「跨任务复用术语、风格与人工确认记忆」，默认展示项目
+  列表。每张卡片显示 display name / translation task 数量 / terminology 数量 /
+  最近更新时间，点击整张卡片进入 Project Overview。
+- **「＋ 创建项目」打开轻量 inline creator**，文案为「创建空项目」，辅助说明
+  「建立可供多个翻译任务复用的术语、风格与人工确认记忆。」，并明确「不会创建
+  翻译任务」。不再默认展示大型「新建项目」输入区域。
+- **JSON 导入降级为 advanced/migration 动作**：从项目页首屏移除，改到创建流程
+  的 secondary option「从项目备份导入」，以及列表页底部「更多 → 导入项目」。
+  能力保留、入口仍可达，但不再与项目列表同级占据首屏面积。
+- **导航状态分离 `task_id` 与 `project_id`**：`_open_job()` 只写
+  `active_job_id`，不再顺手把任务的 `project_id` 写进 `active_project_id`；
+  新增对称的 `_open_project()` / `_open_project_list()`。侧栏「项目」进入的是
+  列表而不是上一个详情。文案同步收口：任务历史页自称「历史任务」，任务卡片
+  的动作是「打开任务」，只有项目卡片才叫「打开项目」。
+- **修复**：`app_view="projects"` 此前只渲染页面标题——`_render_projects_surface()`
+  从未被调用，项目列表/详情实际不可达。现在接入主分发。
+- **修复**：历史页重构时丢失了中断任务的通知。恢复「最近更新 … · 自动保存已开启」
+  与「处理中断：当前批次已保存 N/M 段」的可见反馈。
+- 新增 `tests/project_task_navigation_test.py`（22 项）：覆盖"不建项目直接建任务、
+  选已有项目、inline 建项目后自动选中且不离开流程、项目页独立创建空项目、创建
+  项目不产生任务、一个项目多个任务、卡片必备字段、导入不在首屏、picker 保留项
+  不被项目名占用、开关任务/项目时导航状态互不污染、历史文案不混同、既有数据
+  不丢"。测试总数 555 → 577。
+
+### 修复：问题锚点跳转（blocker）
+
+**症状**：点击问题里的 `#2` → 正文变白 → 一直加载。
+
+**根因不是滚动**，是跳转链路没有收敛。每个入口各写各的（设置选中 + `st.rerun()`），
+而锚点用 `st.pills` 实现——pills 的选中值在 rerun 之后**依然保留**，同一个值被反复
+返回、反复触发 `st.rerun()`，形成 rerun loop。
+
+- **唯一跳转入口 `_navigate_to_segment`**：Agent 锚点、Inspector 定位、上一段/下一段、
+  网格选段全部走它。只设置 `selected_segment_id` + `pending_scroll_segment_id`。
+- **跳转改挂 `on_click` 回调**，脚本里不再手动 `st.rerun()`：回调在 rerun 之前执行，
+  scroll intent 因此能在渲染前就位。
+- **scroll intent 消费一次即清空**（`_consume_pending_scroll` 取出即 pop），
+  绝不在 session state 里残留，否则之后每次 rerun 都会再跳一次。
+- **锚点改为按钮**，不再使用 `st.pills`——它的选中值会在 rerun 后重放。
+- 滚动用 `data-segment` 锚点 + 一次性注入的脚本，在目标行渲染完成后执行；
+  **不自动 focus textarea**（用户是去看那一段，不是去编辑它）。
+  居中不靠裸 `scrollIntoView`：标记 span 是 `height:0` 的，浏览器按它自己的盒子
+  算居中，实测目标行中心落在 718px、视口中心 480px，偏 240px；而且滚完还会因为
+  长段落上方的布局再稳定一次而继续漂。现在显式算"行中心 vs 视口中心"的差值修正，
+  300ms 后再纠一次——实测 `rowCentre=480 / vhCentre=480`，完全居中。
+
+### 修复：目标被筛选挡住时"滚动失败"
+
+真实情况不是滚动失败，而是**目标根本不在 DOM 里**——渲染集合由 status 筛选 +
+关键词搜索决定。现在 `_reveal_segment()` 会先让筛选回到能显示目标的状态：
+
+| 挡住目标的东西 | 处理 |
+| --- | --- |
+| status 筛选（待审/已审校） | 切回「全部」 |
+| 「有审校问题」勾选 | 取消勾选 |
+| 搜索关键词 | 清空搜索 |
+
+搜索词不恢复（恢复会让目标在下一次 rerun 又消失），改动一律用
+`↪ 已清除搜索以显示第 15 段` 明确告知。
+
+### 改版：「查看全部」改成右栏问题抽屉，不再弹浮层
+
+中央 popover 会盖住正在工作的正文，而问题列表和"跳到正文处理问题"是同一件事的
+两半。现在「查看全部」把右栏 Inspector 切到 Issues 模式：顶部分级计数
+（`0 必须处理 · 8 建议检查 · 0 参考`），下面逐条列出问题与命中段，每条带 `#N`
+锚点；点锚点即关闭抽屉、选中该段、滚动到位、回到该段的 Inspector。
+这条路径之后可以自然演进成「发现 → 定位 → Agent 建议 → 应用候选」。
+
+### 修复：筛选命中 0 段时 issue bar 一起消失
+
+问题条与 scroll intent 原先放在「没有符合筛选条件的段落」的 early return 之后，
+于是当前筛选看不到任何段落时，issue bar 也没了——而那恰恰是最需要它的场景
+（"有问题但当前筛选看不到"正是要点「查看全部」去定位的时候）。
+现在两者在任何 early return 之前渲染。
+
+### 修复：active 段落的高亮静默失效
+
+`.is-active` 落在行内的标记 span 上（服务端渲染，不需要把数据再往容器层传一遍），
+而样式规则写的是 `[class*="st-key-cat_row_"].is-active`——永远匹配不到。
+实测表现为：段号变了、3px 蓝条和整行淡蓝底都没出现。
+改用 `:has()` 从行容器向下看：`[class*="st-key-cat_row_"]:has(> .is-active)`。
+浏览器实测已确认 `barColor=rgb(18,103,232)`、`rowBg=rgb(238,244,255)`。
+
+### 修复：问题抽屉的锚点被 planner 截断
+
+问题抽屉原先取 `plan_findings(limit=40)`，而 limit 是**截断**：在"每段一条术语
+发现"的 82 段文档里，#41 之后的段落根本没有锚点可点。新增 `_ISSUES_PANEL_LIMIT = 500`；
+顶部 issue bar 仍用小 limit（它只需要最高优先级一条）。
+
+- 新增 `tests/segment_navigation_test.py`（11 项）守住跳转状态机：只消费一次、
+  连续跳转收敛、尾部段落可达、被筛选挡住时先放宽再渲染、active 整行标记、
+  抽屉替代浮层、切换视图不残留意图、刷新不残留旧 scroll。
+- 测试由 544 项增至 555 项，全绿。浏览器端到端实测：
+  点「查看全部」正文不被覆盖；点锚点无白屏/spinner/loop；
+  `scrollTop 3000 → 43`，目标行落在视口内。
+
+## [Unreleased]
+
+### 工作台三轮：把 surface hierarchy 精确加回来
+
+上一轮做了减法，但减过头了：中央正文的原文、译文、段落之间几乎只靠空白区分，
+译文看起来就是普通文本，读起来像双栏 PDF 阅读器而不是翻译工作台——用户会阅读，
+但感知不到"我正在操作哪个 segment"。
+
+**减少 Border hierarchy ≠ 消灭 Surface hierarchy**：要删的是"框套框"，
+不是把所有工作面摊平。这一轮把该有的容器感按层级加回来。
+
+- **每个段落对恢复为一个视觉工作单元**：`.tp-cat-grid` 是一块工作区 surface
+  （白底 + hairline + radius + 极淡阴影），行与行之间 1px 极淡分隔线，行有 hover。
+  仍然只有**一层**容器——没有再给原文/译文各自套卡片。
+- **Active 段落重新明确**：整行淡蓝 tint + **贯穿整行的 3px 左侧蓝条**
+  （原来只在行内 8px 内缩，几乎只剩一个蓝色数字胶囊，太弱）。
+- **译文框恢复 editable affordance**：平时淡灰蓝底 + 极淡描边，hover 描边加深，
+  focus 才出现蓝色 focus ring。原文保持纯阅读态，左右两列的"只读 / 可写"
+  现在看得出来。不是回到"大白框"，而是有明确的输入面。
+- **Inspector 恢复区域感**：右栏是一个 panel surface；"段落事实"与"相关术语"
+  各是一块连续浅底 + 行分隔，**没有**恢复成每个事实一个小方格（那是 dashboard）。
+  相关术语因此从"漂在右栏的文字"变成一组工具数据。
+- **Agent 动作按钮降权**：上一版是实心白底 + 实线边框，反而成了全页最有实体感的
+  东西，视觉重心整个跑到右栏。改为透明底 + 透明边框，hover 才浮出 surface。
+- **译文框高度定为 112px（约 5 行）+ 框内滚动**。两条"自动长高"的路都验证失败，
+  已记进 `docs/agent-inspector-workspace.md` 避免重复踩：`field-sizing:content`
+  在该 Streamlit 版本的包装层里不生效（长段落 scrollHeight 375px、元素仍 46px）；
+  `height:auto + overflow:hidden` 会被 Streamlit 自己的 auto-resize 覆盖并钉在 86px。
+- 保留上一轮的全部成果：issue bar 仍是 44px，搜索/筛选未改，行内不常驻保存按钮，
+  行内只报异常。正文起点仍是 359px，首屏 2 个完整段落工作单元。
+- 测试保持 544 项全绿。
+
+### 工作台二轮收敛：把正文还给译者
+
+第一轮改版后仍然"到第一段正文要花掉半个屏幕"，而且每一行都在喊状态。二轮做了
+一轮减法 + 一次状态语义清理。首屏可见的正文行数从 1 行提到 3 行
+（1536×960 实测：正文起点 442px → 359px）。
+
+- **Agent 发现从大卡片压成一条 44px 的 issue bar**：
+  `✦ "aerial view" 在 4 处译法不一致 · 8 项发现 · 查看全部`。
+  原来是大卡片 + 一排大号「定位 #N」按钮，实测吃掉约 140px。段落锚点改成弹层里的
+  内联 chips（`st.pills`），点一下跳段；Agent 仍然随时可见，但不再抢正文。
+- **删掉顶栏重复的 Translation 进度条**：正文上方已经有 `翻译 / 术语已确认 /
+  审校 / 发现` 四维状态，顶栏再挂一条蓝色 Translation 进度条，等于继续宣称
+  "翻译完成度是主要完成指标"，与四维进度的理念冲突。顶栏现在只留文档身份 + 交付判断。
+- **保存操作改为按需浮现**：正常状态完全不渲染保存按钮（20 段同屏曾是一列重复的
+  "保存"）；内容变化后才出现 `● 未保存　保存`，并提示 `⌘/Ctrl+Enter 保存`。
+- **行内状态只报异常**：普通段落不再常驻绿色的"已翻译"——那是正常状态，由 Inspector
+  负责。行内只显示 `● 未保存 / 需处理 / 已修改 / 待审校`，没有异常就什么都不显示。
+- **"需处理"只对应 blocking**：原实现把审校队列里所有 actionable 级发现也标成
+  "需处理"，82 段文档实测出现 **26 个**红字——把建议喊成了错误。行内标记现在只取
+  `severity == "blocking"`，actionable 交给 issue bar 与 Inspector。
+- **段号缩到原来的约 72%**（22px → 18px，列宽更窄）：段号是辅助定位，不该比译文更
+  抢眼；当前段落主要靠 3px 蓝色指示条 + 极淡蓝底识别。
+- **段落事实从 2×3 方格改成轻量 definition list**，并且**没有值的字段直接不渲染**
+  （原来会显示 `AI 置信度 —`、`章节 —`）。空字段消失后 Agent 动作整体上移。
+- **修掉"筛…"截断**：1536px 宽下 `筛选 ▾` 也会被省略号截断（一眼像 bug）。
+  放宽工具栏两列并加 `white-space:nowrap`；顺带把「更多」也标成 `更多 ▾`。
+- **术语指标改名**：`Terminology 0/38` 与 Inspector 的"术语匹配 5 条"容易被当成同一
+  件事。前者是"确认（锁定/冻结）了几个术语"，现在写 `术语已确认`。
+- **交付导航不再一律红色**：`待处理 1` 原来配红色感叹号，但同一屏右上角说
+  "可以交付，但仍有 N 项建议"——红色通常意味着 blocker。现在只有真的存在
+  blocking 问题才用红，否则用琥珀色。
+  （同时修掉一个选择器误伤：`[class*="_pending"]` 会子串命中
+  `st-key-workspace_nav_item_overview_neutral` 里的 `view_ne`，把中性的"概览"
+  一起染成琥珀色；已改为 `[class~=...]` 整 token 匹配。）
+- **删掉两个已无调用方的旧抽象**：`_translation_status_glyph` 与
+  `_translation_pair_flags`（职责已被行内徽标与 Inspector 接管）。删除前全仓检索
+  确认无调用方、无测试引用、无动态派发（无 `getattr`/`globals()` 按名查找）；
+  `docs/console-loop.md` 里提到符号函数的历史段落一并改写。
+- 测试保持 544 项全绿（本轮只改行为与断言，没有增删测试数量）。
+
+### 翻译工作台：编辑收敛到中央网格，右栏改成 Agent Inspector
+
+界面上最刺眼的问题是**同一段译文同时出现在两个地方**：中间一列"当前译文"（只读）
+和右栏一个编辑器 + 「保存修改」。用户看到两处相同内容时的第一个念头是"我到底该在
+哪里改"。这一版把编辑权收敛到中央网格，右栏改为只读的 Inspector。
+
+- **中央网格成为唯一编辑区**：每行的"译文"列本身就是可编辑的 `text_area`，行内
+  有保存按钮与"● 未保存 / 已翻译 / 待翻译 / 需处理"状态。右栏的译文编辑器、
+  「保存修改」「重译」「恢复原译」全部移除（"恢复原译"改放到 Inspector 的
+  「当前译法依据」里，"重译"由 Agent 动作取代）。行内表单用
+  `enter_to_submit=False`，**打字不会触发 rerun**，只在提交时落盘。
+  草稿与已保存值的差异用会话内的"基线"比较得出，所以"未保存"是可撤销的真实状态，
+  不是涂在按钮上的颜色。
+- **右栏升级为 Agent Inspector**（`_render_workspace_translation_context`）：
+  段落事实网格（状态 / 人工修改次数 / 术语匹配 / 审校 / AI 置信度 / 章节）、
+  本段的 Agent 发现、以及成组的 Agent 动作——改写、更忠实、更自然、学术化、
+  术语检查、上下文一致性，外加一条自定义指令。动作产出的是**候选译文**，
+  必须由人点「应用到译文」才写回正文；丢弃即消失。Inspector 不再复述原文与译文。
+- **文档级 Agent 发现**：新增 `transpraxis/translation_planner.py`（纯只读、
+  确定性、不调模型）扫描全文，产出六类发现——术语不一致、引用标注丢失、
+  占位符残留、译文结构异常、译文长度异常、审校覆盖，并给出 0-based 段落锚点。
+  翻译页在筛选栏下方用一行呈现最高优先级的一条 + 计数 + 可点击的「定位 #N」，
+  完整清单在 Inspector 里。这是"系统主动说明它发现了什么"，
+  而不是又一个等人点击的按钮。
+- **进度从单一数字改为四个维度**：`Translation / Terminology / Review / Issues`
+  + 一句交付判断（`可以交付，但仍有 8 项建议` / `N 个问题阻断交付` /
+  `Ready for delivery`）。原来"82 / 82 段已翻译"会被读成"已完成"，
+  而同一屏右上角又说"暂不满足交付条件"。
+- **表格感与边界感减弱**：段落行去掉外框/内框/卡片三层边界，改为行间距 + hover
+  浮出的极淡面；active 段落用 3px 左侧蓝色指示条 + 淡蓝底；行内译文编辑器无边框，
+  聚焦时才出现焦点环，并随内容自动增高（`field-sizing:content`），
+  长段落不必在框内滚动。新增 surface 层级 token（canvas / sunken / hairline /
+  shadow / tint）替代原来的 border 层级。
+- **顶栏与侧栏减重**：顶栏压成"Part 标签 + 书名 + 段数 · 术语 · 保存时间"一行，
+  右侧是交付判断 + 翻译进度条；「返回任务列表 / 回到主页」缩短为「任务列表 / 主页」。
+  侧栏导航不再用"按钮 + 状态列"两栏结构（184px 侧栏放不下"翻译已完成"这类标签，
+  实测会溢出压到相邻行），改为**状态决定颜色 + 图标**，状态文字只在需要处理时出现；
+  "不适用 / 未启用"整行压暗；`1 项` 这类含糊徽标改成 `待处理 1 / 待确认 1 / 待完成 1`。
+- 修掉一个**静默的样式失效**：Streamlit 给带 `help=` 的按钮多包一层
+  `stTooltipHoverTarget`（内联 `display:flex; justify-content:flex-end`），
+  按钮因此不再是 `.stButton` 的直接子元素，全站 `.stButton > button` 规则对这类按钮
+  完全不生效（实测 10 个可见按钮只有 5 个命中）。已在样式表里归一化该包装层。
+  另外该版本的 `help` tooltip 点击后不会消失（实测鼠标移开 5.5s 仍在 DOM 里），
+  侧栏因此不再使用 `help`，"不适用"直接写进标签。
+- 新增 `tests/agent_inspector_ui_test.py`（6 项）守住新结构：中央网格是唯一编辑器、
+  Inspector 六项事实 + 六个 Agent 动作、发现条含段落锚点、四维进度、顶栏不再重复
+  产品标语、行内保存的落盘与基线重建。新增 `tests/translation_planner_test.py`（32 项，随本次改动一并落地）
+  覆盖发现规则、排序、截断与畸形状态。测试由 506 项增至 544 项，全绿。
+
+### 翻译页标题行瘦身 + 左侧导航不再被挤成一团
+
+- **左侧导航标签被截成一个字**：导航项固定用 `st.columns([5, 1.65])` 分栏，且
+  `.tp-nav-state { min-width:48px }`。即使该项没有状态文字，空状态列仍占掉约四分之一
+  宽度并强留 48px，把「概览/翻译/术语/审校/交付」压成「概…/翻…」。现在**没有状态
+  文字时不再分栏**，标签按钮直接占满整行；`.tp-nav-state` 的强制最小宽度改为 0；
+  翻译/审校页的导航列宽比从 0.62/0.72 提到 0.72/0.78（正文宽度基本无感）。
+- **翻译页标题下方那块元信息取消**：「当前译文 v32 · 82 段 · 交付与审校的唯一来源 ·
+  最近变更…」与「82 / 82 段已翻译 · 未启用独立审校 · TM 复用 0」原本占掉正文上方两行。
+  现在合并成标题右侧的**一条进度条 + 段数**（`8 / 8 段已翻译`），版本、变更、审校
+  覆盖率与 TM 复用数收进该进度条的悬停提示，信息不丢、空间不占。
+- 新增 `--tp-cat-progress` 样式；≤900px 时进度条自动换行占满整行。
+- 测试由 506 项保持 506 项（既有翻译工作台 UI 测试覆盖"点击段号选中"与 CAT 表头，
+  改动后全部通过；另跑 workspace/UI 相关 48 项确认无回归）。
+
+### 翻译吞吐实测：批次参数可配置 + 40% 调用花在无人消费的知识反馈上
+
+针对"大文档太慢"，先用真实文档离线算批次结构，再用真实 provider 做有界 A/B
+（每种配置 4 个批次）。完整数据与复现命令见 `docs/translation-throughput.md`。
+
+- **"加大批次更快"的假设被实测推翻**：82 段文档上，批次数确实从 32 降到 17（6×4800）
+  甚至 13（8×6400），但中位时延超线性增长（10.6s → 38.8s → 50.0s），协议失败率也从
+  1/4 升到 3/4，投影总耗时反而从 7.9 min 升到 12.2 / 10.0 min。**因此默认保持
+  4×2400 不变**，没有改变任何既有行为。
+- 批次参数改为按任务可配置：`run_job_pipeline(batch_size=, max_batch_chars=)`，
+  随任务写入 `pipeline_config` 与 `state["batch_plan"]`（含实际批次数），恢复任务
+  沿用同一套划分；翻译策略的高级区新增「批次策略」（保守/均衡/快速）并说明取舍。
+- **找到真正的时间去向**：真实 82 段任务的 79 次请求里，32 次是批次翻译、**32 次是
+  批后知识反馈**（每批一次）、约 15 次是失败降级与修复。而该任务未开独立审校、术语
+  表全程 provisional、候选无人审阅——这 32 次调用产出的候选没有消费者，约占全部调用
+  的 40%，是当前有实测依据的最大杠杆。
+- 新增 `scripts/batch_tuning_report.py`：离线算批次结构 + `--live K` 有界实测时延与
+  协议正确性（不评估翻译质量）。
+- 记录两处**试过但撤回**的改动，避免重复尝试：失败后二分重试（当前 4 段批次下 5 次
+  调用 vs 逐段 4 次，不划算）；协议错误快速失败（我先据"额外 47 次调用来自失败恢复"
+  推断，核对后发现该推断错误，真实收益约 2/79 次调用，不值得改热路径）。
+- 顺带发现一处死代码：`accepted_for_knowledge` 被连续赋值两次，第一次（按审校结果
+  过滤）完全无效。
+- 测试由 505 项增至 506 项（新增批次计划可配置 + 随任务持久化）。
+
+### 工作台改版（CAT 段落网格）与中断可诊断性
+
+**翻译工作台按 CAT 工具（MemoQ / Trados）的思路重做**。改版前实测：顶部标题区与
+「交付与审校依据」大卡片在列表开始前占掉约 30% 屏高，左侧 5 个导航项占约 200px，
+「状态」+「#」两列再占约 200px，而原文与译文两列都用 `_translation_preview(limit=170)`
+截断加省略号——**译者无法在列表里读完整句子**。
+
+- 列表从 `st.dataframe` 改为自绘 CAT 网格：原文与译文并排、**整句换行显示**；状态不
+  再占列，改为单元格左侧色条（已审校/已修改/待审）；段号是唯一的选段入口（点击即选，
+  悬停显示状态）。Streamlit 的表格不提供换行，这是必须自绘的原因。
+- 压缩顶部与侧栏：大卡片改为一行元信息，去掉装饰性副标题与导航说明，正文宽度占比
+  由 61% 提升到约 69%，网格固定高度内部滚动使右侧编辑器始终可见。
+- 逐行按钮的开销经实测可负担（300 行 ≈ 0.11s 脚本 / 650ms 首屏 / 8k DOM 节点），
+  网格上限 400 行，超出部分靠搜索与筛选收敛。
+- 修复检查器把状态显示两遍（"已翻译 已翻译"）：两个状态函数返回同一段文字而被并排
+  渲染，现在符号与文字各司其职。
+- 修复窄栏里「重新翻译并复审」被截断成「重新…」。
+- **修复交付页卡片小结自相矛盾**：一边显示「学术产物同步：当前任务未启用 ✓」，
+  一边写「但受影响的报告产物仍需重建」。前一轮只修了「下一步」与概览 hero，漏了这处，
+  现在三处共用同一判据。
+- 新增 `scripts/ui_screenshot.py`：用本机 Chromium + playwright-core 给运行中的应用
+  截图，可直接打开某个工作区页面。纵向留白、文字截断、列宽这类问题只能在真实渲染里
+  看出，本次记录的问题都是靠它发现的。
+- 长文档导航：检查器上方新增 `←` / `→` 上一段/下一段，翻段会自动把该段滚入网格窗口；
+  **显示窗口跟随选中段落**，因此 DOM 规模与文档长度无关（上限 400 行），随机定位用
+  搜索框（本就接受段落号）。Streamlit 无法做浏览器级虚拟滚动——真正的虚拟滚动需要
+  自定义 JS 组件，而唯一内建虚拟化的 `st.dataframe` 会截断文本；这里用有界窗口 +
+  导航达到同样效果。
+
+**中断可诊断性（上一个真实任务的排查结论）**：82 段任务停在 69 段，根因是翻译 worker
+是 Streamlit 进程内的 daemon 线程，**应用退出即终止**，且因进程被直接杀掉而没有任何
+记录。据此修两处：
+
+- worker 只捕 `Exception`，`SystemExit` 一类 BaseException 会绕过 `except` 连 `finally`
+  也不执行，心跳线程继续续租、lease 永不过期，应用还活着时任务会**硬卡死**
+  （`start_job_worker` / `resume_job` 都会拒绝）。改为捕获 `BaseException`。
+- worker 启动/释放写入技术日志，因此"有启动、无释放"本身就说明中断方式；恢复时的
+  提示也不再是笼统的"上次运行已中断"，而是「中断时正在：等待模型响应；已完成 69/82 段，
+  可从断点继续」。
+
+- 测试由 502 项增至 505 项；新增的中断诊断三项与"长句不被截断"一项均经过反向验证。
+
+### 导入冲突的一键采纳与工作台 UX 审查
+
+- **导入冲突可处理**：导入时发现的"本地与导入不一致"不再只是一次性报告，而是
+  项目里的**持久待决项**（`pending_conflicts`）。项目记忆页逐条显示本地/导入两个
+  版本与来源，可单独「采纳导入版本」或「保留本地版本」，并提供批量动作（默认
+  **保留本地**——批量最容易误伤）。两种决定都记入 `promotion_log`，可追溯
+  "为什么是这个译名"。冲突按三方内容生成稳定 ID，重复导入不会堆叠。
+- **修复交付页提供了必然失败的主按钮**：冻结按钮此前只检查报告与 QA 门禁，
+  不检查翻译完成度与审校就绪，于是翻译未完成或审校过期/失败/未完成的任务也显示
+  可点击的「确认并冻结最终版本」，点击后被后端拒绝；而报告/QA 阻塞时按钮却是
+  禁用的。现在统一复用该页既有的 `next_target` 判据，并在「交付判断」网格里补上
+  此前完全缺失的**翻译完成**一项。
+- **修复纯翻译任务被要求"重建 9 项下游产物"**：影响视图会把不适用的报告/QA 产物
+  也标为 stale，导致交付页网格显示"学术产物同步：当前任务未启用 ✓"的同时，
+  「下一步」却要求重建下游产物，概览 hero 也随之声称"报告需要更新"。现在概览与
+  交付页在把影响 stale 当作阻塞前，先确认确实存在会随译文变化的学术下游。
+- **修复旧任务被误报为未完成**：完成判定把缺失的 `enable_annotate` 当作"要求标注"，
+  而产品默认是关闭，导致 `p1/p2/p3` 全部完成、报告已生成的旧任务被报成
+  `idle_incomplete`，概览一边说"可以准备交付"、一边渲染运行面板与「继续处理」。
+  现在只有显式要求标注且未完成时才阻止判定。
+- **修复审计 fixture 与真实任务不一致**（会影响 `docs/ui-audit/` 截图的准确性）：
+  `scripts/ui_audit_fixtures.py` 补齐 `run_job_pipeline` 一定会写入的字段
+  （`enable_annotate` / `enable_report` / `provider` / `stage` 等），按业务状态写入
+  `runtime_state.json`（进行中的 fixture 记录真实进度而非 `0/—`），并新增
+  `self_check()`：已完成 fixture 若被判定为未完成或会渲染运行面板，脚本直接失败。
+  同时加入写入前提示——该脚本会替换全局翻译记忆并改写 `ui-audit-*` 目录，
+  现在会先列出将要覆盖的内容与未受影响的真实任务目录。
+- **修复只读访问会写盘**（三处，并把"读取不得有写副作用"定为不变量）：
+  `core.list_projects()` 会在"列出项目"时顺手创建默认项目；
+  `core.get_job_runtime_status()` 推断状态时会写 `runtime_state.json`，于是**从未
+  运行过**的任务被界面读过一次就多出该文件；`core.list_jobs()` 会创建 `outputs/`
+  目录。后果是渲染页面、跑脚本、执行 eval、**以及跑一次 `pytest`** 都会在用户工作
+  目录里留下与本次操作无关的文件。现在这三处都是纯读取，默认项目与运行状态改为
+  在变更路径/worker 写入。同时把"默认项目不可归档/删除"的保护改为按项目 ID 判断，
+  不再依赖磁盘上是否存在该记录。唯一保留的写路径是"死 worker 状态纠正"（只发生在
+  真正启动过 worker 的任务上），已在 `docs/architecture-boundaries.md` 第 7 节说明。
+  回归防线 `test_reading_projects_never_writes_to_disk` 与
+  `test_reading_a_never_run_job_writes_nothing` 均经过反向验证。
+- 新增 `docs/console-loop.md` 的「UX / UI 审查（工作台）」一节：审查方法、边界、
+  逐状态结论、四处修复、三条被纠正的误判，以及审计 fixture 的工具问题。
+- 测试由 497 项增至 502 项；新增的五项回归防线（交付门禁两项、fixture 一致性
+  一项、只读写盘两项）均经过反向验证。
+
+### 项目归档与删除（带备份）
+
+- **归档项目**：离开活动项目列表与新建任务的项目选择器，但**记忆、任务归属与
+  翻译记忆全部保留**，可随时恢复。项目列表新增「已归档项目」折叠区。
+- **删除项目**（不可逆，但可恢复）：四重保护——默认项目不可删除；必须逐字输入
+  项目名称（首尾空白忽略是有意行为）；项目下仍有任务时拒绝删除，除非显式指定
+  迁移目标（否则任务的 `project_id` 会指向不存在的项目）；删除前自动把完整项目
+  记忆（含已审校译对）备份到 `outputs/projects/_deleted/`，该备份可被
+  「导入项目记忆」直接读回，删除成功后界面告知备份文件名。
+- 界面删除入口放在独立折叠区，按钮在名称匹配前始终禁用。
+- 新增 `core.archive_project` / `core.delete_project` /
+  `core.list_active_projects`；项目记录新增 `archived_at` 字段。
+- 测试由 483 项增至 490 项；删除的四项保护经过反向验证（同时移除后对应测试失败）。
+
+### 项目层收口：批量移动、记忆导出导入、排版等价匹配
+
+- **批量移动任务**：项目详情「项目任务」页签可多选任务移入本项目，
+  `core.assign_jobs_to_project()` 为编程入口。三条规则：正在运行的任务拒绝改归属
+  （它已读取原项目记忆）；移动只改归属、不修改已有译文、不自动迁移术语；可选
+  把该任务已审校译文并入目标项目记忆，且只增不改（不覆盖目标项目已有译法）。
+- **项目记忆导出 / 导入**：项目记忆成为可移植资产（纯 JSON，不含任务状态、
+  源文档或凭据）。导出含术语、术语版本、风格、人工决定审计、提升记录与本项目
+  已审校译对，并带 `content_sha256`。导入**只增不改**：同名项目被并入而非新建，
+  冲突保留本地并计入报告；强制校验格式标识、版本、校验和、编码与 8 MB 体积上限。
+- **翻译记忆的排版等价匹配**：新增 `tm_normalize` / `tm_index` / `tm_lookup`。
+  匹配吸收真实来源差异（换行、连续空格、不间断/全角空格、弯直引号、en/em dash、
+  软连字符、省略号、NFKC 等价），使 PDF 与 DOCX 抽取出的同一句话能够复用同一份
+  已审校译文；命中方式记录为 `tm_match: "exact" | "normalized"` 以便审计。
+  **不做**大小写折叠，**不做**语义模糊匹配（编辑距离/词序/同义替换）——翻译记忆是
+  错误放大器，语义近似需要独立的置信度设计，在那之前宁可不做。
+- 测试由 471 项增至 483 项；其中三组经过反向验证（取消项目隔离、把归一化改成
+  恒等、去掉"运行中不可移动"的守卫，对应测试都会失败）。
+
+### 翻译记忆按项目隔离
+
+- 翻译记忆（TM）改为**按项目隔离**：命名项目各自使用
+  `outputs/projects/<project_id>/translation_memory.json`，默认项目沿用历史全局
+  路径 `outputs/translation_memory.json`，因此**既有任务无迁移、数据与行为不变**。
+- 采用"按项目分文件"而不是"单文件加 `project_id` 字段"：TM 记录以 source 为键，
+  同一原文在不同项目译法不同时单文件无法同时表示两种译法。现在同一 source 在
+  两个项目可以有各自的已审校译文且互不覆盖。
+- 检索、写回、失效、审校提升、"清空记忆"全部按任务所属项目进行；`load_tm()` /
+  `save_tm()` 不传项目时仍读写默认项目，既有脚本与测试无需改动。
+- 「术语库与翻译记忆」页按项目展示记忆条数，并可选择查看与清空某一个项目的记忆。
+- 项目详情新增显式动作「把默认项目的已审校记忆并入本项目」：只增不改、幂等，
+  且只在"本项目为空且默认项目有内容"时出现——不静默共享跨项目记忆。
+- 测试由 464 项增至 471 项；隔离相关 4 项经过反向验证（把 scoping 关掉会失败）。
+
+### Project 层：跨任务复用的已确认记忆
+
+- 增加 Project 层（蓝图 §3.2 的 Project / Job 边界）。项目记忆存放在
+  `outputs/projects/<project_id>/project.json`，积累**已被人工确认**的术语、
+  风格规则与人工决定审计；候选术语、未确认风格与模型记录一律排除。
+- **跨任务复用真正生效**：同项目的新任务在开始前注入项目锁定术语与已确认风格，
+  因此新文档无需重新导入术语库即可沿用项目术语。注入经过审计
+  （`state["project_memory"]` 记录版本、hash 与注入条目）。
+- 注入时机限定在"任务尚未开始工作"之前：进行中的任务不会因项目记忆变化而改
+  术语。任务自带术语优先于项目记忆，同一 source 不会产生两条锁定要求。
+- 侧栏新增「资料库 → 项目」：项目列表显示已积累的记忆摘要与任务数；项目详情
+  含「项目记忆」与「项目任务」两个页签。工作区「术语」页新增
+  **提升到项目记忆**（Memory gate 的落点），并说明"会提升什么"。
+- 新建任务第 1 步新增「所属项目」选择器，可直接新建项目并显示启动后会注入
+  多少条项目记忆。
+- 任务状态新增声明字段 `project_id` 与 `project_memory`；旧任务加载时归入默认
+  项目，不会丢失。任务归属由 state 的 `project_id` 单一决定，项目任务列表派生。
+- **修复**：项目记忆按 `source` 归并而非按 entry ID。`models.entry_id` 把 target
+  计入 ID，导致"人工修正首选译名"会在项目里留下两条互相冲突的锁定条目。
+- **修复**：中文项目名规范化后没有 ASCII 字符，曾回落到默认项目 ID，导致
+  "新建中文名项目"覆盖默认项目。现在退回名称哈希，并为中文名生成唯一合法 ID。
+- 新增 `docs/project-memory.md`；测试由 453 项增至 464 项（`tests/project_memory_test.py`）。
+
+### 控制台闭环与单一工作区表面
+
+- 增加界面闭环测试 `tests/ui_console_test.py`（7 项，随 `pytest` 进入 CI）：
+  用真实 `app.py` 与 Streamlit `AppTest` 驱动"新建任务 → 落到工作区"、
+  "术语门禁 → 人工冻结 → 继续翻译"、"审校 blocking → 人工决定 → 解除阻塞"、
+  "交付冻结 → final + 不可变快照"，并断言工作区只呈现当前任务的上下文。
+  此前 `tests/app_boot_test.py` 是 `main()` 入口、pytest 不收集，**界面层没有任何
+  自动化断言进入 CI**；现在它通过 `test_ui_app_boot_smoke_runs_in_ci` 一并纳入。
+- 把离线 provider 替身提取为 `tests/offline_provider.py`，由后端场景门禁与界面
+  闭环测试共用，避免两边各自漂移。
+- 删除 `app.py` 中已不可达的旧「资产与交付 / 文档上下文 / 研究报告（专用）」
+  渲染面（534 行，`app.py` 9000 → 8461 行）。它会把工作区里每一个任务的资产面板、
+  审校队列和报告渲染到同一页，是纯粹的回归风险。工作区现在只有一套 navigate
+  与一套表面；承诺的回归防线是上述界面测试。
+- 新增 `docs/console-loop.md`：一屏一阶段对照表、三个人类控制点在界面上的落点、
+  已自动化的闭环环节，以及按影响排序的已知缺口。
+
+### 场景验收门禁与两个缺陷修复
+
+- 增加蓝图 §8 三个端到端场景的可执行门禁：`tests/scenario_gate_test.py` 离线覆盖
+  20 页 DOCX（导入→术语→翻译→审校→双语交付）、100 页 PDF（版面恢复、中断恢复、
+  受影响范围重建）和术语密集文档（术语冻结、TM 复用、交付清单绑定），以及
+  蓝图 §4.2 的 Memory / Review / Delivery 三个人类控制点。源文档由
+  `scripts/make_scenario_fixtures.py` 确定性重建，仓库不提交二进制 fixture。
+  详见 `docs/scenario-gate.md`。
+- 修复多批次文档的 QA 与审校发现被静默丢弃：`translate_stage` 在整个文档范围内
+  持有 `findings_all = state.setdefault("findings", [])`，而每批结束的
+  `save_job_state` 会经过 `delivery.normalize_state_findings`，后者重新绑定了
+  `state["findings"]`；于是第一批之后的所有发现都被写入一个已丢弃的列表。
+  表现为 `state.json` 中没有这些发现，而 `review_stats` / `has_blocking` 仍然计数，
+  交付门禁因此看不到 blocking 问题。现改为就地更新。
+- 修复交付拒绝不给原因：`approve_delivery` 的拒绝理由过去只来自
+  `validation["issues"]`，当阻塞来自确定性 QA 的 `blocking_findings` 时，
+  用户只能看到泛化的"译文未通过最终交付检查"。现在拒绝理由包含段落位置与摘要。
+- 全量测试由 434 项增至 453 项，其中 12 项为场景门禁、7 项为界面闭环。
+
 ### Phase 1：Product Reframing & Rebrand
 
 - 将公共产品品牌、页面标题、启动器、发布元数据、仓库链接和 logo/favicon 占位统一为 FolioThread。

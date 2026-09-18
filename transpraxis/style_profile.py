@@ -211,7 +211,7 @@ def _style_prompt(target_lang: str = "") -> str:
         "JSON 结构：\n"
         '{\n'
         ' "document_profile": {\n'
-        '   "domain": "学科领域，如 传播学/环境人文学",\n'
+        '   "domain": "学科领域，如 语言学/历史学/计算机科学",\n'
         '   "subdomain": "细分领域",\n'
         '   "genre": "文本类型，如 学术专著/教材/访谈/营销文案",\n'
         '   "audience": "目标读者",\n'

@@ -201,9 +201,9 @@ def project_workspace_state(
         stage, stage_label = "translated", "已翻译"
         next_action = recovery_action("delivery")
     elif delivery_ready:
-        stage, stage_label, next_action = "delivery", delivery_state or "可以冻结交付", recovery_action("delivery")
+        stage, stage_label, next_action = "delivery", delivery_state or "可以正式交付", recovery_action("delivery")
     else:
-        stage, stage_label, next_action = "delivery", delivery_state or "准备交付", recovery_action("delivery")
+        stage, stage_label, next_action = "delivery", delivery_state or "可以准备交付", recovery_action("delivery")
 
     return {
         "stage": stage,
@@ -234,7 +234,7 @@ def history_copy(state: Mapping[str, Any], *, delivery_state: Optional[str] = No
     """Human history card copy, deliberately excluding checkpoint telemetry."""
     view = project_workspace_state(state, delivery_state=delivery_state,
                                    delivery_ready=bool(delivery_state and
-                                                       delivery_state.startswith("可以冻结")))
+                                                       delivery_state.startswith("可以正式交付")))
     if snapshot_current:
         return {"status": delivery_state or "已冻结交付", "detail": "已生成不可变交付版本", "action": "查看交付"}
     if not state.get("p2_done") or view["translated_segments"] < view["total_segments"]:
@@ -253,6 +253,6 @@ def history_copy(state: Mapping[str, Any], *, delivery_state: Optional[str] = No
                 "action": "更新报告"}
     if not view["review_required"]:
         return {"status": "已翻译", "detail": "当前译文有效，可以准备交付", "action": "查看交付"}
-    if delivery_state == "可以冻结交付":
+    if delivery_state in {"可以准备交付", "可以正式交付"}:
         return {"status": "可以交付", "detail": "译文已完成审校", "action": "查看交付"}
     return {"status": "已翻译", "detail": "当前译文已完成审校", "action": "查看交付"}

@@ -472,7 +472,10 @@ def test_apptest_term_review_panel():
             "未完成任务应保留在历史任务列表"
         assert any("tp-history-copy" in m.value for m in at.markdown), \
             "历史任务名称与进度应使用可读的任务信息容器"
-        next(b for b in at.button if b.label == "打开").click()
+        # 历史卡片打开的是**任务**：文案不得写成「打开项目」，那是另一个实体。
+        next(b for b in at.button if b.label == "打开任务").click()
+        at.run()
+        # 打开任务先落 Overview（确定性落点），再进入术语工作区。
         at.session_state["workspace_section"] = "terms"
         at.run()
         assert not at.exception, f"术语工作区渲染异常：{at.exception}"
