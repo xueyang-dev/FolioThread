@@ -2,13 +2,16 @@
 
 产品模型（本文件守住的边界）：
 
-- 侧栏的 Project 只占**一个分组**「项目」，组内两个不同职责的条目：
+- 侧栏的 Project 只占**一个分组**「项目」，组内两个不同职责的成分：
     上下文 selector 是 **context switcher**（我在哪个项目里工作：点击展开一个轻量
     下拉面板，切换上下文，并为新建任务提供术语 / TM / 风格规则），
-    它下方相邻的「项目中心」是 **project manager**（查看所有项目、新建 / 重命名 /
-    归档 / 删除），权重更低。后者是**纯导航**：只改路由，不碰当前 Project Context，
-    也绝不展开 switcher。两者不共用同一套导航状态。
-    「工作区」分组只放跨项目的资料与全局设置。
+    **分组标题「项目」本身**是 **project manager** 的入口（查看所有项目、新建 /
+    重命名 / 归档 / 删除）。后者是**纯导航**：只改路由，不碰当前 Project Context，
+    也绝不展开 switcher。两者不共用同一套导航状态。管理入口收敛到标题上，所以侧栏
+    里没有独立的「项目中心」行。
+    「工作区」分组只放跨项目的**资料**（历史任务 / 术语与翻译记忆）。AI Engine /
+    Model Center 不是导航行，而是贴底 status module（`provider_status`）上的
+    「管理」action —— 侧栏里不允许存在第二个指向同一页面的入口。
     层级是 Workspace ▸ Project ▸ Task ▸ Run。
     路由与上下文分开：`projects_route` 说"在看列表还是某个项目"，
     `active_project_id` 是唯一的 Project Context，进管理页不会被清掉。
@@ -203,6 +206,21 @@ def _seed_job(job_id="member", filename="member.docx", project_id=None):
     return state
 
 
+def _job_created_for(filename):
+    """按源文件名找回刚创建的任务。
+
+    任务身份现在由「文档身份 + 本地化上下文（项目 / 目标语言）」推导
+    （见 `core.resolve_task_id`），**不再等于文件内容哈希**。测试因此按文件名
+    定位，而不是硬编码一个哈希——那正是修复前的错误假设。
+    """
+    jobs = [job for job in core.list_jobs()
+            if str((job["state"] or {}).get("filename") or "") == filename]
+    assert len(jobs) == 1, "应恰好创建一个任务：" + repr(
+        [(j["job_id"], (j["state"] or {}).get("filename"))
+         for j in core.list_jobs()])
+    return jobs[0]
+
+
 # ================= 数据模型：任务的归属永远指向真实项目 =================
 
 
@@ -269,24 +287,32 @@ def test_promoting_confirmed_terms_lands_in_the_task_container():
 
 
 def test_sidebar_project_group_sits_above_the_workspace_group():
-    """「项目」是一个分组：上下文 selector 与「项目中心」同组相邻，不与「工作区」混。"""
+    """「项目」是一个分组：分组标题（Project Center 入口）在上，selector 紧随其后。"""
     with nav_env():
         at = _project_page()
         assert not at.exception, [e.value for e in at.exception]
         labels = [re.sub(r"<[^>]+>", "", str(m.value)) for m in at.sidebar.markdown
                   if "tp-nav-label" in str(m.value)]
-        assert labels == ["项目", "工作区"], labels
+        # 「项目」现在是可点击的导航入口（按钮），不再是纯标题。
+        assert labels == ["工作区"], labels
         assert not any("资料库" in label for label in labels), \
             "「资料库」与「项目」职责重叠，必须改成「工作区」"
         sidebar_labels = [b.label for b in at.sidebar.button]
-        assert "项目中心" in sidebar_labels, sidebar_labels
+        assert "项目" in sidebar_labels, sidebar_labels
+        assert "项目中心" not in sidebar_labels, \
+            f"独立「项目中心」行必须退休（入口在分组标题上）：{sidebar_labels}"
         assert "历史任务" in sidebar_labels
-        assert "设置" in sidebar_labels
-        # 同组相邻：「项目中心」紧贴 selector 之下，且在「工作区」那三项之前。
-        index = sidebar_labels.index("项目中心")
-        assert sidebar_labels[index - 1].startswith("未选择项目"), sidebar_labels
+        # 「工作区」分组只放**跨项目的资料**（历史任务 / 术语与翻译记忆）。
+        # 独立「设置」行已退休：它当时唯一的落点就是 AI Engine / Model Center，
+        # 与贴底 status module 上的「管理」完全同义。AI Engine 入口只保留后者。
+        assert "设置" not in sidebar_labels, \
+            f"独立「设置」行必须退休（AI Engine 入口在贴底 status module 上）：{sidebar_labels}"
+        assert "管理" in sidebar_labels, sidebar_labels
+        # 同组相邻：标题在上、selector 紧随其后，整组都在「工作区」那三项之前。
+        index = sidebar_labels.index("项目")
+        assert sidebar_labels[index + 1].startswith("未选择项目"), sidebar_labels
         assert index < sidebar_labels.index("历史任务"), \
-            f"「项目中心」不能混进「工作区」分组：{sidebar_labels}"
+            f"「项目」分组不能混进「工作区」分组：{sidebar_labels}"
 
 
 def test_sidebar_context_is_unselected_without_a_real_project():
@@ -309,13 +335,15 @@ def test_sidebar_selector_stays_compact_without_a_project():
         at = _project_page()
         css = _markdown_text(at)
         rule = re.search(
-            r'\.st-key-current_project:has\(\.tp-nav-empty\) \.stButton button\s*\{'
+            r'\.st-key-current_project:has\(\.tp-nav-empty\) '
+            r'\[class\*="st-key-current_project_selector"\] \.stButton button\s*\{'
             r'(.*?)\}', css, flags=re.S)
         assert rule, "必须有'未选择项目'时的 selector 样式规则"
         body = rule.group(1)
         assert "dashed" not in body, "未选中态不再使用大面积虚线卡片"
-        # 项目底色只在"已进入真实项目"时使用。
-        assert "background: var(--tp-primary-soft)" in css
+        assert "min-height: 46px" in body, body
+        # 项目底色只在"已进入真实项目"时使用（selector 现在用中性 surface）。
+        assert "background: var(--tp-surface)" in css
 
 
 def test_sidebar_reports_viewing_the_uncategorized_workspace():
@@ -351,13 +379,22 @@ def test_sidebar_switcher_changes_the_context_project():
         at.button(key="current_project_selector").click()
         at.run()
         assert not at.exception, [e.value for e in at.exception]
-        assert any("新任务将默认加入所选项目，已有任务不会移动。" in c.value
-                   for c in at.caption)
+        # switcher 是 quick switcher：**不常驻**产品说明文案。"仅影响新任务"换到了
+        # selector 的 tooltip 上，完整解释在 New Task 正文的「项目上下文」区域。
+        assert not any("已有任务不会移动" in str(c.value) for c in at.caption), \
+            "面板里不得常驻说明文案"
+        assert "仅影响新任务" in (
+            next(b for b in at.sidebar.button
+                 if b.key == "current_project_selector").help or "")
         assert not any("切换到此项目" in b.label or "进入系统工作区" in b.label
                        for b in at.button), _buttons(at)
-        assert any("当前" in b.label and "系统" in b.label
-                   for b in at.button if b.key and b.key.startswith("switcher_pick_")), \
-            "系统项目应使用 system + current 状态标识"
+        # 当前项用 check + 轻 active 面表达（行是 compact row，不是 badge 堆叠的卡片）。
+        rows = [str(m.value) for m in at.markdown
+                if '<div class="tp-switch-row' in str(m.value)]
+        assert any("is-current" in block and "tp-switch-check" in block
+                   for block in rows), rows
+        assert any("tp-switch-tag" in block and "Inbox" in block
+                   for block in rows), "Inbox 行必须保留 system collection 语义"
         at.button(key=f"switcher_pick_{project['project_id']}").click()
         at.run()
         assert not at.exception, [e.value for e in at.exception]
@@ -379,7 +416,7 @@ def test_sidebar_switcher_changes_the_context_project():
 def test_project_switcher_actions_are_context_only():
     """Switcher 只负责选择上下文；管理入口不在这里重复一份。
 
-    「管理所有项目」已退休：侧栏「项目中心」就是唯一的 Project Management 入口，
+    「管理所有项目」已退休：侧栏「项目」分组标题就是唯一的 Project Management 入口，
     同一个页面里出现两个指向管理页的按钮会被读成两套系统。
     """
     with nav_env():
@@ -392,8 +429,10 @@ def test_project_switcher_actions_are_context_only():
         assert "switcher_new_project" in footer_keys, footer_keys
         assert not any(str(key).startswith("switcher_manage") for key in footer_keys), \
             f"管理入口属于「项目中心」，不能在 switcher 里再来一个：{footer_keys}"
-        # 侧栏里只有一颗管理入口。
-        assert len([b for b in at.sidebar.button if b.label == "项目中心"]) == 1
+        # 侧栏里只有一颗管理入口，而且它**就是分组标题**（不再有独立行与之重复）。
+        sidebar_labels = [b.label for b in at.sidebar.button]
+        assert sidebar_labels.count("项目") == 1, sidebar_labels
+        assert "项目中心" not in sidebar_labels, sidebar_labels
 
         # 面板在上一段断言时已经是展开的：`current_project_selector` 是**开合**触发器，
         # 再点一次只会把它收起。这里直接点底部动作。
@@ -434,7 +473,7 @@ def test_project_switcher_searches_when_project_list_is_long():
 
 
 def test_project_center_entry_returns_to_the_project_list():
-    """侧栏「项目中心」进入的是项目管理页（列表），不是某个项目详情。
+    """「项目」分组标题进入的是项目管理页（列表），不是某个项目详情。
 
     路由与上下文是两件事：列表路由由 `projects_route` 表达，`active_project_id`
     作为 Project Context **原样保留**（需求 B：管理页不得修改当前上下文）。
@@ -444,7 +483,7 @@ def test_project_center_entry_returns_to_the_project_list():
         at = _project_page(state={"active_project_id": project["project_id"]})
         assert "无人机论文" in _markdown_text(at)
 
-        next(b for b in at.sidebar.button if b.label == "项目中心").click()
+        at.button(key="project_section_header_button").click()
         at.run()
         assert not at.exception, [e.value for e in at.exception]
         assert at.session_state["app_view"] == "projects"
@@ -1681,7 +1720,6 @@ def test_new_task_can_switch_the_context_to_an_existing_project():
         _write_provider_config(tmp)
         project = core.create_project("无人机论文")
         data = b"docx-with-project"
-        job_id = core.file_job_id(data)
 
         at = _new_task_page()
         at.button(key="task_project_pick").click()
@@ -1700,17 +1738,17 @@ def test_new_task_can_switch_the_context_to_an_existing_project():
             at.run()
             assert not at.exception, [e.value for e in at.exception]
 
-        assert core.resolved_project_id(core.load_job_state(job_id)) == \
-            project["project_id"]
-        assert [job["job_id"]
-                for job in core.list_project_jobs(project["project_id"])] == [job_id]
+        job = _job_created_for("p.docx")
+        assert core.resolved_project_id(job["state"]) == project["project_id"]
+        assert [item["job_id"]
+                for item in core.list_project_jobs(project["project_id"])] == \
+            [job["job_id"]]
 
 
 def test_new_task_without_a_project_lands_in_the_system_workspace():
     with nav_env() as tmp:
         _write_provider_config(tmp)
         data = b"docx-solo"
-        job_id = core.file_job_id(data)
         at = _new_task_page()
         with _stubbed_worker():
             at.session_state["task_files"] = [{"name": "solo.docx", "bytes": data}]
@@ -1719,9 +1757,58 @@ def test_new_task_without_a_project_lands_in_the_system_workspace():
             next(b for b in at.button if b.label == "开始任务").click()
             at.run()
             assert not at.exception, [e.value for e in at.exception]
-        assert core.load_job_state(job_id)["project_id"] is None
-        assert core.resolved_project_id(core.load_job_state(job_id)) == \
-            core.system_project_id()
+        job = _job_created_for("solo.docx")
+        assert job["state"]["project_id"] is None
+        assert core.resolved_project_id(job["state"]) == core.system_project_id()
+
+
+def test_the_same_file_in_another_context_creates_a_new_task():
+    """同一份文档 + 另一个项目 / 另一种目标语言 = 另一个任务，不是续做。
+
+    旧缺陷的界面症状：换项目或换目标语言后重新上传同一个文件，任务数不增加，
+    界面直接打开旧任务——用户以为在新建，实际在续做一个语义不同的活
+    （注入的项目记忆与术语不同，译文语言也不同）。
+
+    这里走完整的界面路径（新建任务 -> 开始任务），而不是只调核心函数：
+    缺陷是在这条路径上被触发的。
+    """
+    with nav_env() as tmp:
+        _write_provider_config(tmp)
+        project_a = core.create_project("生态恢复")
+        project_b = core.create_project("无人机论文")
+        data = b"docx-shared-across-contexts"
+
+        def start(project_id, language):
+            at = _new_task_page()
+            # 归属只有一个来源：Project Context（`task_project_id` 是它的投影）。
+            at.session_state["active_project_id"] = project_id
+            at.session_state["target_lang"] = language
+            with _stubbed_worker():
+                at.session_state["task_files"] = [
+                    {"name": "shared.docx", "bytes": data}]
+                at.session_state["task_step"] = 4
+                at.run()
+                next(b for b in at.button if b.label == "开始任务").click()
+                at.run()
+                assert not at.exception, [e.value for e in at.exception]
+            return at
+
+        start(project_a["project_id"], "简体中文")
+        assert len(core.list_jobs()) == 1
+
+        start(project_b["project_id"], "Français")
+
+        jobs = core.list_jobs()
+        assert len(jobs) == 2, \
+            "换项目 + 换目标语言必须产生独立任务，而不是复用旧任务：" + repr(
+                [(j["job_id"], j["state"].get("project_id"),
+                  j["state"].get("target_lang")) for j in jobs])
+        by_project = {core.resolved_project_id(job["state"]): job["state"]
+                      for job in jobs}
+        assert set(by_project) == {project_a["project_id"],
+                                   project_b["project_id"]}
+        assert by_project[project_a["project_id"]]["target_lang"] == "简体中文"
+        assert by_project[project_b["project_id"]]["target_lang"] == "Français"
 
 
 # ================= 导航状态：Task 与 Project 不互相顶替 =================

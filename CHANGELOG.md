@@ -4,6 +4,262 @@
 
 ## [Unreleased]
 
+> **边界说明**：本节是当前发布候选（`pyproject.toml` 版本 `0.4.0`）的**全部未发布变更**，
+> 按时间**倒序**累积了多个工作流（发布正确性硬化 → 侧栏 IA → 工作台视觉）。
+> 正式发布时本节整体改名为 `## [0.4.0] - <发布日期>`；在此之前**不写日期、不声称已发布**。
+> 其下 `## [0.3.0] - 2026-08-24` 是最后一个已发布版本。
+
+### 发布卫生：本机路径与凭据脱敏
+
+仓库里不该出现任何能反推出**本机用户名、个人目录结构或 API 凭据**的内容。这类内容
+不会让任何测试失败、不影响运行、也不报错——它只是静静地躺在文档里，等着随仓库一起公开。
+
+- **已跟踪文件中的本机绝对路径清零**。此前有三处 `/Users/<name>`：
+  `design-qa.md` 的参考素材改用描述（该素材是 local-only，未入库）、
+  `docs/ui-audit/21-sidebar-project-group/README.md` 的复现命令改用
+  `git rev-parse --show-toplevel`、`skills/.redskill-lock.json` 不再入库
+  （它记录的是**绝对安装路径**，属于机器本地状态，不是仓库内容；文件仍留在本机）。
+- **`.gitignore` 凭据规则补齐**：`.env`、密钥与证书（`*.pem` / `*.key` / `*.p12` /
+  `*.pfx` / `*.keystore` / `*.jks`）、SSH 私钥（`id_rsa*` / `id_ed25519*` / `id_ecdsa*`）、
+  `credentials.json`、`service-account*.json`、`secrets.toml`、`.netrc` / `.pypirc` / `.npmrc`、
+  `*.token` / `*.secret`。
+- **`scripts/release_preflight.py` 新增第 4 项检查**：已跟踪文件中的本机绝对家目录路径。
+  这条检查是**负向验证过**的——它在缺陷存在时报 FAIL，修复后转 OK。
+
+注意：本次只清理**当前发布内容**。旧提交里仍留有这些路径（见 `git log`）；
+彻底清除需要重写历史，属于另一类操作，不在本版本范围内。
+
+### 修复：发布正确性硬化（默认绑定 / 翻译记忆作用域 / 正文判定 / 任务身份）
+
+五个各自都能**静默**通过交付检查的缺陷。共同点是"看起来成功了"：界面无报错、
+门禁通过、译文却是错的或根本不是译文。逐个记根因与边界：
+
+- **默认只监听回环**。`gui.py` 此前不传 `--server.address`，Streamlit 的隐式默认
+  是 `0.0.0.0` —— 一个桌面工具在用户毫不知情时把本地文档翻译工作台暴露到局域网。
+  现在默认显式绑定 `127.0.0.1`，LAN 仍是**显式** opt-in（`--lan` 才绑 `0.0.0.0`），
+  不依赖任何框架默认值。回归用真实 socket 探测（默认下回环可连、LAN 地址不可连；
+  `--lan` 下 LAN 地址可连），而不是只断言参数字符串。
+- **翻译记忆按目标语言隔离**。条目键此前就是原文，于是同一段 `"会议明天开始。"`
+  的**中文**译文会被 Français 任务当作已审校记忆复用，跳过模型调用、标成已审校、
+  通过交付检查。现在一条记忆的身份是「目标语言 + 原文」（作用域键），
+  没有目标语言上下文就**无法**命中任何条目（fail closed）；写入侧同步收紧
+  （流水线晋升、检查点恢复、人工晋升、语义审校、失效删除、术语陈旧、项目迁移、
+  TMX 导入、冲突合并）。**旧条目保留在文件里不删**，但语言不可证明者永不自动
+  命中，也不被猜成某种语言。
+- **正文判定改用 Unicode 语义**。此前用 `[A-Za-z0-9\u4e00-\u9fff]` 枚举语言区间，
+  纯西里尔 / 谚文 / 阿拉伯段落被判成"装饰行"，**原样保留 + 标成已审校 + 通过交付
+  检查**——译文就是原文，且完全静默。现在按 Unicode 类别判定：任意字母（`L*`）
+  或数字（`N*`）即正文。按脚本列区间永远会漏掉下一种语言；"这一行是不是文字"
+  本身就是 Unicode 类别问题。核心层与检查点恢复共用同一个判定，不再各存一份正则。
+- **任务身份不再等于文档身份**。任务 ID 此前只由文件内容哈希推导，于是
+  "同一个文件 + 另一个项目 + 另一种目标语言"会**静默打开旧任务**：注入的项目记忆
+  与术语不同、译文语言也不同，任务数却不增加。现在任务身份 = 文档身份 +
+  本地化上下文（项目 / 目标语言 / 源语言）；内容哈希保留为**文档去重**手段，
+  两者在概念上分开。旧任务只在上下文**可证明一致**时被沿用（进度不失联），
+  否则新建独立任务。
+- **响应式回归测试的定位策略**。`tests/project_detail_visual_system_test.py`
+  用 `split(...)[-1]` 取"最后一段匹配的 mobile CSS"，新增一个更靠后的同条件
+  `@media` 块后该假设失效——生产 CSS 规则仍在，是**测试**在错误的位置找它。
+  改为收集全部同条件 `@media` 块再断言，生产 CSS 未改动。
+- **同一类判定的周边排查（"内容相同" ≠ "任务相同"）**。按同一根因排查了其余
+  按内容取身份的地方，三处修正：
+  - `scripts/rebuild_book.py`：注入翻译记忆时写的是**裸 source 键**，修复后这类
+    条目的语言不可证明、`tm_lookup` 一律拒绝——脚本会"跑成功"却一段都复用不上
+    （静默失效）。改用 `core.tm_put(..., target_lang)`；任务 ID 也从裸内容哈希
+    改为 `core.task_job_id`，并在 state 里落盘 `target_lang`。
+  - `scripts/translate_pdf.py`（README 里的命令行入口）：原来只看文档身份，于是
+    "同一个 PDF 换 `--target-lang` 再跑一次"会**静默续做另一种语言的旧任务**。
+    现在 `load_document` 只负责**文档身份**，任务身份由 `resolve_job_id` 加上目标
+    语言推导；旧版本按裸文档身份命名的任务，只有在其记录的 `target_lang` 可证明
+    一致时才沿用。`--job-id` 仍是显式续跑的逃生口。
+  - `eval/runner.py`：同一份语料跑不同目标语言会复用同一个任务目录；改用
+    `core.task_job_id(..., target_lang=...)`（该 harness 每次都重建 state，无续跑
+    语义，改动零风险）。
+  - `transpraxis/project.py`（项目记忆的**导出/导入载荷**）：导出时只写
+    `{target, reviewed}`，把目标语言丢掉了——语言当时只是**碰巧**靠作用域键的
+    前缀活下来。载荷是跨机器交换的文件，读方无从得知我们内部的分隔符约定；
+    任何一次键重写（规范化、去重、第三方工具处理）都会**静默**抹掉语言身份，
+    而"这条记忆属于哪种语言"正是上一节修复的核心。现在导出显式带上
+    `target_lang` 字段，导入按「记录字段优先、键前缀兜底」解析：字段与键冲突时
+    以字段为准，两者都没有则不猜语言、按无作用域条目保留（永不自动命中）。
+    更早的载荷（纯原文键）与修复前的载荷（作用域键泄漏进载荷）都仍可正确读入。
+
+回归：`tests/gui_launcher_test.py`、`tests/project_memory_test.py`（含导出/导入载荷的
+语言身份 4 例：字段显式存在、双语言往返各自只命中自己、无语言旧载荷保留但永不自动
+命中、作用域键旧载荷仍能恢复语言）、`tests/text_content_detection_test.py`（新增）、
+`tests/task_identity_test.py`（新增，含命令行任务身份 5 例）、
+`tests/project_detail_visual_system_test.py`、`tests/project_task_navigation_test.py`。
+新增用例均做过**反向对照**（把旧行为放回去，确认用例真的会失败）。
+
+**另修一处阻断门禁的测试夹具缺陷**（`tests/gui_launcher_test.py`，生产代码未改）：
+绑定语义用例的夹具用 `listen(1)`（accept backlog 只有 1）却对**同一个**监听 socket
+探测两次，而 `accept()` 从不被调用——第二次连接被内核 RST（`ECONNRESET`），
+于是 `--lan` 的局域网断言概率性失败（本机实测 **11/40**）。这是夹具把 backlog 挤爆，
+不是绑定错了：真实启动 `gui.py` 时默认与 `--lan` 两种模式的监听行为都正确。
+改为**每个探测一条全新 socket、只连一次**并把 backlog 放到 8；负向断言同时从
+`!= 0` 收紧为「errno 必须是 `ECONNREFUSED` / `EHOSTUNREACH`」，以免 `ECONNRESET`
+这类夹具问题伪装成"没有暴露到局域网"而**假通过**。修复后连续 **150 次运行 0 失败**。
+
+同一类风险还做了**扩大连跑**：另外 5 个含后台 worker / 状态收敛 / UI 等待的测试文件
+（`runtime_state_test`、`runtime_status_test`、`runtime_resume_ui_test`、
+`translation_runtime_test`、`recovery_ui_test`）各连跑 30 次，**全部 0 失败**。
+加上上一条，本轮合计 **300 次重复运行、0 失败**，未发现第二类偶发缺陷。
+
+### 打磨：侧栏消除 AI Engine / Model Center 的重复入口（Project 区 IA 冻结）
+
+侧栏同时存在两个入口指向**同一个页面**：「工作区」分组里的「⚙ 设置」，和贴底
+AI Engine status module 上的「管理」。两者都进 AI Engine / Model Center。
+
+- **删掉「⚙ 设置」这一行**。当前产品**没有**独立的 General Settings 信息架构 ——
+  「设置」当时唯一的落点就是 AI Engine / Model Center，因此它只是「管理」的别名。
+  重复导航消除后，「工作区」分组只剩跨项目的**资料**：历史任务 / 术语与翻译记忆；
+- **保留 AI Engine 贴底区**，并明确它是一个 **runtime status module**（不是
+  「工作区」分组的第四行导航），同时承担四件事：当前 runtime 状态、当前模型、
+  连接状态、Model Center 的**唯一**管理入口。文本层级补全：`AI引擎` 是 status label
+  （不可点）／`管理` 是唯一 action（右对齐文字按钮）／模型名是 secondary
+  （`.tp-engine-model`）／连接状态是 tertiary/status（`.tp-engine-state`，
+  `is-connected` / `is-error` 换语义色）；
+- **`app_view == "settings"` 这个 route 与 Model Center 页面本身未改动** —— 它不是
+  「设置行」的私有实现，主工作区多处就地入口仍在复用它（新建任务第 4 步的
+  「前往设置 / 检查设置 / 测试连接」、翻译与审校流程的「前往 AI 设置」）。删掉的
+  只是侧栏这一层重复的 navigation surface；
+- **不创建假的 General Settings 页面**。只有当 language / appearance / storage /
+  export defaults / privacy / shortcuts / application defaults 这类**应用级**配置真的
+  存在时，才恢复「设置」，届时 `Settings → /settings` 与
+  `AI Engine 管理 → /model-center` 必须拥有各自不同的语义。
+
+顺带记一个静默失效点：**没有**给「管理」加 `help=`。带 tooltip 的按钮会被 Streamlit
+包进 `stTooltipHoverTarget`，而把「管理」压成右对齐文字 action 的
+`.st-key-provider_status .stButton > button` 用的是**直接子选择器** —— 加上 tooltip
+会让它静默落空、退回默认描边按钮。回归测试已钉住这条约束。
+
+回归见 `tests/sidebar_ai_engine_footer_test.py`（新增 8 个契约用例，含两条 AST 守卫：
+侧栏里指向 Model Center 的赋值**恰好一处**且归「管理」所有）、`tests/app_boot_test.py`、
+`tests/project_task_navigation_test.py`。截图见
+`docs/ui-audit/24-sidebar-ai-engine-entry/`。
+
+### 修复：新建任务「输入文件」卡的操作按钮回到右侧、与文件名同高
+
+上传文件后，卡片左下角会多出一行「更换 / 删除」图标按钮，把卡片从 82px 撑到 150px，
+且与文件名、`PDF · 10.7 MB · 已上传，等待解析` 这一行不在同一水平线上。现在两个按钮
+贴到卡片右缘、垂直居中，与文件名/元信息**同高**；卡片回到 82px 单行高度。
+
+根因是几个叠加的静默失败，都记在案：
+
+- **绝对定位的选择器断链**：`st.container(key="source_file_actions")` 外面多包了一层
+  `div[data-testid="stLayoutWrapper"]`，原来写的
+  `.st-key-source_file_card > [data-testid="stElementContainer"]:has(...)` 因为 `>` 直接不命中，
+  规则"存在但永不生效"，按钮就退回普通文档流堆在左下角。现在两层包装都写；
+- **容器 `height: 100%` + `flex-grow` 把居中吃掉**：wrapper 设 `align-items: center` 后子块仍是
+  80px 高、内容贴顶。补 `flex: 0 0 auto !important` 与内层 `justify-content: center` 才真正居中；
+- **≤767px 的全局规则会把所有 `stHorizontalBlock` 压成 `display: block`**（`app.py` 里那条
+  `[data-testid="stMainBlockContainer"]:not(:has(.tp-workspace-shell)) ...`，特异性 (0,3,0)），
+  两个按钮会上下堆叠。补一条同特异性的窄屏例外，按钮在任何宽度都保持一行；
+- 「已就绪」徽标原本绝对定位在右上角，会和新的右侧按钮重叠，改为跟在元信息行内
+  （`PDF · 5 KB · 已就绪`），状态语义不变、`tp-source-ready` 类名保留。
+
+实测（Chrome 1080/900/760 三档宽度）：卡片 82px；按钮 36×36、右间距 13px、
+中心 y 与文件名+元信息块中心相差 ≤1px；文件名与按钮**零重叠**。
+回归见 `tests/app_boot_test.py`（上传 / 解析中 / 已就绪三态与移除流程）；
+截图与实测值见 `docs/ui-audit/25-source-file-actions/`。
+
+### 重构：「术语与翻译记忆」信息层级减法（结构 / 视觉；业务不变）
+
+页面的问题是**同屏并存的东西太多**，不是字号间距太大：顶部一排统计卡、筛选、表格、
+右侧常驻 Inspector 一起把首屏吃掉，而右侧那块在没选任何条目时也占着约 1/3 宽度。
+本轮按「PageHeader → 一级 Tab（带计数）→ 工具条 → 结果元信息 → 表格 → 按需 Inspector」
+重排层级。**术语 / 翻译记忆业务模型、数据、API 契约、其他侧栏导航均未改动。**
+
+- **顶部统计卡删掉，计数搬到一级 Tab**：「术语库 72 / 翻译记忆 0 / 待审核 318」直接在
+  分段导航上读数，同一信息不再出现两次。**「冲突」不升成第四个同级视图** —— 它本来就是
+  待审核候选的一个状态维度（`has_conflict`），现在只在待审核 Tab 文案与结果元信息里
+  以「其中冲突 N」出现，语义保留、重复消除；
+- **页头成为唯一的页级动作点**：左＝标题「术语与翻译记忆」+ 一行支撑说明，右＝主动作
+  「＋ 新建术语」。它原来挤在筛选条里，既和筛选混在同一层，又只能在那一个 Tab 用到 ——
+  现在是页级动作，任意 Tab 都可用；
+- **筛选条收敛成常驻 + 更多**：常驻只有「搜索（最大宽度）+ 分类 + 作用域 + 更多筛选」；
+  状态、目标语言等低频条件进「更多筛选」。有生效筛选时入口直接显示「筛选 · 2」，
+  结果元信息里另给一个低权重的「清除」。搜索框保留 keyboard / aria；
+- **Inspector 改成按需出现（本轮最高杠杆的一处）**：**没有选中任何条目时右侧不保留列**，
+  列表直接吃满主区宽度；点术语才在右侧出现约 380px 的详情面板，有关闭按钮，关闭后
+  停在列表原位、不跳页。空 Inspector 卡不再常驻；
+- **表格密度重平衡**：腾出右列后合并低优先元数据（分类 / 作用域合成「分类 · 作用域」
+  一簇），术语名与推荐译法仍是最高优先级，截断变少；「操作」仍是低视觉权重的菜单；
+- **卡片 / 边框降噪**：只有真正的层级区才是 Card，其余靠间距、字重、细分隔线、
+  选中态与背景层级区分。没有新增渐变、玻璃、阴影或「AI 仪表盘」式装饰；
+- **侧栏「项目」入口 tooltip 缩短**：原来那句跨过侧栏压到正文区，现在是
+  「查看和管理所有项目」，宽度上限 260px、不覆盖主工作区，入口语义不变（仍是
+  Project Center）；
+- **修掉表头横线穿过文字**：表格表头那条 hairline 原本把「术语 / 推荐译法 / 分类·作用域 /
+  使用次数 / 状态 / 操作」齐齐划掉。根因不在间距：表头单元格是 `<div>`（没有 `<p>` 的
+  段落边距），Streamlit 却照样给每个 markdown 容器注入 `-16px` 下边距去补偿段落边距，
+  对 `<div>` 就是白白扣掉 16px —— **表头容器被压成 1.6px 高**，挂在容器底边的
+  `border-bottom` 于是被抬到文字腰上（实测线在文字底部**上方 11.5px**）。现在显式抵消该
+  注入边距，容器恢复成文字真实高度，横线落在文字下方 4.5px。表格行高保持 47px 不变。
+
+顺带记录两个会让「看起来改了但没生效」的坑：一是全局 `h1 { font-size: 34px !important }`
+会压过任何不带 `!important` 的作用域覆写（与特异性无关），标题字号必须跟着 `!important`；
+二是**本轮未渲染的 keyed widget 其旧值会被 Streamlit 丢弃**，所以「更多筛选」不能靠
+「收起就不渲染」实现，否则筛选状态会被重置 —— 面板改为始终挂载、收起时只 `display:none`。
+
+回归见 `tests/language_assets_workspace_test.py`（新增 7 个契约用例）、
+`tests/context_knowledge_ui_test.py`、`tests/sidebar_project_switcher_test.py`。
+截图与浏览器实测值见 `docs/ui-audit/23-language-assets-hierarchy/`。
+
+### 打磨：侧栏「项目」区最后一轮视觉收敛（IA / 行为不变）
+
+IA、state、routing、行为**全部冻结**，只收视觉：标题像一级大导航、selector 比 CTA 还
+抢眼、行还有卡片感、footer 是一块浅蓝卡片。
+
+- **分组标题退回 section header**：「项目 ›」左对齐、chevron **紧跟标题**（不再贴到侧栏
+  最右 —— 那是"列表项有下一级"的语法），与「工作区」标题共用同一条水平基线（同 margin、
+  同 12px/500、同行高）。仍然可点击进入 Project Center，仍然不改上下文、不展开面板；
+  hover 只给轻微变色 + 标题下划线 + chevron 右移，不加卡片底；
+- **selector 降低视觉权重**：46px 高、11px 圆角、1px 细边、中性 surface（不再是蓝色填充面），
+  focus ring 只有一条 2px outline（去掉 Streamlit 自带的 box-shadow，不再叠成"双层粗蓝框"），
+  字号与图标适度缩小。它的权重现在明确低于「新建任务」CTA，点击区域不变；
+- **行再 compact**：38px 行高、无独立边框、行间距收到 2px（Streamlit 默认 8px 会把每行读成
+  独立一块），当前行只用一层轻 tint 表达。单行 flex / 省略号 / overflow 约束全部保留；
+- **Inbox 行只有一个焦点**：名字 13 → 计数 11.5 → `Inbox` 9.5px 且颜色比 `--tp-faint` 更淡，
+  不再形成三个同等级焦点；
+- **footer 改 action row**：「＋ 新建项目」默认透明无边框、hover 才浮出浅底、40px 高，与滚动
+  列表之间是一条细 divider，footer 仍不随列表滚动。
+
+顺带修掉一个**泄漏**导致的观感 bug：selector 的按钮规则挂在外层容器上（后代选择器），
+而展开后的面板就渲染在同一个容器里，于是 selector 的填充色 / 高度 / 圆角被一并继承给
+「＋ 新建项目」—— 那就是截图里的"大面积浅蓝卡片"。现在 selector 规则钉在触发器自己的
+key 容器上；task 锚点同样处理。
+
+回归见 `tests/sidebar_project_switcher_test.py`（新增 Inbox 层级 / footer action row 用例）、
+`tests/project_context_hierarchy_test.py`、`tests/project_detail_visual_system_test.py`、
+`tests/project_task_navigation_test.py`。截图与实测值见
+`docs/ui-audit/22-sidebar-visual-polish/`。
+
+### 打磨：Project Center 入口收敛到「项目」分组标题 + 切换面板瘦身
+
+上一轮已经把 state action 与 navigation 分开了，但还剩两处"重"：Project Center 仍占
+一整行、和 selector 争同一块视觉重量；切换项目的面板本身太重（大卡片行、多行换行、
+常驻说明、窄栏下溢出）。
+
+- **管理入口收敛到分组标题**：侧栏「项目」这一行**本身**就是 Project Center 入口
+  （右侧一个小 chevron，hover 才提示可点），独立的「项目中心」行已删除。标题保持
+  标题字型（透明底 / 12px / 500，与「工作区」同一套），视觉权重明显低于 selector；
+  导航语义不变——只改路由，不碰当前 Project Context，也绝不展开面板；
+- **切换面板改为 compact switcher**：每行是单行 row（名称占满、长名省略号、任务计数
+  靠右且不参与收缩），整行可点；不再是一张带状态徽章与明细的多行大卡。列表在区域内
+  滚动，「＋ 新建项目」留在滚动区之外，项目再多也不会被推走；搜索框只在项目 ≥5 时出现；
+- **修掉面板的横向溢出**：面板 / 列表 / 行 / 名称四级都加了 `min-width:0` +
+  `max-width:100%` + `overflow-x:hidden` 的硬约束。旧实现里按钮内容既没有 `min-width:0`
+  又允许换行，却没有纵向余量，长项目名会沿 flex 主轴按 min-content 把面板顶出侧栏；
+- **面板不再承担产品教育**：「新任务将默认加入所选项目，已有任务不会移动」从面板里的
+  常驻一行改为 selector 的 tooltip，完整解释仍在 New Task 正文的「项目上下文」区域。
+  Inbox 行也不再堆「系统工作区」+「N 个未归入项目的任务」，只留一个极轻的 `Inbox` 标签；
+- 顺带修掉一个静默的字符 bug：对勾原本写成 CSS 转义（反斜杠 + 码位），而这段样式是普通
+  Python 字符串，会被**八进制转义**吃掉，渲染出 `¹3`。现在用具名字符，并用测试钉住。
+
+回归见 `tests/sidebar_project_switcher_test.py`（新增 compact row / 溢出 / 标题导航用例）
+与 `tests/project_context_hierarchy_test.py`、`tests/project_detail_visual_system_test.py`。
+
 ### 修复：Project Context 与 Project Center 不再共用一个大型 Modal
 
 上一轮把两个条目归并进了同一个「项目」分组，但它们的**交互结果仍然是同一件事**：
@@ -802,8 +1058,6 @@ Task** 是一次具体文档翻译执行，一个 Project 可以包含多个 Tas
 - 测试由 544 项增至 555 项，全绿。浏览器端到端实测：
   点「查看全部」正文不被覆盖；点锚点无白屏/spinner/loop；
   `scrollTop 3000 → 43`，目标行落在视口内。
-
-## [Unreleased]
 
 ### 工作台三轮：把 surface hierarchy 精确加回来
 

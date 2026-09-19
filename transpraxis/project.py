@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from . import models
+from . import translation_memory as _tm_scope
 from .translation_core import memory as _core_memory
 
 PROJECTS_DIR = "projects"
@@ -695,13 +696,23 @@ def export_memory(project: Mapping[str, Any], *,
     """
     project = normalize_project(project)
     tm = {}
-    for source, record in (translation_memory or {}).items():
+    for key, record in (translation_memory or {}).items():
         if not isinstance(record, Mapping) or not record.get("reviewed"):
             continue
         target = str(record.get("target") or "")
+        language = _tm_scope.tm_record_language(key, record)
+        source = _tm_scope.tm_unscope_key(key)[1]
         if not str(source or "").strip() or not target.strip():
             continue
-        tm[str(source)] = {"target": target, "reviewed": True}
+        if language:
+            # 语言可证明：写成规范作用域键，并把语言作为**显式字段**带上。
+            # 只靠键前缀传语言太脆——任何一次键重写都会静默丢掉语言身份，
+            # 而载荷是跨机器交换的资产，读方无法知道我们内部的分隔符约定。
+            tm[_tm_scope.tm_scope_key(language, source)] = {
+                "target": target, "target_lang": language, "reviewed": True}
+        else:
+            # 语言不可证明：原样保留（导入后也不会自动命中），但**不猜**一个语言。
+            tm[str(source)] = {"target": target, "reviewed": True}
     payload = {
         "format": MEMORY_FORMAT,
         "format_version": MEMORY_FORMAT_VERSION,
@@ -856,13 +867,21 @@ def import_memory(existing: Mapping[str, Any] | None, payload: Mapping[str, Any]
     # 翻译记忆不归 project.json 所有（见模块 docstring），因此不在这里合并，
     # 而是把清洗后的译对交回调用方，由持有 TM 存储的一层去并入。
     imported_tm = {}
-    for source, record in (payload.get("translation_memory") or {}).items():
+    for key, record in (payload.get("translation_memory") or {}).items():
         if not isinstance(record, Mapping):
             continue
         target = str(record.get("target") or "")
+        language = _tm_scope.tm_record_language(key, record)
+        source = _tm_scope.tm_unscope_key(key)[1]
         if not str(source or "").strip() or not target.strip():
             continue
-        imported_tm[str(source)] = {"target": target, "reviewed": True}
+        if language:
+            # 语言来源：记录字段（新载荷）优先，键前缀兜底（旧载荷曾把作用域键
+            # 原样写进载荷）。两者都没有 → 不猜语言，按无作用域条目保留。
+            imported_tm[_tm_scope.tm_scope_key(language, source)] = {
+                "target": target, "target_lang": language, "reviewed": True}
+        else:
+            imported_tm[str(source)] = {"target": target, "reviewed": True}
     report["tm_incoming"] = len(imported_tm)
     return project, report, imported_tm
 

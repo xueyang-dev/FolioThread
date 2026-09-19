@@ -44,6 +44,8 @@ from transpraxis import translation_target as _translation_target
 from transpraxis import finalization as _finalization
 from transpraxis import rendered_qa as _rendered_qa
 from transpraxis import project as _project
+from transpraxis import translation_memory as _tm_scope
+from transpraxis.textual import has_textual_content, normalize_language
 
 # ================= 常量 =================
 # 任务进度与过程文件的本地存储目录（已加入 .gitignore）
@@ -559,11 +561,18 @@ def parse_termbase_tbx(file_stream):
     return entries
 
 
-def import_tmx(file_stream, project_id=None):
+def import_tmx(file_stream, project_id=None, target_lang=None):
     """导入 TMX 翻译记忆（Trados / memoQ 等导出的标准格式）。
 
     按 <tu> 的 <tuv><seg> 文本对入库：仅接受源文含字母/数字且译文非空的
     单元；与现有翻译记忆冲突的源文跳过（不覆盖项目内已审校条目）。
+
+    条目必须带上**目标语言**，否则不入库——语言未知的记忆一旦落盘，就会成为
+    下一次跨语言命中的来源。语言取调用方显式给出的 `target_lang`（调用方
+    知道"这份记忆是给哪个目标语言的"）；调用方没给时退回目标 <tuv xml:lang>。
+    刻意**不**把 BCP-47 代码（`zh-CN`）翻译成本应用的显示名（`简体中文`）：
+    猜测式映射会让导入"看起来成功、实际永不命中"，比显式失败更糟。
+
     导入目标为指定项目的记忆（默认项目即历史的全局记忆）。
     返回 {"added": n, "skipped": m}。
     """
@@ -572,30 +581,39 @@ def import_tmx(file_stream, project_id=None):
     except Exception as e:
         raise ValueError(f"无法解析 TMX 文件：{e}") from e
     existing = load_tm(project_id)
+    declared_lang = str(target_lang or "").strip()
     added = skipped = 0
     for tu in root.iter():
         if _local_name(tu.tag) != "tu":
             continue
         texts = []
+        languages = []
         for tuv in tu:
             if _local_name(tuv.tag) != "tuv":
                 continue
             seg = next((c for c in tuv if _local_name(c.tag) == "seg"), None)
             if seg is not None and (seg.text or "").strip():
                 texts.append(seg.text.strip())
+                languages.append(tuv.get("{http://www.w3.org/XML/1998/namespace}lang")
+                                 or tuv.get("lang") or "")
             if len(texts) >= 2:
                 break
         if len(texts) >= 2:
             src, tgt = texts[0], texts[-1]
-            if _tm_eligible(src, tgt):
-                if src not in existing:
-                    existing[src] = {"target": tgt, "reviewed": True,
-                                     "source": "tmx_import"}
+            language = declared_lang or str(languages[-1] or "").strip()
+            key = tm_scope_key(language, src)
+            if _tm_eligible(src, tgt) and key:
+                if key not in existing:
+                    record = tm_record(tgt, language)
+                    record["source"] = "tmx_import"
+                    existing[key] = record
                     added += 1
                 else:
                     skipped += 1
     if not added:
-        raise ValueError("TMX 中未找到可导入的新翻译单元（源文需含字母/数字，且不与现有记忆冲突）")
+        raise ValueError(
+            "TMX 中未找到可导入的新翻译单元（源文需含字母/数字、目标语言需显式指定"
+            "或可从 xml:lang 确定，且不与现有记忆冲突）")
     save_tm(existing, project_id)
     return {"added": added, "skipped": skipped}
 
@@ -1001,17 +1019,19 @@ def _batch_section_profile(document_profile, offset, batch_len):
 
 
 # ================= 翻译记忆（对齐 localize-anything 的 TM：仅收录审校通过段落）=================
+DEFAULT_TARGET_LANG = "简体中文"
+
+
 def tm_path(project_id=None):
     """翻译记忆的存储路径；**按项目隔离**。
 
-    翻译记忆是"已审校译文的受控记忆"，蓝图 §3.2 把它列在 Project 之下。记录形状
-    是 `{source: {target, reviewed}}`，以 source 为键——因此同一个 source 在不同
-    项目里译法不同时，**一份文件无法同时表示**。所以按项目分文件，而不是在单文件
-    里加 `project_id` 字段。
+    翻译记忆是"已审校译文的受控记忆"，蓝图 §3.2 把它列在 Project 之下。
+    条目键是「目标语言 + 原文」的作用域键（见 `tm_scope_key`）——因此同一个
+    项目里同一段原文可以有多个目标语言的译法，而不会互相串用。
 
     系统工作区「未分类」沿用历史上的全局路径 `outputs/translation_memory.json`
-    ——「未分类」就是旧默认项目的后继实体，因此既有任务的行为与数据完全不变
-    （无迁移、无丢失）；命名项目各自使用
+    ——「未分类」就是旧默认项目的后继实体，因此既有任务的**行为与数据**完全
+    不变（无迁移、无丢失）；命名项目各自使用
     `outputs/projects/<project_uuid>/translation_memory.json`。
     """
     project_id = _project.canonical_project_id(project_id) if project_id \
@@ -1023,9 +1043,25 @@ def tm_path(project_id=None):
 
 def _tm_eligible(source, target):
     """翻译记忆资格：源文必须有字母/数字（纯符号装饰行不入库），译文非空。"""
-    return bool(re.search(r"[A-Za-z0-9\u4e00-\u9fff]", source or "")) \
+    return has_textual_content(source) \
         and bool((target or "").strip()) \
         and not _translation_target.is_translation_transport_wrapper(target)
+
+
+# ---------------- 翻译记忆的作用域键 ----------------
+# 一条翻译记忆的身份是「目标语言 + 原文」，**不是**「原文」。
+# 同一段原文在 Français 与简体中文任务里的正确译文不同；只用原文当键，一种
+# 语言的译文就会串进另一种语言的任务，并以"已审校"的名义静默通过交付检查。
+# 因此作用域键是结构性的：不给出目标语言就**无法**命中任何条目。
+# 定义放在 `transpraxis.translation_memory`，核心层与展示层共用同一份格式。
+TM_SCOPE_SEP = _tm_scope.TM_SCOPE_SEP
+tm_scope_key = _tm_scope.tm_scope_key
+tm_unscope_key = _tm_scope.tm_unscope_key
+tm_record_language = _tm_scope.tm_record_language
+tm_record = _tm_scope.tm_record
+tm_put = _tm_scope.tm_put
+tm_discard = _tm_scope.tm_discard
+tm_legacy_keys = _tm_scope.tm_legacy_keys
 
 
 # 归一化只做**可证明等价**的处理：同一段文字在不同来源下的排版差异。
@@ -1058,34 +1094,59 @@ def tm_normalize(text):
     return _TM_SPACE_RE.sub(" ", value).strip()
 
 
-def tm_index(tm):
-    """规范化键 → 原始键的索引，用于归一化命中。"""
+def tm_index(tm, target_lang=None):
+    """规范化原文 -> 作用域键的索引，**只收录目标语言可证明相同的条目**。
+
+    没有目标语言上下文（`target_lang` 为空）时返回空索引：作用域不可证明
+    就不建立任何可命中路径。
+    """
+    language = normalize_language(target_lang)
     index = {}
-    for key in (tm or {}):
-        normalized = tm_normalize(key)
+    if not language:
+        return index
+    for key, record in (tm or {}).items():
+        if tm_record_language(key, record) != language:
+            continue
+        _, source = tm_unscope_key(key)
+        normalized = tm_normalize(source)
         if normalized and normalized not in index:
             index[normalized] = key
     return index
 
 
-def tm_lookup(tm, source, index=None):
+def _tm_hit(record, language, key):
+    return isinstance(record, dict) and bool(record.get("reviewed")) \
+        and bool(record.get("target")) \
+        and tm_record_language(key, record) == language
+
+
+def tm_lookup(tm, source, index=None, *, target_lang=None):
     """查找翻译记忆条目，返回 (记录, 命中方式)。
+
+    **必须显式给出目标语言**：语言未知（旧条目没有语言标注）或目标语言不同
+    -> 不命中。这是发布阻断级的正确性约束，不是可选过滤。
 
     先精确匹配，再退到归一化匹配。归一化命中是"同一段文字的排版差异"，
     不涉及语义猜测，因此可以安全复用译文；命中方式会被记录，便于审计。
     """
+    language = normalize_language(target_lang)
+    if not language:
+        return None, ""
     cleaned = str(source or "").replace("\n", " ")
-    record = (tm or {}).get(cleaned)
-    if isinstance(record, dict) and record.get("reviewed") and record.get("target"):
-        return record, "exact"
+    for key in (tm_scope_key(target_lang, cleaned), cleaned):
+        if not key:
+            continue
+        if _tm_hit((tm or {}).get(key), language, key):
+            return (tm or {}).get(key), "exact"
     normalized = tm_normalize(cleaned)
     if not normalized:
         return None, ""
-    raw_key = (index if index is not None else tm_index(tm)).get(normalized)
+    scoped_index = index if index is not None else tm_index(tm, target_lang)
+    raw_key = scoped_index.get(normalized)
     if raw_key is None or raw_key == cleaned:
         return None, ""
     record = (tm or {}).get(raw_key)
-    if isinstance(record, dict) and record.get("reviewed") and record.get("target"):
+    if _tm_hit(record, language, raw_key):
         return record, "normalized"
     return None, ""
 
@@ -1095,6 +1156,10 @@ def load_tm(project_id=None):
 
     翻译记忆是错误放大器（一次错译会复制到全书），因此加载即消毒，
     防止旧版本或异常写入留下的污染条目继续命中。
+
+    语言无法证明的旧条目**保留在文件里**（不丢用户数据），但不会被
+    `tm_lookup` 命中：证明不了目标语言的记忆不能自动复用。可用
+    `tm_legacy_keys` 把它们单独列出来。
 
     `project_id=None` 表示默认项目（即历史的全局记忆）。
     """
@@ -1106,7 +1171,7 @@ def load_tm(project_id=None):
             return {}
         return {k: v for k, v in raw.items()
                 if isinstance(v, dict) and v.get("reviewed")
-                and _tm_eligible(k, v.get("target"))}
+                and _tm_eligible(tm_unscope_key(k)[1], v.get("target"))}
     return {}
 
 
@@ -1121,6 +1186,19 @@ def save_tm(tm, project_id=None):
 def tm_project_id(state):
     """任务使用的翻译记忆所属项目（与任务的项目归属一致）。"""
     return resolved_project_id(state or {})
+
+
+def state_target_lang(state, fallback=None):
+    """任务的目标语言（TM 作用域用），返回**原样写法**（用于落盘与展示）。
+
+    只认 state 里真正记下来的目标语言；没有就退回调用方显式给出的 fallback，
+    两者都没有则返回空串。这里**不补默认值**——补一个默认语言等于猜语言，
+    而猜错的代价是把一条已审校的错译文复用到另一种语言的任务里。
+    """
+    raw = (state or {}).get("target_lang")
+    if normalize_language(raw):
+        return str(raw)
+    return str(fallback or "")
 
 
 def copy_system_tm_to_project(project_id):
@@ -1539,14 +1617,18 @@ def assign_jobs_to_project(job_ids, project_id_or_name, *,
             skipped.append({"job_id": job_id, "reason": "任务正在运行，无法改归属"})
             continue
         if move_translations:
+            job_lang = state_target_lang(state)
             for pair in state.get("pairs") or []:
                 source = str(pair.get("source") or "")
                 target_text = str(pair.get("target") or "")
                 if not pair.get("reviewed") or not _tm_eligible(source, target_text):
                     continue
-                if source in target_tm:
-                    continue  # 目标项目已有该条的译法：不覆盖
-                target_tm[source] = {"target": target_text, "reviewed": True}
+                key = tm_scope_key(job_lang, source)
+                if not key:
+                    continue  # 目标语言无法证明：不迁移记忆，也不猜
+                if key in target_tm:
+                    continue  # 目标项目已有该语言下的译法：不覆盖
+                tm_put(target_tm, source, target_text, job_lang)
                 tm_added += 1
         state["project_id"] = target["project_id"]
         save_job_state(job_id, state)
@@ -1691,7 +1773,13 @@ def resolve_project_conflict(project_id, conflict_id, *, adopt_incoming=True,
     saved = save_project(updated)
     if tm_change:
         target_tm = load_tm(saved["project_id"])
-        target_tm.update(tm_change)
+        for key, record in tm_change.items():
+            # 冲突记录里的 source 就是记忆**键**，因此作用域（目标语言）随之保留；
+            # 记录字段缺失时从键前缀补上，让"这条记忆属于哪种语言"不依赖键格式。
+            language, _ = tm_unscope_key(key)
+            if language and not record.get("target_lang"):
+                record["target_lang"] = language
+            target_tm[key] = record
         save_tm(target_tm, saved["project_id"])
     return saved
 
@@ -1763,12 +1851,20 @@ def import_project_memory(raw, *, name=None, description=""):
             report["conflicts_recorded"] = report.get("conflicts_recorded", 0) + recorded
             saved = save_project(saved)
         added = conflicts = 0
-        for source, record in imported_tm.items():
-            if source in current:
-                if current[source].get("target") != record["target"]:
+        for key, record in imported_tm.items():
+            if key in current:
+                if current[key].get("target") != record["target"]:
                     conflicts += 1
                 continue
-            current[source] = record
+            language = _tm_scope.tm_record_language(key, record)
+            if language:
+                # 语言可证明：经 tm_put 写入，保证键与记录字段都是规范形态
+                # （只靠键前缀传语言，任何一次键重写都会静默丢掉语言身份）。
+                tm_put(current, _tm_scope.tm_unscope_key(key)[1],
+                       record["target"], language)
+            else:
+                # 语言不可证明：条目保留，但永不参与自动命中（fail closed）。
+                current[key] = record
             added += 1
         if added:
             save_tm(current, saved["project_id"])
@@ -2295,11 +2391,20 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
     translator_call = _model_roles.make_role_call(call_llm, translator_config)
     reviewer_call = _model_roles.make_role_call(call_llm, reviewer_config)
     _tm_project = tm_project_id(state)
+    # 目标语言是 TM 作用域的一部分：没有它就不建立任何命中路径（fail closed）。
+    _tm_lang = str(target_lang or "").strip() or str(state.get("target_lang") or "").strip()
     tm = load_tm(_tm_project) if use_tm else {}
-    tm_norm_index = tm_index(tm) if use_tm else {}
+    tm_norm_index = tm_index(tm, _tm_lang) if use_tm else {}
     if use_tm:
+        def _tm_scope(source, target):
+            """把目标语言编进记忆键；语言无法证明时不恢复任何记忆。"""
+            key = tm_scope_key(_tm_lang, source)
+            if not key:
+                return None
+            return key, tm_record(target, _tm_lang)
+
         recovered, pending_events = _checkpoint.reconcile_translation_memory(
-            tm, state, job_dir(job_id))
+            tm, state, job_dir(job_id), scope=_tm_scope)
         if recovered:
             save_tm(tm, _tm_project)
             state["tm_recovered_count"] = state.get("tm_recovered_count", 0) + pending_events
@@ -2397,7 +2502,8 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
         to_translate = []  # (index, clean_source)
         for i, para in enumerate(batch):
             clean_src = para.replace('\n', ' ')
-            hit, tm_match = tm_lookup(tm, clean_src, tm_norm_index)
+            hit, tm_match = tm_lookup(tm, clean_src, tm_norm_index,
+                                      target_lang=_tm_lang)
             if hit:
                 batch_pairs[i] = {"source": clean_src, "target": hit["target"],
                                   "initial_target": hit["target"],
@@ -2406,8 +2512,10 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                                   "reviewed": True, "review_status": "tm_approved",
                                   "from_tm": True, "tm_match": tm_match}
                 state["tm_used_count"] = state.get("tm_used_count", 0) + 1
-            elif not re.search(r"[A-Za-z0-9\u4e00-\u9fff]", clean_src):
-                # 纯符号段落（章节分隔装饰等）：不是正文，原样保留，不调模型
+            elif not has_textual_content(clean_src):
+                # 纯符号段落（章节分隔装饰等）：不是正文，原样保留，不调模型。
+                # 判定按 Unicode 类别（字母/数字），不枚举语言区间——西里尔、
+                # 谚文、阿拉伯等脚本同样是正文，必须走翻译路径。
                 batch_pairs[i] = {"source": clean_src, "target": clean_src,
                                   "initial_target": clean_src,
                                   "accepted_target": clean_src,
@@ -2884,10 +2992,12 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                     p["accepted_target"] = p["target"]
                     p["target_provenance"] = "tm_approved" if p.get("from_tm") else "reviewed"
                     if use_tm:
-                        tm[p["source"]] = {"target": p["target"], "reviewed": True}
-                        _norm = tm_normalize(p["source"])
-                        if _norm and _norm not in tm_norm_index:
-                            tm_norm_index[_norm] = p["source"]
+                        # 键 = 目标语言 + 原文：写进去的记忆只属于这一种目标语言。
+                        _key = tm_put(tm, p["source"], p["target"], _tm_lang)
+                        if _key:
+                            _norm = tm_normalize(p["source"])
+                            if _norm and _norm not in tm_norm_index:
+                                tm_norm_index[_norm] = _key
                     stats["reviewed_segments"] += 1
 
         _commit_translation_batch(batch_pairs, offset)  # 正式状态先提交，TM 只随后晋升
@@ -4448,6 +4558,7 @@ def _invalidate_translation_reviews(
         return changed
     tm = load_tm(tm_project_id(state))
     tm_changed = False
+    job_lang = state_target_lang(state)
     pairs = state.get("pairs") or []
     for index in indexes:
         if not 0 <= index < len(pairs):
@@ -4459,8 +4570,7 @@ def _invalidate_translation_reviews(
         for key in ("accepted_target", "human_accepted", "accepted_by_human"):
             pair.pop(key, None)
         source = str(pair.get("source") or "")
-        if source in tm:
-            del tm[source]
+        if tm_discard(tm, source, job_lang):
             tm_changed = True
     if tm_changed:
         save_tm(tm, tm_project_id(state))
@@ -5314,8 +5424,75 @@ def delete_job(job_id, *, allow_active=False):
 
 
 def file_job_id(file_bytes):
-    """以文件内容哈希作为任务 ID：同一文件重传可自动续传，不同文件不会串状态。"""
+    """**文档身份**：文件内容哈希。同一份文档重传得到同一个值。
+
+    注意：这**不是任务身份**。同一份文档在不同项目 / 不同目标语言下是彼此
+    独立的本地化任务，内容哈希无法区分它们——用内容哈希当任务 ID 会让
+    "同一个文件、另一个项目、另一种目标语言"静默打开旧任务。任务身份见
+    `task_job_id` / `resolve_task_id`。
+    """
     return hashlib.sha256(file_bytes).hexdigest()[:16]
+
+
+# 任务身份 = 文档身份 + 本地化上下文（项目 + 目标语言 + 源语言）。
+# 文档内容相同不等于本地化任务相同：项目决定注入哪一套项目记忆与术语，
+# 目标语言决定译文本身。把它们丢掉，就等于让内容哈希替用户决定
+# "这两个语义不同的活是同一个活"。
+_TASK_ID_FIELDS = ("project_id", "target_lang", "source_lang")
+
+
+def task_context(project_id=None, target_lang=None, source_lang=None):
+    """本地化上下文的规范化三元组（用于任务身份与"是否同一个任务"的比较）。"""
+    return {
+        "project_id": resolved_project_id({"project_id": project_id}),
+        "target_lang": normalize_language(target_lang),
+        "source_lang": normalize_language(source_lang),
+    }
+
+
+def task_context_of(state):
+    """一个已存在任务记录的本地化上下文（缺字段按"未指定"处理）。"""
+    state = state or {}
+    return task_context(state.get("project_id"), state.get("target_lang"),
+                        state.get("source_lang"))
+
+
+def task_job_id(file_bytes, *, project_id=None, target_lang=None,
+                source_lang=None):
+    """**任务身份**：文档身份 + 本地化上下文，确定性推导，不读磁盘。"""
+    context = task_context(project_id, target_lang, source_lang)
+    digest = "\x1f".join([file_job_id(file_bytes)]
+                         + [context[field] for field in _TASK_ID_FIELDS])
+    return hashlib.sha256(digest.encode("utf-8")).hexdigest()[:16]
+
+
+def resolve_task_id(file_bytes, *, project_id=None, target_lang=None,
+                    source_lang=None):
+    """这份文档在**这个本地化上下文**下应当打开的任务 ID。
+
+    三条规则，顺序即优先级：
+
+    1. 按上下文推导出的任务已存在 -> 续做它（"同一个文件、同一个项目、
+       同一种目标语言"就是同一个任务，重传即续传）；
+    2. 否则，若历史版本留下的、以**内容哈希**命名的旧任务存在，且它记录的
+       项目 / 目标语言与请求的上下文**可证明一致** -> 沿用它（旧任务不因
+       这次修复而失联）；
+    3. 否则 -> 用推导出的新 ID 建一个独立任务。
+
+    规则 2 里的"可证明一致"是关键：旧任务没有目标语言记录时**不会**被认领，
+    宁可让用户重建一个任务，也不把另一种语言的旧任务当成这个活。
+    """
+    context = task_context(project_id, target_lang, source_lang)
+    candidate = task_job_id(file_bytes, project_id=project_id,
+                            target_lang=target_lang, source_lang=source_lang)
+    if load_job_state(candidate) is not None:
+        return candidate
+    legacy_id = file_job_id(file_bytes)
+    if legacy_id != candidate:
+        legacy_state = load_job_state(legacy_id)
+        if legacy_state is not None and task_context_of(legacy_state) == context:
+            return legacy_id
+    return candidate
 
 
 def save_source(job_id, file_bytes):
@@ -6144,10 +6321,10 @@ def _apply_glossary_staleness(state, job_id=None):
     # 受影响段不得继续作为可信翻译记忆
     tm = load_tm(tm_project_id(state))
     dirty = False
+    job_lang = state_target_lang(state)
     for i in stale:
         src = pairs[i]["source"]
-        if src in tm:
-            del tm[src]
+        if tm_discard(tm, src, job_lang):
             dirty = True
     if dirty:
         save_tm(tm, tm_project_id(state))
@@ -6579,9 +6756,8 @@ def _promote_human_reviewed_segment(state, segment_id, actor):
     pair["accepted_by_human"] = actor
     if state.get("use_tm", True) and _tm_eligible(pair.get("source"), pair.get("target")):
         tm = load_tm(tm_project_id(state))
-        tm[str(pair.get("source") or "")] = {
-            "target": str(pair.get("target") or ""), "reviewed": True,
-        }
+        tm_put(tm, str(pair.get("source") or ""), str(pair.get("target") or ""),
+               state_target_lang(state))
         save_tm(tm, tm_project_id(state))
 
 
@@ -6691,8 +6867,8 @@ def review_translation_segments(
             pair["accepted_target"] = target
             pair["target_provenance"] = "reviewed"
             if state.get("use_tm", True) and _tm_eligible(source, target):
-                tm[source] = {"target": target, "reviewed": True}
-                tm_changed = True
+                if tm_put(tm, source, target, state_target_lang(state)):
+                    tm_changed = True
         else:
             pair["reviewed"] = False
             pair["review_status"] = "reviewed_with_findings"

@@ -27,7 +27,7 @@
 
 ```bash
 # 1. 启动应用（本机 outputs/ 数据）
-cd /Users/xueyang/Dev/FolioThread
+cd "$(git rev-parse --show-toplevel)"   # 仓库根目录
 ./venv/bin/streamlit run app.py --server.headless true --server.port 8602 --server.address 127.0.0.1
 
 # 2. 首屏（新建任务）：等到页面真正渲染完（首次约 20s）再截

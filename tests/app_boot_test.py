@@ -268,7 +268,9 @@ def main():
 
         # Provider 设置是独立页面，模型目录仍按 A-Z 排序并支持中转站。
         at.session_state["model_choice_DeepSeek"] = "deepseek-chat"
-        next(b for b in at.sidebar.button if b.label == "设置").click()
+        # AI Engine 管理入口**只有一个**：贴底 status module 上的「管理」。
+        # 「工作区」分组里的独立「设置」行已退休（它是同一个页面的重复入口）。
+        next(b for b in at.sidebar.button if b.label == "管理").click()
         at.run()
         assert not at.exception, f"打开设置页异常：{at.exception}"
         engine_select = next(s for s in at.selectbox if s.label == "服务商")
@@ -286,7 +288,7 @@ def main():
         at.run()
         next(b for b in at.sidebar.button if b.label == "新建任务").click()
         at.run()
-        next(b for b in at.sidebar.button if b.label == "设置").click()
+        next(b for b in at.sidebar.button if b.label == "管理").click()
         at.run()
         assert next(s for s in at.selectbox if s.label == "模型").value == \
             "deepseek-v4-pro", "切换页面后模型选择必须保留"

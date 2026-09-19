@@ -1,12 +1,18 @@
 # Project Context 与 Project Center：交互语义分离
 
 状态：已实现（`app.py`），回归测试见 §6。
-范围：**侧栏「项目」分组内两个条目的交互语义 + 它们的路由/状态契约**。不动翻译内核、
+范围：**侧栏「项目」分组内两个成分的交互语义 + 它们的路由/状态契约**。不动翻译内核、
 不动 Project 数据模型、不新增第二套 Project 状态。
 
-前置文档：[`sidebar-project-group-ia.md`](sidebar-project-group-ia.md)（把两个条目归并进
+前置文档：[`sidebar-project-group-ia.md`](sidebar-project-group-ia.md)（把两个成分归并进
 同一个「项目」分组）。本文处理归并之后的**遗留问题**：归并解决了"看起来是两套系统"，
-但两个条目仍然会打开同一个大型 Modal，于是"切换上下文"和"进入管理页"在行为上还是一件事。
+但两个成分仍然会打开同一个大型 Modal，于是"切换上下文"和"进入管理页"在行为上还是一件事。
+
+> **更新（入口收敛 + compact switcher 轮）**：在语义分离之后还剩两件事——① Project
+> Center 虽然已经"纯导航"，但仍占着一整行，和 selector 争同一块视觉重量；② 切换面板
+> 本身太重（大卡片行、多行换行、常驻说明、窄栏溢出）。本轮把入口**收敛到分组标题**、
+> 把面板改成 **compact switcher**。§1 / §2 / §5 已按收敛后的结构更新，新增内容见
+> §3.1、§6.1、§8.1。**交互语义与 state model（§4）不变。**
 
 ---
 
@@ -32,17 +38,18 @@
 
 ## 1. 调整后的交互模型
 
-| 条目 | 职责 | 点击行为 | 视觉权重 |
+| 成分 | 职责 | 点击行为 | 视觉权重 |
 | --- | --- | --- | --- |
-| 上下文 selector | **Project Context**：state / switch action | 在触发器下方展开**轻量下拉面板**：搜索 + 项目列表 + 新建项目 | 主控件：42px、`primary-soft` 填充、650 字重 |
-| 项目中心 | **Project Center**：navigation | 进入管理页路由（`projects_route="list"`）；不展开面板、不弹 Modal、不改上下文 | 次级入口：36px、透明底、500 字重、灰色 |
+| 分组标题「项目」 | **Project Center**：navigation | 进入管理页路由（`projects_route="list"`）；不展开面板、不弹 Modal、不改上下文；已在管理页时是幂等的 | 轻量 section header：17px 行盒、透明底、12px/500，与「工作区」**同一条水平基线**；左对齐，chevron 紧跟标题（不贴最右） |
+| 上下文 selector | **Project Context**：state / switch action | 在触发器下方展开**轻量下拉面板**：可选搜索 + 项目列表 + 新建项目 | 主控件但低于 CTA：46px、11px 圆角、1px 细边、中性 surface、12.5px/600；focus ring 只有一条 2px outline |
 
 三条硬边界：
 
-- **面板里没有「管理所有项目」**：管理入口只有「项目中心」一个，重复入口必须删除；
-- **「项目中心」绝不打开切换面板**：它是纯导航项，因此"点它会不会弹出 switcher"在结构
-  上不可能发生，而不是靠约定禁止；
+- **面板里没有「管理所有项目」**：管理入口只有分组标题一个，重复入口必须删除；
+- **标题导航绝不打开切换面板**：它是纯导航，因此"点它会不会弹出 switcher"在结构上不可能
+  发生，而不是靠约定禁止；
 - **面板内也不做完整项目生命周期管理**：重命名 / 归档 / 删除仍然只在项目页完成。
+
 
 ### 为什么是"就地展开的下拉面板"而不是 `st.popover`
 
@@ -65,22 +72,31 @@
 ```text
 [Logo]  →  [+ 新建任务]
 
-项目
-  [ ↔ 未选择项目 / 项目名   ▾ ]      ← 主控件（42px / primary-soft / 650）
+项目 ›                               ← 分组标题 = Project Center 入口（左对齐 / chevron 紧跟）
+  [ ↔ 未选择项目 / 项目名   ▾ ]      ← 主控件（46px / 中性面 / 1px 细边 / 11px 圆角 / 600）
   ┌───────────────────────────┐
-  │ 新任务将默认加入所选项目…  │      ← 展开后才渲染（收起时零成本）
-  │ [ 搜索项目… ]              │      项目多时才出现
-  │ ✓ 未分类任务  `系统工作区` │      ← inbox 图标；是 system collection
-  │    示例项目                │      ← folder 图标；当前项 = primary 行
-  │   ─────────────────────   │
-  │   ＋ 新建项目              │      ← 唯一的底部动作
+  │ [ 搜索项目… ]              │      ← 展开后才渲染；项目 ≥5 才出现
+  │ ✓ 未分类任务  Inbox    20 │      ← compact row：38px / 名称省略 / 计数靠右 / 行间 2px
+  │    示例项目             3 │
+  │   ─────────────────────   │      ← 细 divider（8/6px）
+  │   ＋ 新建项目              │      ← footer action row：透明、hover 才出浅底、40px
   └───────────────────────────┘
-  [ 📁 项目中心 ]                    ← 纯导航；列表路由上带左侧 3px 竖条
 
 ────────────────────────────
 当前任务  01 / 02 / 03 / 04
-工作区    历史任务 / 术语与翻译记忆 / 设置
+工作区    历史任务 / 术语与翻译记忆
+────────────────────────────
+AI引擎                        管理   ← runtime status module（不是导航行）
+deepseek-v4-flash-0731              ← secondary text：当前模型
+尚未验证连接                         ← tertiary/status text：连接状态
 ```
+
+> 「工作区」分组里**没有**「设置」：当前产品没有 General Settings 信息架构，
+> 独立「设置」行当时唯一的落点就是 AI Engine / Model Center，与贴底模块上的
+> 「管理」同义。侧栏里指向 Model Center 的入口**只有一个**（`manage_provider`）。
+
+面板里**没有**常驻说明文案：「新任务将默认加入所选项目，已有任务不会移动」这句挪到了
+selector 的 `help`（tooltip）上，完整解释留在 New Task 正文的「项目上下文」区域。
 
 ---
 
@@ -98,6 +114,19 @@
 
 仍然保留的 Modal：`新建 / 导入 / 重命名 / 编辑 / 归档 / 恢复 / 删除 / 移入任务`。
 它们是**低频、需要输入或破坏性**的动作，留在 Modal 里是正确的语法；切换项目不是。
+
+### 3.1 入口收敛轮再退休的东西
+
+| # | 被删除的东西 | 原来的作用 | 处置 |
+| --- | --- | --- | --- |
+| 1 | 独立的侧栏「项目中心」行（`project_center_entry` 容器 + `project_center_entry_button`） | Project Center 的第二个入口，占一整行、和 selector 争视觉重量 | 删除；入口收敛到分组标题（`project_section_header` + `project_section_header_button`） |
+| 2 | 该行的整组 CSS：36px / 透明底 / 500 字重 / 灰色图标 / `:has(.tp-nav-current)` 的中性面 + `inset 3px 0` 竖条 | 给"次级入口"定层级 | 删除；换成标题字型的 header 规则（22px / 12px / 500 / 透明底 / 右侧 chevron），当前页态改为"文字升 ink + chevron 上色" |
+| 3 | 面板里的常驻 caption「新任务将默认加入所选项目，已有任务不会移动。」 | 在面板里做产品教育 | 删除；换到 selector 的 `help`（tooltip），完整解释保留在 New Task 正文 |
+| 4 | 旧的两行行样式：`[class*="switcher_pick_"] .stButton button { min-height:52px; height:52px }` + `p { white-space: normal }` + `code` 徽章胶囊 + `kind="primary"` 行态 | 每行 = 项目名 + 状态徽章 + 明细两行 | 删除；换成 compact row（`switcher_row_*` 可见行 + `switcher_pick_*` 透明点击层），单行 30px、名称 ellipsis、计数靠右 |
+| 5 | Inbox 行上的「系统工作区」badge +「N 个未归入项目的任务」措辞 | 在 quick switcher 里解释 system collection | 删除；只留一个极轻的 `Inbox` 次要标签（`tp-switch-tag`），逐行计数即为唯一数字 |
+
+`_render_project_switcher_body()` 与两处锚点、`_switch_project_context()`、
+8 种管理 Modal **都不受影响**：退休的是"入口重复"与"行太重"，不是能力。
 
 ---
 
@@ -159,14 +188,20 @@ state**。没有引入第二套 Project 状态——新增的只是"路由"这�
 
 | # | 组件 | 改动 |
 | --- | --- | --- |
-| 1 | 侧栏 selector | 仍是 `current_project_selector` 按钮（42px / 填充态不变）；改为**切换面板开合**，并新增空语义标记 `.tp-nav-open` 表达"已按下" |
+| 1 | 侧栏 selector | 仍是 `current_project_selector` 按钮；改为**切换面板开合**，并新增空语义标记 `.tp-nav-open` 表达"已按下"。视觉收敛轮把权重降下来（42px/`primary-soft`/650 → **46px/中性 surface/1px 细边/11px 圆角/600**，focus ring 只留一条 2px outline） |
 | 2 | 切换面板 | 新增 `_render_project_switcher_body(anchor)`：同一份列表实现，两处锚点共用；容器 key 都含 `switcher_*` 片段，CSS 一份覆盖两处 |
 | 3 | 面板底部 | 只留 `＋ 新建项目`；删除「管理所有项目」 |
 | 4 | 正文上下文块 | `[更改]` / `[选择项目]` 从"打开 Modal"改为"展开同一份列表"（就近锚点，key 前缀 `task_switcher_*`） |
 | 5 | 同一时刻只开一个面板 | `_toggle_project_switcher()` 先 `_close_all_project_switchers()`：两处锚点展开同一份列表，同时开着会被读成两套系统 |
 | 6 | 导航收尾 | `_open_project_list()` 收起所有面板：从侧栏展开的下拉不该漂到管理页上 |
 | 7 | 路由 | `_open_project` / `_open_project_list` / `_restore_route_from_params` / 新建项目收尾写 `projects_route`；`_projects_route()` 对没有标记的旧路径沿用旧推断 |
-| 8 | 项目中心入口 | 行为不变（纯导航）；当前页判据由 `not sidebar_project_id` 改为 `_projects_route() == "list"` |
+| 8 | Project Center 入口（**已收敛**） | 由独立行改为**分组标题按钮** `project_section_header_button`；当前页判据 `_projects_route() == "list"` 不变 |
+| 9 | 分组标题样式 | `[class*="st-key-project_section_header"]`：与 `.tp-nav-label` 同一套字型 + `cursor:pointer` + hover 升色 + `::after` 一个 chevron（`content: "›"`，hover 时右移 2px）；`focus-visible` 有 outline。收敛轮再收紧为 **section header**：17px 行盒 + `margin: 18px 0 6px`（与「工作区」同一条基线）+ 左对齐 + 内层 `flex: 0 0 auto`（chevron 紧跟标题）+ hover 只给"升色 + 下划线 + chevron 右移" |
+| 10 | 切换面板 overflow 硬化 | `.switcher_panel` / `.switcher_list` 全部 `box-sizing:border-box; min-width:0; max-width:100%`，面板 `overflow-x:hidden`，列表 `overflow-y:auto; overflow-x:hidden` |
+| 11 | 项目行 | 新增 `_render_project_switcher_row()`：**可见 compact row**（`tp-switch-row`）+ **铺满它的透明点击层**（`switcher_pick_*`）。名称 `flex:1 1 auto; min-width:0` + ellipsis；计数 `flex:0 0 auto` + tabular-nums；当前项 = check + 轻 active 面 |
+| 12 | 行 key | 锚点注册表新增 `row_frame`（`switcher_row_` / `task_switcher_row_`）：可见行与点击层是两类 key，两者都是紧凑行 |
+| 13 | 搜索阈值 | 落到具名常量 `_PROJECT_SWITCHER_SEARCH_MIN = 5`（行为不变：项目少时不占那一行） |
+| 14 | 说明文案 | 面板常驻 caption 移除；`switch_effect = "仅影响新任务，已有任务不会移动"` 进 selector 的 `help` |
 
 ---
 
@@ -217,6 +252,50 @@ state**。没有引入第二套 Project 状态——新增的只是"路由"这�
 4 处均已定向复验通过。**教训**：`project_task_navigation_test.py` 有 85 个用例 / 27.5 分钟，
 整文件重跑极不划算 —— 复验请用节点 ID（`pytest tests/x_test.py::test_name`，单个约 20s，
 配 `TMPDIR=$(mktemp -d)` 避开 shim 的 `EEXIST` 坑）。
+
+### 6.1 入口收敛轮的测试（`sidebar_project_switcher_test.py` → 20 个用例）
+
+收敛轮新增 7 个用例，视觉收敛轮再新增 2 个（共 20 个；其余沿用，其中 Inbox 用例改断言
+行 markup）：
+
+| 用例 | 守住什么 |
+| --- | --- |
+| `test_project_center_lives_on_the_group_header_not_a_separate_row` | 侧栏有「项目」按钮、**没有**「项目中心」行；标题 CSS = 17px/12px/500/透明底 + `justify-content:flex-start` + `::after` chevron + 内容 `flex: 0 0 auto`（chevron 紧跟）；selector = 46px/11px 圆角/1px 细边/中性 surface，focus ring 只有一条 2px outline 且 `box-shadow: none`；**显式禁止** `.st-key-current_project .stButton button {` 重新出现（会泄漏进面板）；旧 `project_center_entry` 的 CSS 与 key 在源码里都不存在 |
+| `test_header_navigation_is_pure_navigation` | 点标题 → route `list`、上下文不变、selector 文案不变、不展开面板；再点是**幂等**（route 仍 `list`、仍不弹面板）；当前页标记落在标题上 |
+| `test_selector_switches_context_and_never_navigates_the_route` | selector 只切换上下文（route → `detail`），不承担导航职责 |
+| `test_switcher_rows_are_compact_single_line_rows` | 每行是 `tp-switch-row`（check + 名称 + 计数，无卡片标记），行数与点击层一一对应；CSS：行 `flex`/`38px`/`border:0`、名称 `flex:1 1 auto` + ellipsis、计数 `flex:0 0 auto` + `tabular-nums`、行间 `row-gap: 2px`；当前项用字面 `✓`（**禁止**退化成八进制转义产物 `¹3`） |
+| `test_inbox_row_has_one_focal_point_and_a_weak_secondary_label` | 名字 13 → 计数 11.5 → `Inbox` 9.5px 且**不是** `--tp-faint`（更淡）；行里不再出现「系统工作区」 |
+| `test_new_project_footer_is_an_action_row_not_a_card` | footer：透明 / `border: 0` / `box-shadow: none` / 40px，hover 才 `--tp-tint-hover`；列表 `overflow-y:auto`（footer 不在滚动区里）；divider 收紧到 8/6px |
+| `test_long_project_names_cannot_overflow_the_sidebar` | overflow 契约：面板 / 列表 / 行 / 名称四级 `min-width:0` + `max-width:100%` + `overflow-x:hidden`；长名字仍然只占**一个** `.tp-switch-name` 节点，且渲染在侧栏子树内 |
+| `test_project_list_scrolls_and_only_then_shows_search` | 8 行时搜索出现、`max-height` + `overflow-y:auto` 生效、底部动作在滚动区之外；项目 ≤4 时**不**出现搜索框 |
+| `test_switcher_has_no_standing_explainer_copy` | 面板里没有常驻说明文案；同一句以 selector 的 `help` 出现（说明没丢，只是换了位置） |
+
+同时更新：
+`project_context_hierarchy_test.py`（`…group_holds_context_and_management` 改判"纯标题只剩
+工作区 + 标题是按钮"；`test_project_center_is_a_subordinate_entry_not_a_second_primary` →
+`test_project_center_header_is_lighter_than_the_selector`，断言换成标题字型契约）、
+`project_task_navigation_test.py`（分组用例、`…entry_returns_to_the_project_list`、
+`…actions_are_context_only`、`…switcher_changes_the_context_project` 的 caption/徽章断言）、
+`project_detail_visual_system_test.py`（行结构断言由"两行 + `52px`"改为"一行 markup +
+`38px` + `border: 0` + overflow 契约"；footer 断言加 40px / `box-shadow: none`）。
+
+**四处工具/实现层面的坑（实测）**：
+
+1. `_css_rule` 的调用点有的传选择器、有的传「选择器 + ` {`」。这类 helper 自己会补 ` {`，
+   于是拼成 `… { {` → 一句"样式表里找不到规则"的**假失败**（一次踩掉 4 个用例）。
+   已把 helper 改成对两种写法都容忍；匹配仍是精确选择器，`… button` 不会误命中
+   `… button:hover` / `… button::after`。
+2. `sidebar_project_switcher_test.py` 里数"有几行"要用 `<div class="tp-switch-row` 判别。
+   用裸 `"tp-switch-row" in value` 会把**样式表**那一整块也算成一行（它会出现在
+   `at.markdown` 里），数字永远多 1。
+3. **按钮里的 `p` 不继承按钮字号**：Streamlit 给 button 内的 markdown 容器打了正文级
+   14px，所以 `font-size: inherit` 拿到的还是 14px，必须显式写 `12px !important`。
+   不压回来的后果是标题比「工作区」大一号、还会在 17px 行盒里溢出。
+4. **`st.container(key=…)` 的 key 打在 stVerticalBlock 自己身上**，不是外面再包一层。
+   于是 `[class*="switcher_list"] > [data-testid="stVerticalBlock"] { gap: … }` 这种
+   "收紧组内间距"的规则会**静默落空**（退回默认 8px）。要写成
+   `[class*="switcher_list"][data-testid="stVerticalBlock"]`（自匹配）。
+
 
 ---
 

@@ -3,10 +3,11 @@
 把 Streamlit 的 HTML 界面包装成可直接使用的形式，Windows / macOS / Linux
 三平台同一入口：
 
-- 默认：启动本地服务后自动打开默认浏览器；
+- 默认：**只监听本机回环地址 127.0.0.1**，启动后自动打开默认浏览器；
 - 可选原生窗口：安装 pywebview（见 requirements-desktop.txt）后自动弹出
   桌面窗口渲染同一 HTML 界面；未安装则回退到浏览器；
-- --lan：监听 0.0.0.0，供受信任局域网内的设备使用；当前无认证层；
+- --lan：显式选择局域网模式，监听 0.0.0.0，供受信任局域网内的设备使用；
+  当前无认证层，因此这是**必须显式开启**的开关，不是默认行为；
 - 关闭窗口或 Ctrl+C 即停止服务。
 """
 from __future__ import annotations
@@ -24,27 +25,42 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_PORT = 8501
 APP_TITLE = "FolioThread · 长文档翻译工作空间"
 
+# 绑定地址是**产品边界**，不能交给 Streamlit 的隐式默认值。
+# Streamlit 不指定 `--server.address` 时监听所有网卡（`0.0.0.0`），也就是
+# 同一局域网内的任何设备都能打开这个无认证层的应用。因此默认必须显式
+# 收敛到回环地址，局域网只有 `--lan` 这一条显式路径。
+LOCAL_BIND_ADDRESS = "127.0.0.1"
+LAN_BIND_ADDRESS = "0.0.0.0"  # nosec B104 - 仅由 --lan 显式选择
+
+
+def bind_address(lan: bool) -> str:
+    """服务绑定地址：默认回环；局域网是显式 opt-in。"""
+    return LAN_BIND_ADDRESS if lan else LOCAL_BIND_ADDRESS
+
 
 def pick_port(preferred: int = DEFAULT_PORT) -> int:
     """首选端口被占用时顺延（最多尝试 20 个）。"""
     for port in range(preferred, preferred + 20):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(("127.0.0.1", port)) != 0:
+            if s.connect_ex((LOCAL_BIND_ADDRESS, port)) != 0:
                 return port
     return preferred
 
 
 def server_args(port: int, lan: bool) -> list[str]:
-    """构造 streamlit 服务启动参数（headless，由本启动器负责打开界面）。"""
+    """构造 streamlit 服务启动参数（headless，由本启动器负责打开界面）。
+
+    `--server.address` **总是显式给出**：默认 `127.0.0.1`，只有 `lan=True`
+    才绑到 `0.0.0.0`。依赖 Streamlit 的默认值会让应用在用户不知情的情况下
+    暴露到局域网。
+    """
     args = ["-m", "streamlit", "run", str(ROOT / "app.py"),
             "--server.headless", "true",
             "--server.port", str(port),
+            "--server.address", bind_address(lan),
             "--theme.primaryColor", "#004cfd",
             "--theme.textColor", "#131c2e",
             "--browser.gatherUsageStats", "false"]
-    if lan:
-        # Explicit opt-in for the documented trusted-LAN mode.
-        args += ["--server.address", "0.0.0.0"]  # nosec B104
     return args
 
 
@@ -61,7 +77,7 @@ def lan_ip() -> str:
 
 
 def url_for(port: int, lan: bool) -> str:
-    host = lan_ip() if lan else "127.0.0.1"
+    host = lan_ip() if lan else LOCAL_BIND_ADDRESS
     return f"http://{host}:{port}"
 
 
@@ -131,7 +147,7 @@ def main(argv=None) -> int:
             return 1
         print("=" * 52)
         print(f"  {APP_TITLE} 已启动")
-        print(f"  本机访问：http://127.0.0.1:{port}")
+        print(f"  本机访问：http://{LOCAL_BIND_ADDRESS}:{port}")
         if args.lan:
             print(f"  局域网访问：{url}（手机/平板需与电脑同一网络）")
         print("  关闭窗口或按 Ctrl+C 停止服务。")

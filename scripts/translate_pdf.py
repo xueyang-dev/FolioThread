@@ -50,7 +50,12 @@ def resolve_key_and_model(provider, model):
 
 
 def load_document(path, pages=None):
-    """读取 PDF/DOCX；--pages 仅对 PDF 生效（按页裁剪）。返回 (filename, bytes, stable_job_id)。"""
+    """读取 PDF/DOCX；--pages 仅对 PDF 生效（按页裁剪）。
+
+    返回 `(filename, bytes, document_id)`。`document_id` 是**文档身份**（原文件
+    哈希 + 页码范围），确定性、可续传——但它**不是任务身份**：任务身份还要带上
+    目标语言，见 `resolve_job_id`。
+    """
     path = Path(path)
     if not path.is_file():
         raise SystemExit(f"文件不存在：{path}")
@@ -64,11 +69,38 @@ def load_document(path, pages=None):
             out.save(buf)
         doc.close()
         print(f"已裁剪第 {start}-{end} 页（共 {end - start + 1} 页）")
-        # 用「原文件哈希 + 页码范围」生成稳定任务 ID：每次裁剪字节可能不同，但任务必须可续传
-        job_id = hashlib.sha256(f"{original_hash}::pages::{start}-{end}".encode()).hexdigest()[:16]
-        return path.name, buf.getvalue(), job_id
-    job_id = original_hash[:16]
-    return path.name, path.read_bytes(), job_id
+        # 用「原文件哈希 + 页码范围」生成稳定文档身份：每次裁剪字节可能不同，
+        # 但同一份文档的同一个页码范围必须可续传。
+        document_id = hashlib.sha256(
+            f"{original_hash}::pages::{start}-{end}".encode()).hexdigest()[:16]
+        return path.name, buf.getvalue(), document_id
+    return path.name, path.read_bytes(), original_hash[:16]
+
+
+def resolve_job_id(document_id, target_lang, explicit=None):
+    """任务身份 = 文档身份 + 目标语言。
+
+    目标语言必须参与任务身份：同一个 PDF 译成另一种语言是**另一个任务**。
+    只看文档身份的话，第二次运行会静默续做第一次（另一种语言）的任务，
+    把中文译文当成英文任务的进度——界面不报错，结果是错的。
+
+    规则与 `core.resolve_task_id` 同一套：按上下文推导的任务已存在 -> 续做；
+    否则旧版本按裸文档身份命名的任务，只有在它记录的 `target_lang` 与本次
+    请求**可证明一致**时才沿用（否则新建）。旧任务没有语言记录时宁可新建，
+    也不把另一种语言的旧任务当成这个活。`--job-id` 仍是显式续跑的逃生口。
+    """
+    if explicit:
+        return explicit
+    identity = document_id.encode("utf-8")
+    scoped = core.task_job_id(identity, target_lang=target_lang)
+    if core.load_job_state(scoped) is not None:
+        return scoped
+    legacy = core.load_job_state(document_id)
+    if legacy is not None and (
+            core.task_context_of(legacy)["target_lang"]
+            == core.task_context(target_lang=target_lang)["target_lang"]):
+        return document_id
+    return scoped
 
 
 def main():
@@ -91,8 +123,8 @@ def main():
     args = ap.parse_args()
 
     api_key, model = resolve_key_and_model(args.provider, args.model)
-    filename, file_bytes, auto_job_id = load_document(args.document, args.pages)
-    job_id = args.job_id or auto_job_id
+    filename, file_bytes, document_id = load_document(args.document, args.pages)
+    job_id = resolve_job_id(document_id, args.target_lang, explicit=args.job_id)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -109,9 +141,10 @@ def main():
 
     state = core.load_job_state(job_id)
     if state:
-        print(f"ℹ 任务 {job_id} 已有进度（{core.progress_label(state)}），继续执行…")
+        print(f"ℹ 任务 {job_id} 已有进度（{core.progress_label(state)}，"
+              f"目标语言 {core.state_target_lang(state) or '未标注'}），继续执行…")
     else:
-        print(f"ℹ 新任务 ID：{job_id}")
+        print(f"ℹ 新任务 ID：{job_id}（目标语言 {args.target_lang}）")
 
     state = core.run_job_pipeline(
         job_id, filename, file_bytes,

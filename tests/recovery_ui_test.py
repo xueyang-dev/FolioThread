@@ -2,6 +2,7 @@
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -83,6 +84,13 @@ def test_recovery_ui():
         at.run()
         assert not at.exception, f"从断点继续后异常：{at.exception}"
         assert at.session_state["active_job_id"] == job_id
+        # worker 是**后台线程**：「继续处理」返回时它仍在跑。任务状态（state.json）
+        # 由流水线写、运行状态（runtime_state.json）由 worker 收尾时写，两者之间
+        # 有一个真实窗口。不在这个窗口里断言，否则「任务是否已完成」会变成一个
+        # 计时问题而不是一个事实（`runtime_status_test.py` 用同样的有界等待）。
+        deadline = time.time() + 5
+        while core.is_job_worker_alive(job_id) and time.time() < deadline:
+            time.sleep(0.02)
         at.run()
         assert not at.exception, f"恢复后的当前任务面板异常：{at.exception}"
         assert any("<h2>概览</h2>" in s.value for s in at.markdown)

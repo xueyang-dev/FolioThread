@@ -135,6 +135,28 @@ def _css_rule(css, selector):
     return css[index:css.find("}", index)]
 
 
+def _media_bodies(css, condition):
+    """返回**所有** `@media <condition> { … }` 的块体。
+
+    媒体查询在一个样式表里可以出现多次——每新增一个模块就可能追加一个新的
+    `@media (max-width: 767px)` 块。因此"最后那个块"是位置巧合，不是契约：
+    断言必须覆盖全部匹配块，规则落在哪一个里都不影响结论。
+    """
+    bodies = []
+    for match in re.finditer(r"@media\s*([^{]*)\{", css):
+        if condition not in match.group(1):
+            continue
+        depth, index, start = 1, match.end(), match.end()
+        while index < len(css) and depth:
+            if css[index] == "{":
+                depth += 1
+            elif css[index] == "}":
+                depth -= 1
+            index += 1
+        bodies.append(css[start:index - 1])
+    return bodies
+
+
 def _button(at, key):
     for element in at.button:
         if element.key == key:
@@ -605,33 +627,40 @@ def test_switch_project_panel_uses_compact_selectable_rows():
         assert _find_container(at, "project_switcher_list") is not None
         rows = [b for b in at.button if b.key and b.key.startswith("switcher_pick_")]
         assert len(rows) >= 3, [b.label for b in rows]
-        # 每一行是 selectable row：项目名一行 + 次信息一行（N 个任务 /
-        # N 个未归入项目的任务）——两行结构，不是一叠独立大卡。
-        assert all("\n" in b.label and "个" in b.label for b in rows), \
-            [b.label for b in rows]
-        current = [b for b in rows if "当前" in b.label]
-        assert len(current) == 1, [b.label for b in rows]
+        # 每一行是 selectable **compact row**：单行结构（名称 + 计数），由 markdown
+        # 排版，按钮只是铺在它上面的透明点击层——不再是一张带多行文案的项目大卡。
+        markup = [str(m.value) for m in at.markdown
+                  if '<div class="tp-switch-row' in str(m.value)]
+        assert len(markup) == len(rows), (len(markup), len(rows))
+        assert all("tp-switch-name" in block and "tp-switch-count" in block
+                   for block in markup), markup
+        current = [block for block in markup if "is-current" in block]
+        assert len(current) == 1, markup
 
         css = _styles(at)
         assert 'section[role="dialog"]:has(.st-key-project_switcher' not in css, \
             "切换项目不该再有 dialog 规则"
-        row_rule = _css_rule(
-            css, '[class*="switcher_pick_"] .stButton button {')
-        assert "52px" in row_rule, "行高必须紧凑"
+        row_rule = _css_rule(css, ".tp-switch-row {")
+        assert "min-height: 38px" in row_rule, "行高必须紧凑"
+        assert "border: 0" in row_rule, "行不是卡片：不得有独立边框"
         list_rule = _css_rule(css, '[class*="switcher_list"] {')
         assert "max-height" in list_rule, "列表高度必须受控，面板不会长成一整页"
+        assert "overflow-y: auto" in list_rule, "超出部分必须在列表内滚动"
         # 锚定**行首**：`.st-key-task_project_context [class*="switcher_panel"]`
         # 是正文锚点的 margin 覆写，前缀更长但**包含**同一个子串，裸 `find` 会抢先
-        # 命中它、拿到一条只有 margin 的规则。面板主规则在第 577 行（行首）。
+        # 命中它、拿到一条只有 margin 的规则。面板主规则在行首。
         panel_rule = _css_rule(css, '\n[class*="switcher_panel"] {')
         assert "border-radius: 12px" in panel_rule, "面板是浅色下拉面，不是表单块"
+        # overflow 契约：面板与列表都不得被长项目名撑宽（上一版的实际故障）。
+        assert "overflow-x: hidden" in panel_rule, panel_rule
+        assert "max-width: 100%" in panel_rule, panel_rule
         # Streamlit 的 st.divider() 默认 32px 上下边距，会把紧凑面板撑出大片空白。
         divider_rule = _css_rule(css, '[class*="switcher_panel"] hr {')
         assert "8px 0 6px" in divider_rule, "分隔线必须收紧，不能撑出段落级空白"
 
 
 def test_switch_project_footer_has_only_the_create_action():
-    """底部低频动作只剩「新建项目」：管理入口由侧栏「项目中心」承担。"""
+    """底部低频动作只剩「新建项目」：管理入口由侧栏「项目」分组标题承担。"""
     with detail_env():
         core.create_project("项目")
         at = _project_page("")
@@ -642,10 +671,12 @@ def test_switch_project_footer_has_only_the_create_action():
         keys = _keyed_descendants(footer)
         assert "switcher_new_project" in keys
         assert "switcher_manage_all" not in keys, \
-            "「管理所有项目」与侧栏「项目中心」重复，必须删除"
+            "「管理所有项目」与侧栏「项目」标题入口重复，必须删除"
         css = _styles(at)
         rule = _css_rule(css, '[class*="switcher_footer"] .stButton > button {')
         assert "transparent" in rule, "底部低频动作不能是实心强 CTA"
+        assert "min-height: 40px" in rule, "footer action row 高度约 40px"
+        assert "box-shadow: none" in rule, rule
 
 
 # ================= 容器层级 / rhythm / 响应式 =================
@@ -703,12 +734,18 @@ def test_responsive_rules_cover_the_980_and_760_breakpoints():
         assert "@media (max-width: 980px)" in css, "必须补上 980 档"
         assert "@media (max-width: 767px)" in css
 
-        narrow = css.split("@media (max-width: 980px)")[1].split("@media")[0]
+        # 断言覆盖**全部**同档块：新增模块会追加新的媒体块，规则落在哪一个里
+        # 都算数（契约是"760 档有这条规则"，不是"最后那个块里有这条规则"）。
+        narrow_blocks = _media_bodies(css, "max-width: 980px")
+        assert narrow_blocks, "必须存在 980 档规则块"
+        narrow = "\n".join(narrow_blocks)
         assert ".tp-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }" \
             in narrow, "980 档 summary 必须折成 2 列"
         assert "flex-wrap: wrap" in narrow, "980 档知识模块入口必须能换行"
 
-        mobile = css.split("@media (max-width: 767px)")[-1]
+        mobile_blocks = _media_bodies(css, "max-width: 767px")
+        assert mobile_blocks, "必须存在 760 档规则块"
+        mobile = "\n".join(mobile_blocks)
         assert '[class*="st-key-pd_group_"] { padding: 16px 14px; }' in mobile
         assert "st-key-project_detail_actions { flex-wrap: nowrap; }" in mobile, \
             "760 档 CTA 与 ⋯ 仍然必须同行"

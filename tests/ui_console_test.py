@@ -216,7 +216,8 @@ def test_ui_new_task_journey_lands_in_the_workspace(source_doc):
 
     这里把 worker 启动替换为桩：本测试验证的是**界面的路由与状态迁移**，
     而不是后台进程本身（后者在进程内无法被 monkeypatch 覆盖，会真的发起网络
-    请求）。任务状态预先按内容哈希落盘，因此界面读到的 job_id 与真实一致。
+    请求）。任务状态按**任务身份**（文档身份 + 本地化上下文）预先落盘，
+    因此界面读到的 job_id 与真实一致：内容哈希只是文档身份，不是任务身份。
     """
     from streamlit.testing.v1 import AppTest
     import json as _json
@@ -233,7 +234,9 @@ def test_ui_new_task_journey_lands_in_the_workspace(source_doc):
         }, ensure_ascii=False), encoding="utf-8")
 
         data = source_doc["docx"].read_bytes()
-        job_id = core.file_job_id(data)
+        # 与界面同源的推导：未选择项目 -> 系统工作区；目标语言取默认值。
+        job_id = core.task_job_id(data, project_id=core.system_project_id(),
+                                  target_lang=TARGET_LANG)
         state = core.new_job_state(source_doc["docx"].name)
         core.save_job_state(job_id, state)
         core.save_source(job_id, data)

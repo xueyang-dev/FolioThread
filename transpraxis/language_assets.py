@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import knowledge, models
+from .translation_memory import tm_unscope_key
 
 
 # ---------------- 标签 ----------------
@@ -379,19 +380,25 @@ def build_tm_rows(tm: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     只收 ``reviewed`` 为真的条目：界面把它们标成「已确认」，未确认的条目
     一旦出现在这里，那个标签就成了假话。`core.load_tm` 已经做过同样的过滤，
     这里再挡一次，保证行模型自身是诚实的。
+
+    记忆键是**作用域键**（目标语言 + 原文），因此展示前必须拆开：界面上要看到
+    的是"原文 / 译文 / 目标语言"，而不是内部键的拼接形态。语言无法证明的旧
+    条目照常展示（它是用户的真实数据），但 ``target_lang`` 为空——界面据此
+    说明"这条记忆不会自动复用"，而不是假装它属于某种语言。
     """
     rows: List[Dict[str, Any]] = []
-    for index, (source, record) in enumerate((tm or {}).items()):
+    for index, (key, record) in enumerate((tm or {}).items()):
         if not isinstance(record, Mapping) or not record.get("reviewed"):
             continue
         target = str(record.get("target") or "")
-        text = str(source or "")
+        head, text = tm_unscope_key(key)
         if not text.strip() or not target.strip():
             continue
         rows.append({
             "row_id": f"tm::{index}",
             "source": text,
             "target": target,
+            "target_lang": str(record.get("target_lang") or "") or head,
             "updated_at": str(record.get("updated_at") or ""),
             "reviewed": bool(record.get("reviewed")),
             "source_chars": len(text),
@@ -547,9 +554,19 @@ def filter_terms(
 
 
 def filter_tm(rows: Sequence[Mapping[str, Any]], *, query: str = "",
-              ) -> List[Dict[str, Any]]:
-    return [dict(row) for row in rows
-            if _matches(query, row.get("source"), row.get("target"))]
+              target_lang: str = "") -> List[Dict[str, Any]]:
+    """翻译记忆筛选：关键词 + 目标语言。
+
+    目标语言是**记忆身份**的一部分，因此它既是筛选项，也是"为什么这条记忆
+    不会被另一种语言的任务命中"的答案。
+    """
+    result = []
+    for row in rows:
+        if target_lang and str(row.get("target_lang") or "") != target_lang:
+            continue
+        if _matches(query, row.get("source"), row.get("target")):
+            result.append(dict(row))
+    return result
 
 
 def filter_candidates(

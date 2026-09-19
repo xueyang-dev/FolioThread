@@ -206,8 +206,12 @@ def test_context_and_knowledge_surfaces_rerun_without_widget_identity_errors():
              if button.label == "术语与翻译记忆").click()
         at.run()
         assert not at.exception, f"语言资产页面异常：{at.exception}"
-        assert any('class="la-summary"' in item.value for item in at.markdown), \
-            "页面顶部必须是简洁摘要，而不是大段解释性卡片"
+        # 计数只在**一级 Tab** 上出现一次；不再有另一行重复的统计卡。
+        assert not any('class="la-summary"' in item.value for item in at.markdown), \
+            "顶部统计卡必须删掉：计数已经搬到一级 Tab 上"
+        assert any(str(label).startswith("待审核")
+                   for label in at.segmented_control[0].options), \
+            "待审核数量必须挂在 Tab 上"
         at.segmented_control[0].set_value("review").run()
         assert not at.exception, f"待审核 Tab 异常：{at.exception}"
         quick = next(button for button in at.button

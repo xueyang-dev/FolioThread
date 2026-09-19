@@ -5,19 +5,23 @@
     Project Context Selector  = state / switch action —— "我此刻在哪个项目里工作"
     Project Center            = navigation            —— "我拥有哪些项目"
 
-两者在侧栏同一个「项目」分组里相邻，但功能上严格分离。本文件守住这条边界，
-覆盖 8 条验收：
+两者在侧栏同一个「项目」分组里相邻，但功能上严格分离。Project Center 的入口
+**就是分组标题本身**（「项目」这一行），所以侧栏里不再有独立的「项目中心」行。
+
+本文件守住这条边界，覆盖：
 
   1. 点 selector → 展开 switcher（轻量下拉面板），**不是**大型 Modal；
   2. 点项目 → 更新 current project，面板立刻收起；
   3. 选 Inbox → 回到系统工作区上下文，而不是"选中了一个叫未分类的项目"；
-  4. 点「项目中心」→ 进入管理页路由，不展开 switcher、不弹 Modal；
+  4. 点「项目」分组标题 → 进入管理页路由，不展开 switcher、不弹 Modal；
   5. 已经在管理页时再点 → 保持 route 与 active state，仍不展开 switcher；
-  6. 「项目中心」导航**不改变** current project；
+  6. 标题导航**不改变** current project，且侧栏没有独立「项目中心」行；
   7. switcher 里的「新建项目」走既有 create-project flow，创建成功即成为上下文；
   8. 不存在"两个入口打开同一个大型 project modal"：两处锚点共用**同一份**列表实现，
      且旧 Modal 的状态位 / CSS / 入口全部退休；两处锚点的 widget key（含底部动作）
-     按锚点隔离，不共用。
+     按锚点隔离，不共用；
+  9. switcher 是 compact switcher：单行 row、名称可省略、计数靠右、列表内滚动、
+     面板不横向溢出、不常驻产品说明文案。
 
 为什么不用 `st.popover`：它的开合由前端驱动，服务端既读不到也关不掉——"选中后
 立即关闭"和"点项目中心不得弹 switcher"会退化成不可验证的约定；而且它的内容默认
@@ -44,6 +48,8 @@ import core  # noqa: E402
 APP_SOURCE = ROOT / "app.py"
 SIDEBAR_OPEN = "sidebar_project_switcher_open"
 TASK_OPEN = "task_project_switcher_open"
+# Project Center 的唯一侧栏入口：**分组标题本身**（没有独立的「项目中心」行）。
+HEADER_BUTTON = "project_section_header_button"
 
 
 @contextmanager
@@ -120,6 +126,49 @@ def _task_rows(at):
 
 def _markdown_text(at):
     return "\n".join(str(m.value) for m in at.markdown)
+
+
+def _rows_markup(at):
+    """switcher 的**可见行** markup（compact row）。
+
+    行本身是 markdown（名称 / 计数靠 CSS flex 排版），不是按钮——按钮是铺在它上面
+    的透明点击层（同历史任务卡的套路）。所以"行长什么样"要看这里，"点得到吗"看
+    按钮 key。
+    """
+    return [str(m.value) for m in at.markdown
+            if '<div class="tp-switch-row' in str(m.value)]
+
+
+def _row_for(at, fragment):
+    """按项目名片段取某一行 markup（找不到返回空串）。"""
+    for block in _rows_markup(at):
+        if fragment in block:
+            return block
+    return ""
+
+
+def _sidebar_markdown(at):
+    return "\n".join(str(m.value) for m in at.sidebar.markdown)
+
+
+def _css_rule(css, selector):
+    """取某条 CSS 规则的声明体（取**最后**一条同选择器规则）。
+
+    「取最后一条」是硬要求：同权重下后者生效，取第一条会验到被覆盖的旧规则。
+    选择器**带不带结尾的 ` {` 都可以**（调用点两种写法都出现过，这里统一归一化）：
+    漏归一化会让 `… button` 和 `… button {` 拼成 `… button { {`，得到一句
+    "样式表里找不到规则"的假失败。匹配仍然是**精确选择器**（不是子串匹配），
+    所以 `… button` 不会误命中 `… button:hover` / `… button::after`。
+    """
+    selector = selector.strip()
+    if selector.endswith("{"):
+        selector = selector[:-1].strip()
+    for marker in ("\n" + selector + " {", selector + " {"):
+        index = css.rfind(marker)
+        if index != -1:
+            start = index + len(marker)
+            return css[start:].split("}")[0]
+    raise AssertionError(f"样式表里找不到规则：{selector}")
 
 
 def _visible_text(at):
@@ -246,9 +295,14 @@ def test_picking_inbox_returns_to_the_system_workspace_context():
         at = _open_sidebar_switcher(at)
         inbox = _button(at, f"switcher_pick_{core.SYSTEM_PROJECT_ID}")
         assert inbox is not None, [b.key for b in at.sidebar.button]
-        # Inbox 是特殊 system collection：带「系统工作区」badge + 未归入项目的措辞。
-        assert "系统工作区" in inbox.label, inbox.label
-        assert "个未归入项目的任务" in inbox.label, inbox.label
+        # Inbox 是特殊 system collection：行上带一个**极轻的** `Inbox` 标签，
+        # 但不再堆「系统工作区」+「N 个未归入项目的任务」那几层说明——那太密，
+        # 完整解释属于 New Task 正文里的「项目上下文」。
+        inbox_row = _row_for(at, "未分类任务")
+        assert inbox_row, _rows_markup(at)
+        assert "tp-switch-tag" in inbox_row and "Inbox" in inbox_row, inbox_row
+        assert "系统工作区" not in inbox_row, inbox_row
+        assert "个未归入项目的任务" not in inbox_row, inbox_row
 
         at = _pick(at, core.SYSTEM_PROJECT_ID)
         assert core.is_system_project_id(str(_state(at, "active_project_id") or "")), \
@@ -272,7 +326,7 @@ def test_project_center_navigates_and_never_opens_the_switcher():
         at = _project_page(state={"active_project_id": project["project_id"]})
         assert not at.exception, [e.value for e in at.exception]
 
-        at.button(key="project_center_entry_button").click()
+        at.button(key=HEADER_BUTTON).click()
         at.run()
         assert not at.exception, [e.value for e in at.exception]
 
@@ -291,11 +345,11 @@ def test_clicking_project_center_again_keeps_route_and_active_state():
     with switcher_env():
         core.create_project("项目一")
         at = _project_page()
-        at.button(key="project_center_entry_button").click()
+        at.button(key=HEADER_BUTTON).click()
         at.run()
         assert _state(at, "projects_route") == "list"
 
-        at.button(key="project_center_entry_button").click()
+        at.button(key=HEADER_BUTTON).click()
         at.run()
         assert not at.exception, [e.value for e in at.exception]
         assert _state(at, "app_view") == "projects"
@@ -315,7 +369,7 @@ def test_project_center_navigation_does_not_change_the_current_project():
         assert _state(at, "active_project_id") == project["project_id"]
         label_before = _button(at, "current_project_selector").label
 
-        at.button(key="project_center_entry_button").click()
+        at.button(key=HEADER_BUTTON).click()
         at.run()
         assert not at.exception, [e.value for e in at.exception]
 
@@ -442,3 +496,348 @@ def test_the_duplicate_switching_modal_is_retired_in_source():
     # 第三个入口，那正是本轮要消除的东西。
     assert source.count("_render_project_switcher_body(") == 4, \
         "两处锚点必须共用同一个渲染函数"
+
+
+# ================= 9. Project Center 入口收敛到分组标题 =================
+
+
+def test_project_center_lives_on_the_group_header_not_a_separate_row():
+    """「项目」标题本身就是 Project Center 入口：侧栏不再有独立「项目中心」行。
+
+    把它做成标题下面一个独立行，等于让同一件事在同一个分组里出现两次，还让它去和
+    selector 争同一块视觉重量。收敛之后标题必须仍然是**标题**（签名与「工作区」
+    同一套字型），只是多了 hover 与右侧 chevron。
+    """
+    with switcher_env():
+        core.create_project("项目甲")
+        at = _project_page()
+        assert not at.exception, [e.value for e in at.exception]
+
+        labels = [b.label for b in at.sidebar.button]
+        assert "项目" in labels, labels
+        assert "项目中心" not in labels, f"独立「项目中心」行必须退休：{labels}"
+        assert _button(at, HEADER_BUTTON) is not None, "分组标题必须是可点击按钮"
+        # 「工作区」仍然是纯标题：两组标题的字型差异只体现在"能不能点"上。
+        assert "工作区" in _sidebar_markdown(at)
+
+        css = _markdown_text(at)
+        head = _css_rule(
+            css, '[class*="st-key-project_section_header"] .stButton button {')
+        selector = _css_rule(
+            css, '[class*="st-key-current_project_selector"] .stButton button {')
+        # 标题：无底色、12px/500 —— 与 `.tp-nav-label` 同一套字型、同一条水平基线。
+        assert "background: transparent" in head, head
+        assert "font-size: 12px" in head, head
+        assert "font-weight: 500" in head, head
+        assert "cursor: pointer" in head, head
+        assert "justify-content: flex-start" in head, "标题必须左对齐"
+        # 17px 行盒 + `margin: 18px 0 6px`：与「工作区」标题完全对齐。
+        assert "min-height: 17px" in head, head
+        margin = _css_rule(css, '[class*="st-key-project_section_header"] {')
+        assert "margin: 18px 0 6px" in margin, margin
+        # chevron 紧跟标题：内容**不能** flex:1（那会把 chevron 顶到侧栏最右，
+        # 读起来像一级大导航的"有下一级"列表项）。
+        inner = _css_rule(
+            css, '[class*="st-key-project_section_header"] .stButton button > div {')
+        assert "flex: 0 0 auto" in inner, inner
+        # 标题里的 `p` 必须显式压回 12px：Streamlit 的 markdown 容器自带 14px
+        # 且**不继承**按钮字号（`font-size: inherit` 在这里拿到的还是 14px）。
+        head_p = _css_rule(
+            css, '[class*="st-key-project_section_header"] .stButton button p {')
+        assert "font-size: 12px !important" in head_p, head_p
+        # selector：中性 surface + 1px 细边 + 11px 圆角 —— 只有一条边框、一条 ring，
+        # 视觉权重低于「新建任务」CTA。
+        assert "min-height: 46px" in selector, selector
+        assert "border-radius: 11px" in selector, selector
+        assert "border: 1px solid var(--tp-sidebar-line)" in selector, selector
+        assert "background: var(--tp-surface)" in selector, selector
+        ring = _css_rule(
+            css,
+            '[class*="st-key-current_project_selector"] .stButton button:focus-visible {')
+        assert "outline: 2px solid var(--tp-primary)" in ring, ring
+        assert "box-shadow: none" in ring, "focus ring 必须只有一条，不能叠成双层框"
+        # ⚠️ selector 规则必须**钉在触发器自己的 key 上**。挂在外层容器
+        # `.st-key-current_project` 上会把填充色 / 高度 / 圆角一并泄漏给展开后的
+        # 面板（列表行 + 「＋ 新建项目」）——实测 footer 因此长成一整块浅蓝卡片。
+        assert ".st-key-current_project .stButton button {" not in css, \
+            "selector 规则不得挂在外层容器上（会泄漏进面板）"
+        # 导航 affordance 是右侧一个 chevron，不是图标按钮。
+        arrow = _css_rule(
+            css, '[class*="st-key-project_section_header"] .stButton button::after {')
+        assert 'content: "›"' in arrow, arrow
+        # 旧入口的 CSS / key 全部清掉。
+        assert "st-key-project_center_entry" not in css, "旧入口 CSS 必须清掉"
+        source = APP_SOURCE.read_text(encoding="utf-8")
+        assert "project_center_entry" not in source
+        assert "project_center_entry_button" not in source
+
+
+def test_project_tooltip_is_a_short_phrase_with_a_width_cap():
+    """侧栏「项目」的 tooltip 只回答"这是什么"，不再承担完整能力清单。
+
+    旧文案是一整句功能罗列，气泡长到横跨侧栏与主工作区。两层修法：
+    文案收敛成一句短语（能力由项目中心页面自己表达）+ 给 tooltip 内容一个
+    宽度上限（将来文案再变长也不会盖住主工作区）。
+    """
+    with switcher_env():
+        core.create_project("项目甲")
+        at = _project_page()
+        assert not at.exception, [e.value for e in at.exception]
+
+        help_text = _button(at, HEADER_BUTTON).help
+        assert help_text == "查看和管理所有项目", help_text
+        for dropped in ("新建", "重命名", "归档", "删除", "上下文"):
+            assert dropped not in help_text, \
+                f"能力清单属于项目中心页面，不属于 tooltip：{help_text}"
+
+        css = _markdown_text(at)
+        capped = _css_rule(
+            css, '[data-testid="stTooltipContent"], .stTooltipContent')
+        assert "max-width: 260px" in capped, capped
+
+
+def test_header_navigation_is_pure_navigation():
+    """标题导航与 selector 严格分离：只改 route，不碰上下文，不展开面板。"""
+    with switcher_env():
+        project = core.create_project("导航目标")
+        at = _project_page(state={"active_project_id": project["project_id"]})
+        assert not at.exception, [e.value for e in at.exception]
+        label_before = _button(at, "current_project_selector").label
+
+        # 点标题：进项目中心（列表路由）。
+        at.button(key=HEADER_BUTTON).click()
+        at.run()
+        assert _state(at, "app_view") == "projects"
+        assert _state(at, "projects_route") == "list"
+        assert _state(at, SIDEBAR_OPEN) is False, "标题导航不得展开 switcher"
+        assert not _sidebar_rows(at)
+        assert _state(at, "active_project_id") == project["project_id"], \
+            "标题导航不得修改 Project Context"
+        assert _button(at, "current_project_selector").label == label_before
+
+        # 已经在项目中心：再点保持 route + active state（幂等，不是 toggle）。
+        at.button(key=HEADER_BUTTON).click()
+        at.run()
+        assert not at.exception, [e.value for e in at.exception]
+        assert _state(at, "projects_route") == "list", "重复点击不允许改变 route"
+        assert _state(at, SIDEBAR_OPEN) is False, "重复点击不得弹出 switcher"
+        assert _state(at, "active_project_id") == project["project_id"]
+        # "当前页"标记落在标题上（同组里"你在这儿"只亮一次）。
+        assert '<span class="tp-nav-current"' in _sidebar_markdown(at)
+
+
+def test_selector_switches_context_and_never_navigates_the_route():
+    """selector 只负责切换 context：它不该改变项目中心的目标路由。"""
+    with switcher_env():
+        first = core.create_project("上下文一")
+        second = core.create_project("上下文二")
+        at = _project_page(state={"active_project_id": first["project_id"]})
+
+        at = _open_sidebar_switcher(at)
+        at = _pick(at, second["project_id"])
+        assert not at.exception, [e.value for e in at.exception]
+        # 切换上下文 = 进入该项目详情（既有导航语义不变），而不是去列表页。
+        assert _state(at, "projects_route") == "detail"
+        assert _state(at, "active_project_id") == second["project_id"]
+        assert _state(at, "task_project_id") == second["project_id"]
+        assert _state(at, SIDEBAR_OPEN) is False, "选中后必须立刻收起"
+
+
+# ================= 10. compact switcher：版式与 overflow =================
+
+
+def test_switcher_rows_are_compact_single_line_rows():
+    """每一行是 compact row：单行 + 名称占满 + 计数靠右，不是一张项目大卡。"""
+    with switcher_env():
+        core.create_project("紧凑行项目")
+        at = _open_sidebar_switcher(_project_page())
+        assert not at.exception, [e.value for e in at.exception]
+
+        rows = _rows_markup(at)
+        assert rows, "必须渲染可见的项目行"
+        for block in rows:
+            # 结构固定：check 槽 + 名称 + 计数（Inbox 行多一个轻标签）。
+            assert "tp-switch-check" in block, block
+            assert "tp-switch-name" in block, block
+            assert "tp-switch-count" in block, block
+            # 不做成卡片：行里没有卡片标记。
+            assert "tp-pcard" not in block and "tp-project-icon" not in block, block
+
+        # 行的 widget key 仍然存在（透明点击层），而且**每一行都能点**。
+        row_buttons = _sidebar_rows(at)
+        assert len(row_buttons) == len(rows), (len(row_buttons), len(rows))
+
+        css = _markdown_text(at)
+        row = _css_rule(css, ".tp-switch-row {")
+        assert "display: flex" in row and "align-items: center" in row, row
+        assert "min-height: 38px" in row, row
+        # 行不是卡片：无独立边框。
+        assert "border: 0" in row, row
+        # 行与行之间只有 2px（Streamlit 默认 8px 会把每行读成独立的一块）。
+        # key 打在 stVerticalBlock **自己身上**，所以 gap 必须写在这个块上。
+        gap = _css_rule(css,
+                        '[class*="switcher_list"][data-testid="stVerticalBlock"],\n'
+                        '[class*="switcher_list"] > [data-testid="stVerticalBlock"] {')
+        assert "row-gap: 2px" in gap, gap
+        name = _css_rule(css, ".tp-switch-row .tp-switch-name {")
+        assert "flex: 1 1 auto" in name and "min-width: 0" in name, name
+        assert "white-space: nowrap" in name, name
+        assert "text-overflow: ellipsis" in name, name
+        count = _css_rule(css, ".tp-switch-row .tp-switch-count {")
+        assert "flex: 0 0 auto" in count, count
+        assert "font-variant-numeric: tabular-nums" in count, count
+        # 当前项用 check + 轻 active 面表达，不用 badge 堆叠。
+        # 断言字面 ✓：写成 CSS 转义 `\2713` 会被 Python 的**八进制转义**吃成 `¹3`
+        # （`\271` → `¹`），渲染出一个静默的错字符——这条断言就是为了钉住它。
+        assert 'content: "✓"' in css, css[-400:]
+        assert 'content: "¹3"' not in css, "对勾不得退化成八进制转义的产物"
+
+
+def test_inbox_row_has_one_focal_point_and_a_weak_secondary_label():
+    """「✓ 未分类任务  Inbox  20」只允许**一个焦点**：项目名。
+
+    `Inbox` 是"这是系统容器、不是项目"的注脚，所以它比计数还小（9.5 < 11.5）、颜色
+    比 `--tp-faint` 更淡、字重更低。名字 / Inbox / 计数三者同级会让这一行变成三个
+    焦点，读者不知道该看哪个。
+    """
+    with switcher_env():
+        core.create_project("同级项目")
+        at = _open_sidebar_switcher(_project_page())
+        assert not at.exception, [e.value for e in at.exception]
+
+        block = _row_for(at, "未分类任务")
+        assert block, "Inbox 行必须在列表里"
+        assert "tp-switch-tag" in block and ">Inbox<" in block, block
+        # 不再堆"系统工作区 / 20 个未归入项目的任务"那一层说明。
+        assert "系统工作区" not in block, block
+
+        css = _markdown_text(at)
+        tag = _css_rule(css, ".tp-switch-row .tp-switch-tag {")
+        name = _css_rule(css, ".tp-switch-row .tp-switch-name {")
+        count = _css_rule(css, ".tp-switch-row .tp-switch-count {")
+        # 层级递减：名字 13 > 计数 11.5 > Inbox 9.5。
+        assert "font-size: 13px" in name, name
+        assert "font-size: 11.5px" in count, count
+        assert "font-size: 9.5px" in tag, tag
+        assert "--tp-faint" not in tag, "Inbox 标签必须比 --tp-faint 更弱"
+
+
+def test_new_project_footer_is_an_action_row_not_a_card():
+    """「＋ 新建项目」是 **footer action row**，不是一块浅蓝卡片。
+
+    默认无填充、无边框、无阴影，hover 才浮出一层浅底；高度 40px；与滚动列表之间是
+    一条细 divider。它曾经是浅蓝卡片——根因是 selector 的按钮规则挂在外层容器上，
+    把填充色泄漏给了它（见 `test_project_center_lives_on_the_group_header_not_a_separate_row`
+    里那条"不得挂外层容器"的断言）。
+    """
+    with switcher_env():
+        at = _open_sidebar_switcher(_project_page())
+        assert not at.exception, [e.value for e in at.exception]
+
+        css = _markdown_text(at)
+        footer = _css_rule(css, '[class*="switcher_footer"] .stButton > button {')
+        assert "background: transparent" in footer, footer
+        assert "border: 0" in footer, footer
+        assert "box-shadow: none" in footer, footer
+        assert "min-height: 40px" in footer, footer
+        hover = _css_rule(css, '[class*="switcher_footer"] .stButton > button:hover {')
+        assert "var(--tp-tint-hover)" in hover, hover
+        # 列表滚动，footer 不在滚动区里：两者是两个容器。
+        listing = _css_rule(css, '[class*="switcher_list"] {')
+        assert "overflow-y: auto" in listing, listing
+        divider = _css_rule(css, '[class*="switcher_panel"] hr {')
+        assert "margin: 8px 0 6px" in divider, divider
+
+
+def test_long_project_names_cannot_overflow_the_sidebar():
+    """版式硬约束：长项目名沿主轴按 min-content 撑宽是上一版溢出的根因。
+
+    所以面板 / 列表 / 行 / 名称四级都必须 `min-width:0` + `max-width:100%`，名称
+    单独 ellipsis，计数不参与收缩。这些是**契约**，不是审美偏好。
+    """
+    with switcher_env():
+        long_name = "国际中文教育学术专著翻译质量评估体系构建研究（第二版）"
+        project = core.create_project(long_name)
+        at = _open_sidebar_switcher(
+            _project_page(state={"active_project_id": project["project_id"]}))
+        assert not at.exception, [e.value for e in at.exception]
+
+        css = _markdown_text(at)
+        panel = _css_rule(css, '\n[class*="switcher_panel"] {')
+        assert "box-sizing: border-box" in panel, panel
+        assert "width: 100%" in panel and "max-width: 100%" in panel, panel
+        assert "overflow-x: hidden" in panel, panel
+        assert "min-width: 0" in panel, panel
+
+        listing = _css_rule(css, '[class*="switcher_list"] {')
+        assert "overflow-x: hidden" in listing and "overflow-y: auto" in listing, listing
+        assert "max-width: 100%" in listing, listing
+
+        frame = _css_rule(css, '[class*="switcher_row_"] {')
+        assert "position: relative" in frame and "min-width: 0" in frame, frame
+
+        row = _css_rule(css, ".tp-switch-row {")
+        assert "max-width: 100%" in row and "min-width: 0" in row, row
+
+        # 完整项目名进的是**同一个** `.tp-switch-name`（视觉截断交给 CSS），
+        # 所以行 markup 不会因为名字长而多出节点。
+        block = _row_for(at, "国际中文教育")
+        assert block.count("tp-switch-name") == 1, block
+        assert block.count("<span") == 3, block  # check + name + count
+        # 内容确实落在侧栏里，而不是被推到主区域。
+        assert any("国际中文教育" in str(m.value) for m in at.sidebar.markdown), \
+            "行必须渲染在侧栏内"
+
+
+def test_project_list_scrolls_and_only_then_shows_search():
+    """项目多了：列表自己在区域内滚动，搜索框此时才出现。"""
+    with switcher_env():
+        for number in range(7):
+            core.create_project(f"滚动项目 {number}")
+        at = _open_sidebar_switcher(_project_page())
+        assert not at.exception, [e.value for e in at.exception]
+
+        # 搜索：达到阈值才出现，且它占的是列表**之外**的一行。
+        assert any(t.key == "project_switcher_query" for t in at.text_input)
+        assert len(_sidebar_rows(at)) == 8, "7 个真实项目 + Inbox"
+
+        css = _markdown_text(at)
+        listing = _css_rule(css, '[class*="switcher_list"] {')
+        assert "max-height" in listing, "列表高度必须受控"
+        assert "overflow-y: auto" in listing, "超出部分必须在列表内滚动"
+
+        # 底部动作在滚动区**之外**：项目再多也不会被推走。
+        footer = _find_in(at.sidebar, "project_switcher_footer")
+        assert footer is not None
+        assert _find_in(footer, "switcher_new_project") is not None or \
+            any(b.key == "switcher_new_project" for b in at.sidebar.button)
+
+    # 少于阈值时不放搜索框：它在侧栏里要占掉一整行。
+    with switcher_env():
+        core.create_project("就一个")
+        at = _open_sidebar_switcher(_project_page())
+        assert not any(t.key == "project_switcher_query" for t in at.text_input), \
+            "4 个以内的项目不需要搜索框"
+
+
+def test_switcher_has_no_standing_explainer_copy():
+    """switcher 只负责 switching，不负责产品教育：面板里不常驻说明文案。
+
+    「仅影响新任务」这类说明放在 selector 的 tooltip 与 New Task 正文里。
+    """
+    with switcher_env():
+        core.create_project("无文案项目")
+        at = _open_sidebar_switcher(_project_page())
+        assert not at.exception, [e.value for e in at.exception]
+
+        panel = _find_in(at.sidebar, "project_switcher_panel")
+        assert panel is not None
+        panel_captions = [str(c.value) for c in at.caption
+                          if "已有任务不会移动" in str(c.value)]
+        assert not panel_captions, f"面板里不得常驻说明文案：{panel_captions}"
+        body = _markdown_text(at)
+        assert "新任务将默认加入所选项目" not in body, "常驻说明必须移除"
+
+        # 说明没有丢，只是换到了 tooltip 上（selector 的 help）。
+        selector = _button(at, "current_project_selector")
+        assert "仅影响新任务" in (selector.help or ""), selector.help

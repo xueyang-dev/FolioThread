@@ -30,6 +30,99 @@ import core  # noqa: E402
 from make_scenario_fixtures import build_terminology_scenario  # noqa: E402
 from offline_provider import OfflineProvider  # noqa: E402
 from transpraxis import project as project_module  # noqa: E402
+from transpraxis.translation_memory import tm_record_language  # noqa: E402
+
+
+# ================= 翻译记忆的**语言身份**必须随载荷走 =================
+#
+# 这一组针对的是"同内容 ≠ 同本地化上下文"在**可移植资产**上的表现：
+# 导出/导入曾经只写 `{target, reviewed}`，把目标语言丢掉。语言当时只是
+# **碰巧**靠作用域键的前缀活下来——任何一次键重写都会静默抹掉它，而载荷
+# 是跨机器交换的文件，读方无从得知我们内部的分隔符约定。
+
+def _memory_payload(tm_block: dict, *, name: str = "导入来源") -> dict:
+    """最小合法载荷：用来直接驱动导入路径，模拟**旧版本**导出的文件。"""
+    return {
+        "format": project_module.MEMORY_FORMAT,
+        "format_version": project_module.MEMORY_FORMAT_VERSION,
+        "project": {"project_id": "legacy", "name": name, "description": ""},
+        "glossary": [], "glossary_versions": [], "style_rules": [],
+        "human_decisions": [], "promotion_log": [],
+        "translation_memory": tm_block,
+    }
+
+
+def test_export_carries_the_target_language_as_an_explicit_field():
+    """语言必须作为**显式字段**随载荷走，而不是只藏在键前缀里。"""
+    with project_env():
+        project = core.create_project("导出-语言字段")
+        tm = {}
+        core.tm_put(tm, "会议明天开始。", "The meeting starts tomorrow.", "简体中文")
+        core.save_tm(tm, project["project_id"])
+
+        payload = json.loads(core.export_project_memory(project["project_id"]))
+        block = payload["translation_memory"]
+        assert len(block) == 1, block
+        (key, record), = block.items()
+        assert record.get("target_lang") == "简体中文", \
+            f"导出必须显式带上目标语言，而不是只靠键前缀：{record!r}"
+        assert tm_record_language(key, record) == "简体中文"
+
+
+def test_translation_memory_language_survives_an_export_import_round_trip():
+    """同一原文的两种目标语言，导出再导入后必须各自仍然只命中自己。"""
+    with project_env():
+        source = "The canopy closure index was recomputed."
+        zh_target = "林冠郁闭指数被重新计算。"
+        fr_target = "L'indice de fermeture de la canopée a été recalculé."
+        project = core.create_project("往返-语言")
+        tm = {}
+        core.tm_put(tm, source, zh_target, "简体中文")
+        core.tm_put(tm, source, fr_target, "Français")
+        core.save_tm(tm, project["project_id"])
+
+        blob = core.export_project_memory(project["project_id"])
+        restored, report = core.import_project_memory(blob, name="往返-目标")
+        assert report["tm_added"] == 2, report
+
+        imported = core.load_tm(restored["project_id"])
+        zh, _ = core.tm_lookup(imported, source, target_lang="简体中文")
+        fr, _ = core.tm_lookup(imported, source, target_lang="Français")
+        assert zh and zh["target"] == zh_target, zh
+        assert fr and fr["target"] == fr_target, fr
+        other, _ = core.tm_lookup(imported, source, target_lang="Deutsch")
+        assert other is None, "第三种语言不得命中任何一条"
+
+
+def test_a_payload_without_any_language_imports_but_never_auto_matches():
+    """语言不可证明的旧载荷：条目保留（不丢数据），但不得产生任何自动命中。"""
+    with project_env():
+        restored, report = core.import_project_memory(
+            _memory_payload({"会议明天开始。": {"target": "X", "reviewed": True}}),
+            name="旧载荷-无语言")
+        assert report["tm_added"] == 1, "旧条目必须被保留，不能丢用户数据"
+
+        tm = core.load_tm(restored["project_id"])
+        assert len(tm) == 1
+        for language in ("简体中文", "Français", "English"):
+            hit, _ = core.tm_lookup(tm, "会议明天开始。", target_lang=language)
+            assert hit is None, f"无语言的旧条目不得被 {language} 自动命中"
+
+
+def test_a_payload_with_a_scoped_key_still_recovers_its_language():
+    """修复前的导出会把作用域键原样写进载荷：读方仍须能恢复语言。"""
+    with project_env():
+        restored, report = core.import_project_memory(
+            _memory_payload({"简体中文␟会议明天开始。": {
+                "target": "The meeting starts tomorrow.", "reviewed": True}}),
+            name="旧载荷-作用域键")
+        assert report["tm_added"] == 1, report
+
+        tm = core.load_tm(restored["project_id"])
+        hit, _ = core.tm_lookup(tm, "会议明天开始。", target_lang="简体中文")
+        assert hit and hit["target"] == "The meeting starts tomorrow.", hit
+        other, _ = core.tm_lookup(tm, "会议明天开始。", target_lang="Français")
+        assert other is None, "语言取自键前缀，不得放宽到其它语言"
 
 
 @contextmanager
@@ -418,6 +511,24 @@ def test_ui_promotion_moves_confirmed_terms_into_project_memory():
 SIGNAL = "Signal sentence about canopy structure and light competition."
 
 
+def _seed_tm(entries: dict, project_id=None, target_lang: str = "简体中文") -> dict:
+    """按**作用域键**写入记忆：条目的身份是「目标语言 + 原文」。
+
+    直接写 `{原文: 记录}` 只能造出"语言未知"的旧数据，那种条目按设计不参与
+    自动命中，用它来测"能命中"是测不出来的。
+    """
+    tm = core.load_tm(project_id)
+    for source, target in entries.items():
+        core.tm_put(tm, source, target, target_lang)
+    core.save_tm(tm, project_id)
+    return tm
+
+
+def _tm_entry(project_id, source: str, target_lang: str = "简体中文"):
+    """读取某条记忆（按目标语言作用域），不存在时返回 None。"""
+    return core.load_tm(project_id).get(core.tm_scope_key(target_lang, source))
+
+
 def _probe_doc(tmp: Path, name: str = "probe.docx") -> Path:
     from docx import Document as Docx
 
@@ -463,8 +574,7 @@ def test_project_memories_do_not_leak_between_projects():
         core.call_llm = OfflineProvider()
         project_a = core.create_project("project-a")
         project_b = core.create_project("project-b")
-        core.save_tm({SIGNAL: {"target": "【A项目记忆】林冠结构", "reviewed": True}},
-                     project_a["project_id"])
+        _seed_tm({SIGNAL: "【A项目记忆】林冠结构"}, project_a["project_id"])
         docx = _probe_doc(tmp)
 
         hit = _run_probe("probe-a", docx, project_a["project_id"])
@@ -486,17 +596,15 @@ def test_project_memories_do_not_leak_between_projects():
 def test_same_source_can_differ_between_projects():
     """同一个 source 在两个项目里可以有不同的已审校译文。
 
-    这正是"按项目分文件"而不是"单文件加 project_id 字段"的原因：记录以 source
-    为键，单文件无法同时表示两种译法。
+    这正是"按项目分文件"而不是"单文件加 project_id 字段"的原因：条目身份里
+    带着目标语言，同一份文件无法同时表示两个项目的不同译法。
     """
     with project_env() as tmp:
         core.call_llm = OfflineProvider()
         project_a = core.create_project("project-a")
         project_b = core.create_project("project-b")
-        core.save_tm({SIGNAL: {"target": "A 的译法", "reviewed": True}},
-                     project_a["project_id"])
-        core.save_tm({SIGNAL: {"target": "B 的译法", "reviewed": True}},
-                     project_b["project_id"])
+        _seed_tm({SIGNAL: "A 的译法"}, project_a["project_id"])
+        _seed_tm({SIGNAL: "B 的译法"}, project_b["project_id"])
         docx = _probe_doc(tmp)
 
         assert _run_probe("a", docx, project_a["project_id"])["pairs"][0]["target"] \
@@ -504,8 +612,8 @@ def test_same_source_can_differ_between_projects():
         assert _run_probe("b", docx, project_b["project_id"])["pairs"][0]["target"] \
             == "B 的译法"
         # 两份记忆各自保留自己的译法，互不覆盖
-        assert core.load_tm(project_a["project_id"])[SIGNAL]["target"] == "A 的译法"
-        assert core.load_tm(project_b["project_id"])[SIGNAL]["target"] == "B 的译法"
+        assert _tm_entry(project_a["project_id"], SIGNAL)["target"] == "A 的译法"
+        assert _tm_entry(project_b["project_id"], SIGNAL)["target"] == "B 的译法"
 
 
 def test_adopting_default_memory_is_explicit_and_merge_only():
@@ -632,14 +740,14 @@ def test_batch_move_does_not_move_terminology_or_overwrite_memory():
         project_b = core.create_project("project-b")
         state = core.new_job_state("t.docx")
         state["project_id"] = project_a["project_id"]
+        state["target_lang"] = "简体中文"
         state["glossary"] = [{**LOCKED, "id": "t1"}]
         state["paras"] = ["src"]
         state["pairs"] = [{"source": "s1", "target": "本项目译法", "reviewed": True},
                           {"source": "s2", "target": "t2", "reviewed": True}]
         core.save_job_state("t", state)
         # 目标项目已有 s1 的不同译法
-        core.save_tm({"s1": {"target": "目标项目译法", "reviewed": True}},
-                     project_b["project_id"])
+        _seed_tm({"s1": "目标项目译法"}, project_b["project_id"])
 
         result = core.assign_jobs_to_project(
             ["t"], project_b["project_id"], move_translations=True)
@@ -651,9 +759,25 @@ def test_batch_move_does_not_move_terminology_or_overwrite_memory():
             "移动不得丢弃任务自己的术语"
         assert core.load_project(project_b["project_id"])["glossary"] == [], \
             "移动不得自动把术语写进项目记忆（那要走 Memory gate）"
-        tm = core.load_tm(project_b["project_id"])
-        assert tm["s1"]["target"] == "目标项目译法", "不得覆盖目标项目已有译法"
-        assert tm["s2"]["target"] == "t2"
+        assert _tm_entry(project_b["project_id"], "s1")["target"] == "目标项目译法", \
+            "不得覆盖目标项目已有译法"
+        assert _tm_entry(project_b["project_id"], "s2")["target"] == "t2"
+
+
+def test_batch_move_skips_tm_when_task_language_is_unknown():
+    """任务没有可证明的目标语言时，移动**不迁移记忆**（不猜语言）。"""
+    with project_env():
+        project_a = core.create_project("project-a")
+        project_b = core.create_project("project-b")
+        state = core.new_job_state("t.docx")
+        state["project_id"] = project_a["project_id"]
+        state["pairs"] = [{"source": "s1", "target": "译法未知语言", "reviewed": True}]
+        core.save_job_state("t", state)
+
+        result = core.assign_jobs_to_project(
+            ["t"], project_b["project_id"], move_translations=True)
+        assert result["tm_added"] == 0, "语言未知的记忆不得落进目标项目"
+        assert core.load_tm(project_b["project_id"]) == {}
 
 
 def test_running_job_cannot_be_moved():
@@ -869,21 +993,130 @@ def test_tm_normalization_is_equivalence_not_similarity():
 
 def test_tm_lookup_prefers_exact_and_reports_normalized_hits():
     """精确命中优先；归一化命中必须被标注，便于审计。"""
-    tm = {"The canopy closure index was recomputed.":
-          {"target": "林冠郁闭指数被重新计算。", "reviewed": True}}
-    index = core.tm_index(tm)
+    tm = {}
+    core.tm_put(tm, "The canopy closure index was recomputed.",
+                "林冠郁闭指数被重新计算。", "简体中文")
+    index = core.tm_index(tm, "简体中文")
 
-    hit, kind = core.tm_lookup(tm, "The canopy closure index was recomputed.", index)
+    hit, kind = core.tm_lookup(
+        tm, "The canopy closure index was recomputed.", index,
+        target_lang="简体中文")
     assert kind == "exact" and hit["target"] == "林冠郁闭指数被重新计算。"
 
     hit, kind = core.tm_lookup(
-        tm, "The  canopy   closure index was recomputed.", index)
+        tm, "The  canopy   closure index was recomputed.", index,
+        target_lang="简体中文")
     assert kind == "normalized" and hit["target"] == "林冠郁闭指数被重新计算。"
 
     # 语义不同不得命中
     hit, kind = core.tm_lookup(
-        tm, "The canopy closure index was recomputed twice.", index)
+        tm, "The canopy closure index was recomputed twice.", index,
+        target_lang="简体中文")
     assert hit is None and kind == ""
+
+
+def test_tm_lookup_requires_a_target_language():
+    """没有目标语言上下文就不建立命中路径：作用域不可证明 = 不命中。"""
+    tm = {}
+    core.tm_put(tm, "The canopy closure index was recomputed.",
+                "林冠郁闭指数被重新计算。", "简体中文")
+    assert core.tm_lookup(tm, "The canopy closure index was recomputed.") == \
+        (None, "")
+    assert core.tm_index(tm) == {}
+
+
+# ================= 缺口：翻译记忆必须按目标语言隔离 =================
+
+
+def test_tm_reuse_requires_the_same_target_language():
+    """同项目 + 同原文 + 同目标语言可复用；换目标语言**绝不**复用。
+
+    这是发布阻断级的正确性约束：TM 是错误放大器，一次跨语言复用会以
+    "已审校"的名义复制到整篇文档，并静默通过交付检查。
+    """
+    with project_env():
+        source = "会议明天开始。"
+        project = core.create_project("隔离项目")
+        _seed_tm({source: "会议明天开始。"}, project["project_id"],
+                 target_lang="简体中文")
+
+        # 1) 同项目 + 同原文 + 同目标语言 -> 命中
+        tm = core.load_tm(project["project_id"])
+        hit, kind = core.tm_lookup(
+            tm, source, core.tm_index(tm, "简体中文"), target_lang="简体中文")
+        assert hit is not None and kind == "exact"
+        assert hit["target"] == "会议明天开始。"
+
+        # 2) 同项目 + 同原文 + 不同目标语言 -> 不命中
+        hit, kind = core.tm_lookup(
+            tm, source, core.tm_index(tm, "Français"), target_lang="Français")
+        assert hit is None and kind == "", "不得把中文译文复用到法语任务"
+
+        # 两种目标语言可以并存，互不覆盖
+        _seed_tm({source: "La réunion commence demain."}, project["project_id"],
+                 target_lang="Français")
+        tm = core.load_tm(project["project_id"])
+        assert core.tm_lookup(tm, source, target_lang="简体中文")[0]["target"] \
+            == "会议明天开始。"
+        assert core.tm_lookup(tm, source, target_lang="Français")[0]["target"] \
+            == "La réunion commence demain."
+
+
+def test_legacy_tm_without_language_never_auto_matches():
+    """语言无法证明的旧条目：保留在文件里，但永不产生自动命中。"""
+    with project_env():
+        source = "The canopy closure index was recomputed."
+        # 旧版写入形态：只有 target / reviewed，没有目标语言。
+        core.save_tm({source: {"target": "林冠郁闭指数被重新计算。",
+                               "reviewed": True}})
+        tm = core.load_tm()
+        assert tm, "旧条目不得被静默丢弃（不丢用户数据）"
+        assert core.tm_legacy_keys(tm) == [source], "必须能被识别为无作用域条目"
+
+        for lang in ("简体中文", "Français", "English", "", None):
+            hit, kind = core.tm_lookup(tm, source, target_lang=lang)
+            assert hit is None and kind == "", f"旧条目不得命中：{lang!r}"
+
+
+def test_legacy_tm_cannot_create_a_cross_language_pipeline_hit():
+    """端到端：无语言标注的旧记忆不得让另一种目标语言跳过翻译模型。"""
+    from docx import Document as Docx
+
+    with project_env() as tmp:
+        source = "The canopy closure index was recomputed."
+        core.save_tm({source: {"target": "林冠郁闭指数被重新计算。",
+                               "reviewed": True}})
+        document = Docx()
+        document.add_paragraph(source)
+        path = tmp / "legacy.docx"
+        document.save(str(path))
+        state = core.new_job_state(path.name)
+        core.save_job_state("legacy-tm", state)
+
+        calls = []
+
+        def llm(provider, api_key, model, system_prompt, user_prompt,
+                temperature=0.1):
+            calls.append(user_prompt)
+            return json.dumps(["Les travaux ont repris."])
+
+        original = core.call_llm
+        core.call_llm = llm
+        try:
+            result = core.run_job_pipeline(
+                "legacy-tm", path.name, path.read_bytes(),
+                provider="DeepSeek", api_key="k", model="m", target_lang="Français",
+                auto_term=False, enable_report=False, translation_theory="",
+                user_glossary=[], style_rules="", enable_review=True,
+                enable_annotate=False, use_tm=True,
+                delivery_config={"deliver_report": False})
+        finally:
+            core.call_llm = original
+
+        pair = result["pairs"][0]
+        assert pair.get("from_tm") is not True, \
+            "无语言标注的旧记忆不得被法语任务复用"
+        assert calls, "无法证明语言的旧记忆必须走翻译模型，而不是直接复用"
 
 
 def test_pipeline_reuses_typography_variant_and_records_match_kind():
@@ -893,8 +1126,8 @@ def test_pipeline_reuses_typography_variant_and_records_match_kind():
     with project_env() as tmp:
         core.call_llm = OfflineProvider()
         stored = "The canopy closure index was recomputed."
-        core.save_tm({stored: {"target": "林冠郁闭指数被重新计算。", "reviewed": True}},
-                     core.DEFAULT_PROJECT_ID)
+        _seed_tm({stored: "林冠郁闭指数被重新计算。"},
+                 core.DEFAULT_PROJECT_ID, target_lang="简体中文")
         document = Docx()
         document.add_paragraph("The  canopy   closure index was recomputed.")
         path = tmp / "variant.docx"

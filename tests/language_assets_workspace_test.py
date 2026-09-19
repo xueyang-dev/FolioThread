@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+import re
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -20,6 +21,39 @@ from transpraxis import assets as _assets
 from transpraxis import knowledge, language_assets, models
 
 ROOT = Path(__file__).resolve().parent.parent
+
+_STYLE_BLOCK = re.compile(r"<style>.*?</style>", re.S)
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+
+def _css_rules(css):
+    """把样式表切成 (选择器, 声明体) 列表。
+
+    **刻意不用正则切规则。** `([^{}]*)\\{` 这种写法在「有花括号的 CSS 后面跟着
+    一大段没有花括号的文本」时会退化成 O(n²)：正则要在每个起始位置把后面的字符
+    逐个回吐去找 `{`。而页面上注入的 markdown 恰好就是「CSS + 大段 HTML」这个形状，
+    实测足以把整个 AppTest 跑到像卡死一样。`str.split` 是线性的，而且同样能还原
+    「选择器跨行」与 `@media { … }` 里嵌套的规则。
+    """
+    parts = css.split("{")
+    return [(" ".join(parts[index - 1].rsplit("}", 1)[-1].split()),
+             parts[index].split("}", 1)[0])
+            for index in range(1, len(parts))]
+
+
+def _css_decl(css, selector, prop):
+    """取某条 CSS 规则的某个声明值（没有该规则 / 该声明则返回 None）。
+
+    * 同权重的多条规则取**最后**一条 —— 那才是级联里真正生效的。
+    * 选择器按空白折成单空格再比对，所以跨行的组合选择器不会被误当成别条规则。
+    """
+    clean = _CSS_COMMENT.sub("", css)
+    target = " ".join(selector.split())
+    bodies = [body for sel, body in _css_rules(clean) if sel == target]
+    if not bodies:
+        return None
+    match = re.search(rf"(?:^|;)\s*{re.escape(prop)}\s*:\s*([^;]+)", bodies[-1])
+    return match.group(1).strip() if match else None
 
 
 # ================= 夹具 =================
@@ -118,9 +152,23 @@ def _captions(at):
     return "\n".join(str(item.value) for item in at.caption)
 
 
-def _summary(at):
-    return next((item.value for item in at.markdown
-                 if '<div class="la-summary">' in item.value), "")
+def _page_markup(at):
+    """主区域的原始 HTML（AppTest 的 markdown 含注入的 <style>，做否定断言前要留意）。"""
+    return "\n".join(str(item.value) for item in at.markdown)
+
+
+def _page_content(at):
+    """剥掉注入的 `<style>` 之后的主区域 HTML。
+
+    必需的：样式表里含界面类名与文案（`.la-inspector-title`、注释里的说明文字），
+    不剥掉的话「某个元素不存在」这类否定断言会被 CSS 文本假性命中。
+    """
+    return _STYLE_BLOCK.sub("", _page_markup(at))
+
+
+def _tab_labels(at):
+    """一级 Tab 上的文案。计数就挂在这里，不再有另一行统计卡。"""
+    return list(at.segmented_control[0].options)
 
 
 # ================= 1. 纯投影层 =================
@@ -196,9 +244,25 @@ def test_tm_rows_do_not_invent_source_document_or_match_percentage():
                                      "updated_at": "2026-09-01T08:15:00+03:00"},
     })
     assert len(rows) == 1
-    assert set(rows[0]) == {"row_id", "source", "target", "updated_at",
-                            "reviewed", "source_chars"}, \
-        "翻译记忆行只暴露后端真正存下来的字段"
+    assert set(rows[0]) == {"row_id", "source", "target", "target_lang",
+                            "updated_at", "reviewed", "source_chars"}, \
+        "翻译记忆行只暴露后端真正存下来的字段（含作用域：目标语言）"
+    assert not rows[0]["target_lang"], \
+        "没有语言标注的旧条目必须如实显示为空，而不是猜一种语言"
+
+
+def test_tm_rows_split_the_scoped_key_into_source_and_target_language():
+    """记忆键是「目标语言 + 原文」；界面要看到原文与目标语言，而不是内部键。"""
+    tm = {}
+    core.tm_put(tm, "The point cloud matters.", "点云很重要。", "简体中文")
+    core.tm_put(tm, "The point cloud matters.", "Le nuage de points compte.",
+                "Français")
+    rows = language_assets.build_tm_rows(tm)
+    assert len(rows) == 2, "同一原文的两种目标语言是两条独立记忆"
+    assert {row["source"] for row in rows} == {"The point cloud matters."}
+    assert {row["target_lang"] for row in rows} == {"简体中文", "Français"}
+    assert language_assets.filter_tm(rows, target_lang="Français")[0]["target"] == \
+        "Le nuage de points compte."
 
 
 def test_tm_rows_drop_unreviewed_and_empty_entries():
@@ -316,8 +380,11 @@ def test_three_tabs_render_and_switch_without_exception():
         at = _app()
         assert not at.exception, [e.value for e in at.exception]
         assert at.segmented_control[0].value == "terms"
-        assert "la-summary" in _summary(at)
-        assert "术语库" in _captions(at) or True
+        labels = _tab_labels(at)
+        assert labels[0] == "术语库 1" and labels[2] == "待审核 1", labels
+        assert labels[1].startswith("翻译记忆"), labels
+        assert "la-summary" not in _page_markup(at), \
+            "统计卡行已经删除：计数只在 Tab 上出现一次"
 
         at.segmented_control[0].set_value("tm").run()
         assert not at.exception, [e.value for e in at.exception]
@@ -355,18 +422,178 @@ def test_library_navigation_clears_previous_setup_view_and_deep_links():
         assert "当前没有需要审核的候选内容" in linked_page
 
 
-def test_summary_strip_reports_real_counts_and_zero_conflicts():
-    jobs = [("lasum000000000001", _job(
-        "lasum000000000001", "Book A.docx",
-        glossary=[_term("point cloud", "点云")],
+def test_counts_live_on_the_primary_tabs_without_a_duplicate_stats_row():
+    """顶部统计卡与一级 Tab 表达的是同一件事，所以统计卡必须消失。
+
+    契约：真实计数一个都不能丢 —— 它们搬到 Tab 上；页面上也不再出现第二层
+    重复的计数（否则读者要来回比对两组数字）。
+    """
+    jobs = [("latabcount0000001", _job(
+        "latabcount0000001", "Book A.docx",
+        glossary=[_term("point cloud", "点云"), _term("drone", "无人机")],
         candidates=[_candidate("sensorium", "感知域")]))]
     with _Workspace(jobs):
         at = _app()
-        summary = _summary(at)
-        assert "术语" in summary and "翻译记忆" in summary
-        assert "待审核" in summary and "冲突" in summary
-        assert "<strong>1</strong>" in summary, summary
-        assert "冲突" in summary
+        assert not at.exception, [e.value for e in at.exception]
+        assert _tab_labels(at) == ["术语库 2", "翻译记忆 0", "待审核 1"], \
+            _tab_labels(at)
+        page = _page_content(at)
+        assert "la-summary" not in page and 'class="la-stat' not in page, \
+            "统计卡行必须真的删掉，而不是只改成不可见"
+
+
+def test_conflict_count_stays_inside_review_instead_of_becoming_a_fourth_view():
+    """「冲突」是待审核内部的一个状态维度，不是同级 view。
+
+    所以它不能升格成第四个 Tab（那会改变 view 的真实语义）；但它的计数也不能
+    丢 —— 非零时挂在待审核 Tab 上，结果行里再给出相对当前筛选的精确数字。
+    """
+    job_id = "laconflicttab000001"
+    with _Workspace([(job_id, _job(
+            job_id, "Book A.docx",
+            glossary=[_term("continuity", "连续性")],
+            candidates=[_candidate("continuity", "连贯性")]))]):
+        at = _app(session={"library_tab": "review"})
+        assert not at.exception, [e.value for e in at.exception]
+        labels = _tab_labels(at)
+        assert len(labels) == 3, f"「冲突」不是第四个 Tab：{labels}"
+        assert labels[2] == "待审核 1 · 冲突 1", labels
+        assert "其中冲突 1" in _captions(at)
+
+
+def test_new_term_is_a_page_level_primary_action_available_from_any_tab():
+    """「新建术语」不是筛选条件，所以它不是 filters 的一部分。"""
+    job_id = "lapageaction000001"
+    with _Workspace([(job_id, _job(job_id, "Book A.docx",
+                                   glossary=[_term("point cloud", "点云")]))]):
+        at = _app()
+        primary = [b for b in at.button if b.key == "la_new_term"]
+        assert len(primary) == 1, "新建术语只能有一个入口（页级主操作）"
+        assert primary[0].label == "+ 新建术语"
+        assert not primary[0].disabled
+
+        at.segmented_control[0].set_value("review").run()
+        assert not at.exception, [e.value for e in at.exception]
+        at.button(key="la_new_term").click().run()
+        assert not at.exception, [e.value for e in at.exception]
+        assert any(field.key == "la_new_term_source" for field in at.text_input), \
+            "从任何 Tab 都能打开新建术语对话框"
+
+
+def test_inspector_only_exists_while_a_row_is_selected():
+    """本轮最重要的契约：没有选中项时 Inspector 不得占用右栏宽度。
+
+    实现方式是「不渲染」—— 一张写着"点击左侧术语打开详情"的空卡片常驻下来，
+    就会永久吃掉主内容区约三分之一的宽度。
+    """
+    jobs = [("laondemand0000001", _job(
+        "laondemand0000001", "Book A.docx",
+        glossary=[_term("volumetric sensors", "体积传感器", occurrences=22)]))]
+    with _Workspace(jobs):
+        at = _app()
+        assert not any(b.key == "la_close_inspector" for b in at.button), \
+            "默认状态下没有详情面板"
+        assert '<p class="la-inspector-title">' not in _page_content(at)
+        assert "点击左侧术语名称打开详情" not in _page_content(at), \
+            "空提示卡不再常驻"
+
+        next(b for b in at.button if b.label.startswith("**volumetric")).click().run()
+        assert not at.exception, [e.value for e in at.exception]
+        assert any(b.key == "la_close_inspector" for b in at.button)
+        content = _page_content(at)
+        assert '<p class="la-inspector-title">' in content
+        assert '<p class="la-inspector-title">volumetric sensors</p>' in content
+        assert "推荐译法" in content and "使用次数" in content
+
+        at.button(key="la_close_inspector").click().run()
+        assert not at.exception, [e.value for e in at.exception]
+        assert not any(b.key == "la_close_inspector" for b in at.button), \
+            "关闭后必须回到整宽列表"
+        assert at.session_state["library_selected_row"] is None
+
+
+def test_advanced_filters_collapse_without_losing_effect_or_visibility():
+    """高级筛选默认收起，但收起 ≠ 失效，也 ≠ 不可发现。"""
+    jobs = [("laadvanced0000001", _job(
+        "laadvanced0000001", "Book A.docx",
+        glossary=[_term("locked term", "已锁定术语", status="locked"),
+                  _term("draft term", "暂定术语", status="provisional")]))]
+    with _Workspace(jobs):
+        at = _app()
+        assert 'st-key-la_terms_adv_panel"]{display:none;}' in _page_markup(at), \
+            "高级筛选默认收起，不再全部常驻"
+        assert at.button(key="la_terms_adv_toggle").label == "筛选"
+        assert "显示 2 / 2 条术语" in _captions(at)
+
+        at.button(key="la_terms_adv_toggle").click().run()
+        assert not at.exception, [e.value for e in at.exception]
+        assert 'st-key-la_terms_adv_panel"]{display:none;}' not in _page_markup(at)
+
+        at.selectbox(key="la_terms_status").set_value("已锁定").run()
+        assert not at.exception, [e.value for e in at.exception]
+        assert "显示 1 / 2 条术语" in _captions(at)
+        assert at.button(key="la_terms_adv_toggle").label == "筛选 · 1", \
+            "生效中的筛选数量要写在入口上，否则收起就丢可发现性"
+        assert any(b.key == "la_terms_clear_filters" for b in at.button), \
+            "有筛选生效时必须能一键清除"
+
+        at.button(key="la_terms_adv_toggle").click().run()   # 再点一次 = 收起
+        assert not at.exception, [e.value for e in at.exception]
+        assert 'st-key-la_terms_adv_panel"]{display:none;}' in _page_markup(at)
+        assert at.button(key="la_terms_adv_toggle").label == "筛选 · 1"
+        assert "显示 1 / 2 条术语" in _captions(at), "收起高级筛选不能等于丢掉筛选"
+
+        at.button(key="la_terms_clear_filters").click().run()
+        assert not at.exception, [e.value for e in at.exception]
+        assert "显示 2 / 2 条术语" in _captions(at)
+        assert at.button(key="la_terms_adv_toggle").label == "筛选"
+        assert not any(b.key == "la_terms_clear_filters" for b in at.button)
+
+
+def test_term_table_merges_low_priority_metadata_and_keeps_the_terms_on_top():
+    """释放右栏之后允许合并低优先级 metadata —— 但不许压掉业务信息。"""
+    jobs = [("lacolumns000000001", _job(
+        "lacolumns000000001", "Book A.docx",
+        glossary=[_term("volumetric sensors", "体积传感器", occurrences=22)]))]
+    with _Workspace(jobs):
+        at = _app()
+        page = _page_content(at)
+        assert '<div class="la-head">分类 · 作用域</div>' in page, \
+            "分类 / 作用域合并成一个 metadata cluster"
+        assert '<div class="la-head">分类</div>' not in page
+        assert '<div class="la-head">作用域</div>' not in page
+        assert 'class="la-cluster"' in page
+        assert "技术" in page and "本文档" in page, "合并后两个值都必须还在"
+        assert 'class="la-target">体积传感器<' in page, \
+            "推荐译法保持最高视觉优先级"
+
+
+def test_table_header_hairline_lands_below_the_labels_not_through_them():
+    """表头那条 hairline 不许穿过文字。
+
+    表头单元格是 `<div>`（没有 `<p>` 的段落边距），但 Streamlit 照样给每个
+    `stMarkdownContainer` 注入 `-16px` 下边距去补偿段落边距 —— 对 `<div>` 就是纯塌陷：
+    实测表头容器只剩 ~1.6px 高，于是挂在容器上的 `border-bottom` 被画到文字腰上，
+    看起来像横线把「术语 / 推荐译法 / …」划掉了。所以表头必须显式抵消这条注入边距。
+    """
+    HEAD_CELL = '[class*="st-key-la_head_row"] [data-testid="stMarkdownContainer"]'
+    with _Workspace([("lahead0000000001", _job(
+            "lahead0000000001", "Book A.docx",
+            glossary=[_term("volumetric sensors", "体积传感器")]))]):
+        css = _page_markup(_app())
+        assert _css_decl(css, HEAD_CELL, "margin-bottom") == "0", \
+            "表头单元格必须抵消 Streamlit 注入的 -16px 下边距，否则横线会穿过文字"
+        # 表头自己的下划线契约：线在容器底边，留 4px 让开文字。
+        assert _css_decl(css, '[class*="st-key-la_head_row"]', "border-bottom"), \
+            "表头的 hairline 仍然挂在表头容器上"
+        assert _css_decl(css, '[class*="st-key-la_head_row"]', "padding-bottom") == "4px", \
+            "hairline 与文字底部保留 4px"
+        # 反向：这次只修表头，不许顺手改掉行内密度（行高 47px 是本轮定下的）。
+        assert _css_decl(css, '[class*="st-key-la_row_"] [data-testid="stMarkdownContainer"]',
+                         "margin-bottom") is None, \
+            "行内单元格密度不在本次修复范围内"
+        assert _css_decl(css, '[class*="st-key-la_row_"]', "padding") == "8px", \
+            "行内 padding 不变"
 
 
 def test_terms_tab_search_and_scope_filter():
@@ -444,22 +671,23 @@ def test_inspector_opens_for_terms_tm_and_candidates():
         at = _app()
         next(b for b in at.button if b.label.startswith("**volumetric")).click().run()
         assert not at.exception, [e.value for e in at.exception]
-        page = "\n".join(m.value for m in at.markdown)
-        assert "la-inspector-title" in page
+        page = _page_content(at)
+        assert '<p class="la-inspector-title">' in page, \
+            "断言真实元素，不要断言类名文本（样式表里也有这个类名）"
         assert "推荐译法" in page and "使用次数" in page
         assert "提升为全局术语" in [b.label for b in at.button]
 
         at.segmented_control[0].set_value("tm").run()
         next(b for b in at.button if "The point cloud" in b.label).click().run()
         assert not at.exception, [e.value for e in at.exception]
-        page = "\n".join(m.value for m in at.markdown)
+        page = _page_content(at)
         assert "点云很重要。" in page
         assert "后端不记录来源文档" in _captions(at)
 
         at.segmented_control[0].set_value("review").run()
         next(b for b in at.button if "point cloud" in b.label).click().run()
         assert not at.exception, [e.value for e in at.exception]
-        page = "\n".join(m.value for m in at.markdown)
+        page = _page_content(at)
         assert "上下文" in page and "出现位置" in page
         assert "Chapter 5 · #2" in page
         assert "置信度" in page

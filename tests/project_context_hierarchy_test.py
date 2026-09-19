@@ -5,11 +5,11 @@
 - Project Context 只有一个来源：侧栏「项目」分组里的上下文 selector。
   它回答"我现在在哪个项目里工作"，点击展开一个**轻量下拉面板**（切换 / 搜索 /
   新建项目），并为新建的任务提供术语 / 翻译记忆 / 风格规则。
-- 「项目中心」在**同一个「项目」分组**里、紧邻 selector 之下，但权重更低：它是
-  Project Management（查看所有项目、新建 / 重命名 / 归档 / 删除），是**纯导航**
-  ——不做 project switching，也不改变当前上下文。「工作区」分组只放跨项目的资料
-  与全局设置，不混进 Project。把上下文留在顶部、管理入口埋进「工作区」，会被
-  读成两套系统——这正是本轮要消除的割裂感。
+- Project Center 在**同一个「项目」分组**里，入口就是**分组标题本身**（「项目」这一
+  行）：它是 Project Management（查看所有项目、新建 / 重命名 / 归档 / 删除），是
+  **纯导航**——不做 project switching，也不改变当前上下文。把它做成标题下面一个独立
+  行会让同一件事在同一个分组里出现两次、并与 selector 争视觉重量，因此已收敛。
+  「工作区」分组只放跨项目的资料与全局设置，不混进 Project。
 - 路由（`projects_route`：列表 / 某个项目）与上下文（`active_project_id`）是两件
   事：进管理页不抹掉上下文，侧栏 selector 因此在管理页上仍然显示"我在哪个项目"。
 - 新建任务页不再有第二个 Project Selector：它只**显示**当前上下文
@@ -87,7 +87,13 @@ def _css_rule(css, selector):
     """取出某条 CSS 规则的声明体（取**最后**一条同选择器规则）。
 
     「取最后一条」是硬要求：同权重下后者生效，取第一条会验到被覆盖的旧规则。
+    选择器带不带结尾的 ` {` 都可以 —— 漏归一化会把它拼成 `… button { {`，得到一句
+    "找不到规则"的假失败。匹配是**精确选择器**，所以 `… button` 不会误命中
+    `… button:hover` / `… button::after`。
     """
+    selector = selector.strip()
+    if selector.endswith("{"):
+        selector = selector[:-1].strip()
     for marker in ("\n" + selector + " {", selector + " {"):
         index = css.rfind(marker)
         if index != -1:
@@ -145,6 +151,21 @@ def _switch_to(at, project_id):
     return at
 
 
+def _job_created_for(filename):
+    """按源文件名找回刚创建的任务。
+
+    任务身份 = 文档身份 + 本地化上下文（项目 / 目标语言），见
+    `core.resolve_task_id`；它**不再等于文件内容哈希**。本文件验证的是归属，
+    因此按文件名定位，而不是硬编码一个哈希——那正是修复前的错误假设。
+    """
+    jobs = [job for job in core.list_jobs()
+            if str((job["state"] or {}).get("filename") or "") == filename]
+    assert len(jobs) == 1, "应恰好创建一个任务：" + repr(
+        [(j["job_id"], (j["state"] or {}).get("filename"))
+         for j in core.list_jobs()])
+    return jobs[0]
+
+
 def _expected_context_id(at):
     """按应用自己的规则算出"上下文应该是谁"，用来对照真实状态。"""
     if _state(at, "workspace_mode"):
@@ -176,57 +197,70 @@ def _assert_single_source_of_truth(at, where):
 
 
 def test_sidebar_project_group_holds_context_and_management():
-    """「项目」是一个分组：先上下文 selector，再更低权重的「项目中心」。"""
+    """「项目」是一个分组：分组标题即 Project Center 入口，下面是上下文 selector。"""
     with ctx_env():
         at = _project_page()
         assert not at.exception, [e.value for e in at.exception]
         nav = [re.sub(r"<[^>]+>", "", value) for value in _sidebar_nav_labels(at)]
-        assert nav == ["项目", "工作区"], nav
-        # 旧口径：「项目上下文」自成一栏、管理入口埋在「工作区」里 —— 两者都被取代。
+        # 「项目」不再是纯标题（它是 Project Center 导航入口），所以只剩「工作区」。
+        assert nav == ["工作区"], nav
         assert not any("项目上下文" in value for value in nav), nav
         assert not any("当前项目" in value for value in nav), nav
         buttons = _sidebar_button_labels(at)
-        assert "项目中心" in buttons, buttons
-        assert "项目" not in buttons, f"「项目」是分组标题，不是按钮：{buttons}"
-        # 同组相邻：「项目中心」紧贴 selector 之下，并在「工作区」那三项之前。
-        index = buttons.index("项目中心")
-        assert buttons[index - 1].startswith("未选择项目"), \
-            f"「项目中心」必须紧邻上下文 selector：{buttons}"
+        assert "项目" in buttons, buttons
+        # Project Center 的入口收敛到标题上：不再有独立的「项目中心」行。
+        assert "项目中心" not in buttons, f"独立「项目中心」行必须退休：{buttons}"
+        # 同组相邻：标题在上、selector 紧随其后，整组都在「工作区」那三项之前。
+        index = buttons.index("项目")
+        assert buttons[index + 1].startswith("未选择项目"), \
+            f"上下文 selector 必须紧邻分组标题：{buttons}"
         assert index < buttons.index("历史任务"), \
-            f"「项目中心」不能混进「工作区」分组：{buttons}"
+            f"「项目」分组不能混进「工作区」分组：{buttons}"
 
 
-def test_project_center_is_a_subordinate_entry_not_a_second_primary():
-    """selector 是主控件；「项目中心」是它下面的次级入口——高度 / 底色 / 字重都更低。"""
+def test_project_center_header_is_lighter_than_the_selector():
+    """selector 是主控件；Project Center 入口是**分组标题**——高度 / 字号 / 字重更低，
+    且是标题字型（无底色、无卡片），不是第二颗按钮。"""
     with ctx_env():
         at = _project_page()
         css = _markdown_text(at)
-        selector = _css_rule(css, ".st-key-current_project .stButton button")
-        entry = _css_rule(css, '[class*="st-key-project_center_entry"] .stButton button')
-        # selector：填充底 + 42px + 650 字重（"我在哪个项目里工作"的主控件）。
-        assert "background: var(--tp-primary-soft)" in selector, selector
-        assert "min-height: 42px" in selector, selector
-        assert "font-weight: 650" in selector, selector
-        # 「项目中心」：扁平行 —— 透明底、36px、500 字重。
-        assert "background: transparent" in entry, entry
-        assert "min-height: 36px" in entry, entry
-        assert "font-weight: 500" in entry, entry
-        assert "min-height: 42px" not in entry, entry
-        # 当前页标记只加中性面 + 竖条，绝不复制 selector 的填充控件观感。
+        selector = _css_rule(
+            css, '[class*="st-key-current_project_selector"] .stButton button')
+        head = _css_rule(
+            css, '[class*="st-key-project_section_header"] .stButton button')
+        # selector：中性 surface + 1px 细边 + 46px + 11px 圆角（主控件，但不抢 CTA）。
+        assert "background: var(--tp-surface)" in selector, selector
+        assert "min-height: 46px" in selector, selector
+        assert "border-radius: 11px" in selector, selector
+        assert "font-weight: 600" in selector, selector
+        # 标题：透明底、17px、500 字重，与「工作区」那种纯标题同一套字型、同一条基线。
+        assert "background: transparent" in head, head
+        assert "min-height: 17px" in head, head
+        assert "font-size: 12px" in head, head
+        assert "font-weight: 500" in head, head
+        assert "justify-content: flex-start" in head, head
+        assert "min-height: 46px" not in head, head
+        assert "cursor: pointer" in head, head
+        # 导航 affordance 只有右侧一个 chevron。
+        arrow = _css_rule(
+            css, '[class*="st-key-project_section_header"] .stButton button::after {')
+        assert 'content: "›"' in arrow, arrow
+        # 当前页态只升文字色 + chevron 上色，绝不复制 selector 的填充控件观感。
         current = _css_rule(
-            css, ".st-key-project_center_entry:has(.tp-nav-current) .stButton button")
+            css,
+            '[class*="st-key-project_section_header"]:has(.tp-nav-current) .stButton button {')
         assert "--tp-primary-soft" not in current, current
-        assert "inset 3px 0 var(--tp-primary)" in current, current
+        assert "color: var(--tp-brand-ink)" in current, current
 
 
 def test_project_center_current_marker_shows_only_on_the_list_page():
-    """同组里"你在这儿"只亮一次：列表页亮在项目中心，项目详情亮在 selector。"""
+    """同组里"你在这儿"只亮一次：列表页亮在分组标题上，项目详情亮在 selector。"""
     with ctx_env():
         project = core.create_project("标记项目")
 
         listing = _project_page()
         assert '<span class="tp-nav-current"' in _sidebar_text(listing), \
-            "停在项目列表页时，「项目中心」必须带当前页标记"
+            "停在项目列表页时，「项目」标题必须带当前页标记"
 
         detail = _project_page(state={"active_project_id": project["project_id"]})
         assert not detail.exception, [e.value for e in detail.exception]
@@ -249,7 +283,7 @@ def test_project_center_does_not_switch_the_context():
         at = _switch_to(_project_page(), project["project_id"])
         assert _state(at, "active_project_id") == project["project_id"]
 
-        next(b for b in at.sidebar.button if b.label == "项目中心").click()
+        at.button(key="project_section_header_button").click()
         at.run()
         assert not at.exception, [e.value for e in at.exception]
         assert _state(at, "app_view") == "projects"
@@ -288,12 +322,13 @@ def test_context_selector_is_one_compact_control_in_both_states():
         at = _project_page()
         css = _markdown_text(at)
         rule = css.split(
-            ".st-key-current_project:has(.tp-nav-empty) .stButton button {")
+            ".st-key-current_project:has(.tp-nav-empty) "
+            '[class*="st-key-current_project_selector"] .stButton button {')
         assert len(rule) > 1, "必须有未选中态的 selector 规则"
         body = rule[1].split("}")[0]
         assert "dashed" not in body, "未选中态不再使用大面积虚线卡片"
         # 两种状态共用同一个容器与同一条高度基线（compact）。
-        assert "min-height: 42px" in body, body
+        assert "min-height: 46px" in body, body
 
 
 # ================= 2. 新建任务：只读上下文，不再有第二个选择器 =================
@@ -400,7 +435,6 @@ def test_creating_a_task_without_a_project_lands_in_uncategorized():
     with ctx_env() as tmp:
         _write_provider_config(tmp)
         data = b"docx-without-context"
-        job_id = core.file_job_id(data)
         at = _new_task_page()
         assert _state(at, "task_project_id") == core.system_project_id()
         with _stubbed_worker():
@@ -411,6 +445,7 @@ def test_creating_a_task_without_a_project_lands_in_uncategorized():
             next(b for b in at.button if b.label == "开始任务").click()
             at.run()
             assert not at.exception, [e.value for e in at.exception]
+        job_id = _job_created_for("solo.docx")["job_id"]
         loaded = core.load_job_state(job_id)
         assert loaded["project_id"] is None, "未选择项目时必须写入显式 null"
         assert core.resolved_project_id(loaded) == core.system_project_id()
@@ -423,7 +458,6 @@ def test_creating_a_task_inherits_the_selected_project_context():
         _write_provider_config(tmp)
         project = core.create_project("沙特教材本地化")
         data = b"docx-with-context"
-        job_id = core.file_job_id(data)
         at = _switch_to(_new_task_page(), project["project_id"])
         assert _state(at, "task_project_id") == project["project_id"]
         with _stubbed_worker():
@@ -433,6 +467,7 @@ def test_creating_a_task_inherits_the_selected_project_context():
             next(b for b in at.button if b.label == "开始任务").click()
             at.run()
             assert not at.exception, [e.value for e in at.exception]
+        job_id = _job_created_for("p.docx")["job_id"]
         loaded = core.load_job_state(job_id)
         assert core.resolved_project_id(loaded) == project["project_id"]
         assert [job["job_id"] for job in
@@ -498,7 +533,7 @@ def test_entering_a_project_from_the_project_center_sets_the_context():
     with ctx_env():
         project = core.create_project("从中心进入")
         at = _project_page()
-        next(b for b in at.sidebar.button if b.label == "项目中心").click()
+        at.button(key="project_section_header_button").click()
         at.run()
         at.button(key=f"project_open_{project['project_id']}").click()
         at.run()
@@ -551,7 +586,7 @@ def test_task_membership_never_diverges_across_navigation():
         _assert_single_source_of_truth(at, "进入新建任务后")
         at = _switch_to(at, other["project_id"])
         _assert_single_source_of_truth(at, "流程内切换后")
-        next(b for b in at.sidebar.button if b.label == "项目中心").click()
+        at.button(key="project_section_header_button").click()
         at.run()
         _assert_single_source_of_truth(at, "进入项目中心后")
         next(b for b in at.sidebar.button if b.label == "历史任务").click()

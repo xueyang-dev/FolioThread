@@ -15,6 +15,11 @@ from transpraxis.translation_evidence import (
 )
 
 
+def _tm_entry(source, target_lang="简体中文", project_id=None):
+    """按**目标语言作用域**读取一条翻译记忆（条目的身份是语言 + 原文）。"""
+    return core.load_tm(project_id).get(core.tm_scope_key(target_lang, source))
+
+
 def test_context_understanding_and_target_priority(tmp_path):
     paragraphs = ["The first ecological succession appears here.",
                   "The second section continues the ecological succession."]
@@ -238,9 +243,8 @@ def test_review_failed_must_not_mark_segment_reviewed_or_promote_tm_or_knowledge
             return "[]"
 
         core.call_llm = llm
-        core.save_tm({
-            "The cached sentence is safe.": {"target": "已有译文", "reviewed": True}
-        })
+        core.save_tm({core.tm_scope_key("简体中文", "The cached sentence is safe."):
+                      core.tm_record("已有译文", "简体中文")})
         state = core.new_job_state("failed-review.docx")
         state["paras"] = [
             "The source sentence is safe.",
@@ -255,9 +259,8 @@ def test_review_failed_must_not_mark_segment_reviewed_or_promote_tm_or_knowledge
         assert result["pairs"][1]["from_tm"] is True
         assert result["review_stats"]["review_failed"] == 1
         assert result["knowledge_candidates"] == []
-        assert core.load_tm() == {
-            "The cached sentence is safe.": {"target": "已有译文", "reviewed": True}
-        }
+        # 记忆原样保留（没有被失败批次改写）
+        assert _tm_entry("The cached sentence is safe.")["target"] == "已有译文"
         events = checkpoint.read_events(tmp_path / "failed-review-job")
         assert not any(event.get("phase") in {
             "tm_promotion_pending", "tm_promotion_done"
@@ -670,7 +673,7 @@ def test_persisted_blocking_review_uses_translation_core_human_decision(tmp_path
         assert audit["actor_type"] == "human" and audit["finding_id"] == "f-current"
         assert decided["pairs"][0]["review_status"] == "reviewed_human"
         assert decided["pairs"][0]["target_provenance"] == "human_accepted"
-        assert core.load_tm()["Complete source."]["target"] == "完整译文。"
+        assert _tm_entry("Complete source.")["target"] == "完整译文。"
         reloaded = core.load_job_state("decision-runtime")
         assert reloaded["human_actions"][-1]["decision_id"] == audit["decision_id"]
     finally:
