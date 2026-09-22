@@ -94,7 +94,29 @@ def _base(job_id, filename, count=3, *, review_required=False, report=False,
             "provider": "DeepSeek",
             "model": "audit-model",
             "target_lang": "简体中文",
+            "auto_term": False,
+            "enable_report": report,
+            "enable_review": review_required,
+            "enable_annotate": False,
+            "use_tm": True,
+            "translation_theory": "",
+            "style_rules": "正式书面语",
         },
+        # 真实任务经 run_job_pipeline 一定会带上这些顶层字段。fixture 以前缺它们，
+        # 于是完成判定（依赖 enable_annotate 等）与交付就绪判断会得出与实际不同的
+        # 结论，导出截图因此比真实情况杂乱。
+        "provider": "DeepSeek",
+        "model": "audit-model",
+        "enable_report": report,
+        "enable_review": review_required,
+        "enable_annotate": False,
+        "use_tm": True,
+        "annotations_done": False,
+        "quality_mode": False,
+        "stage": "TRANSLATED" if reviewed else "TRANSLATING",
+        "style_rules": "正式书面语",
+        "glossary_versions": [],
+        "project_id": core.DEFAULT_PROJECT_ID,
         "translator_config": {"provider": "DeepSeek", "model": "audit-model"},
         "delivery_config": core.default_delivery_config(),
     })
@@ -360,13 +382,61 @@ def _report_state(job_id, filename, *, stale=False, qa="unfinished", cases_pendi
     return state
 
 
-def _save(job_id, state):
+def _runtime_for(state, *, completed=None, completed_units=None, total_units=None):
+    """与业务状态一致的运行状态。
+
+    真实任务都会留下 runtime_state.json。fixture 以前完全不写，于是运行时状态
+    只能靠推断，审计截图里的运行面板会显示与业务状态无关的内容
+    （例如已完成任务却出现「继续处理」）。
+    """
+    if completed is None:
+        completed = core._runtime_business_complete(state)
+    changes = {
+        "status": "completed" if completed else "idle_incomplete",
+        "phase": "completed" if completed else "idle_incomplete",
+        "phase_label": "已完成" if completed else "尚未完成",
+        "started_at": FIXED_AT,
+        "last_heartbeat_at": FIXED_AT,
+        "last_progress_at": FIXED_AT,
+        "last_event": "fixture",
+    }
+    if total_units:
+        changes.update(completed_units=completed_units or 0,
+                       total_units=total_units,
+                       overall_progress=(completed_units or 0) / total_units)
+    return changes
+
+
+def _save(job_id, state, *, runtime=None):
+    if runtime is None:
+        runtime = _runtime_for(state)
     core.save_job_state(job_id, state)
     core.save_source(job_id, b"FolioThread synthetic UI audit source")
+    core.update_runtime_state(job_id, **runtime)
+
+
+def warn_about_target():
+    """明确告知本脚本会覆盖什么。
+
+    它会就地改写 `ui-audit-*` 任务目录，并**替换全局翻译记忆
+    （outputs/translation_memory.json）**。审计包的做法是事后手工恢复
+    outputs/；这里把这个事实打印出来，避免静默覆盖真实数据。
+    """
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    others = sorted(p.name for p in OUTPUT.iterdir()
+                    if p.is_dir() and not p.name.startswith("ui-audit-"))
+    tm = OUTPUT / "translation_memory.json"
+    if others:
+        print(f"[提示] {OUTPUT} 下还有 {len(others)} 个非 fixture 任务目录"
+              f"（{', '.join(others[:3])}{'…' if len(others) > 3 else ''}）；"
+              "本脚本不会改动它们。")
+    if tm.is_file():
+        print(f"[提示] 本脚本会替换全局翻译记忆 {tm}；"
+              "如需保留，请先备份或改到临时目录运行。")
 
 
 def main():
-    OUTPUT.mkdir(parents=True, exist_ok=True)
+    warn_about_target()
     (OUTPUT / ".onboarded").touch()
     core.OUTPUT_DIR = OUTPUT
 
@@ -379,7 +449,10 @@ def main():
                         "stage": "TRANSLATING", "glossary_frozen": {
                             "version": 1, "entries": [], "frozen_at": FIXED_AT,
                         }})
-    _save("ui-audit-in-progress", in_progress)
+    # 进行中的任务：运行面板应显示真实进度，而不是 "checkpoint 0 / —"
+    _save("ui-audit-in-progress", in_progress,
+          runtime=_runtime_for(in_progress, completed=False,
+                               completed_units=2, total_units=4))
 
     clean = _reviewed_state("ui-audit-clean", "audit-clean-review.docx", count=3)
     clean["glossary"] = [{
@@ -497,5 +570,35 @@ def main():
     }, ensure_ascii=False, indent=2))
 
 
+def self_check():
+    """fixture 必须与真实任务一致，否则审计截图会误导。
+
+    重点：**已完成**的任务不允许被判定为未完成——否则概览会渲染运行面板
+    （worker / lease / checkpoint）并出现「继续处理」，让截图看起来比真实情况
+    杂乱。这里把它变成脚本自身的失败，而不是靠人工事后发现。
+    """
+    problems = []
+    # 只检查本脚本生成的 fixture：`outputs/` 里可能还有用户真实任务，它们的
+    # "worker 跑完了"与"业务全部完成"本来就可以不同，不属于 fixture 的问题。
+    for job_dir in sorted(p for p in OUTPUT.iterdir()
+                          if p.is_dir() and p.name.startswith("ui-audit-")):
+        state = core.load_job_state(job_dir.name)
+        if state is None:
+            continue
+        business = core._runtime_business_complete(state)
+        status = core.build_job_runtime_view(job_dir.name, state).get("runtime_status")
+        expected = "completed" if business else "idle_incomplete"
+        if status != expected:
+            problems.append(f"{job_dir.name}: runtime={status} 但业务完成={business}")
+        if business and status not in {None, "idle", "completed"}:
+            problems.append(f"{job_dir.name}: 已完成任务会渲染运行面板")
+    if problems:
+        raise SystemExit("fixture 自检失败：\n  " + "\n  ".join(problems))
+    count = len([p for p in OUTPUT.iterdir()
+                 if p.is_dir() and p.name.startswith("ui-audit-")])
+    print(f"fixture 自检通过：{count} 个 fixture 的运行状态与业务状态一致")
+
+
 if __name__ == "__main__":
     main()
+    self_check()

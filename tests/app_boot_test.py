@@ -71,9 +71,9 @@ def main():
         assert at.session_state["app_view"] == "new" \
             and not at.session_state["workspace_mode"], \
             "打开应用时应进入新建任务初始页，未完成任务从历史任务进入"
-        assert any("FolioThread" in m.value and "Long-document Translation Workspace" in m.value
+        assert any("FolioThread" in m.value and "Agentic Translation Workspace" in m.value
                    for m in at.sidebar.markdown), \
-            "侧栏应显示 FolioThread 长文档翻译工作空间品牌"
+            "侧栏应显示 FolioThread 智能体翻译工作台品牌"
         assert any("tp-provider is-unverified" in m.value for m in at.sidebar.markdown), \
             "未经连接测试的 Provider 不应显示绿色已连接状态"
         assert any("新建翻译任务" in m.value for m in at.markdown), \
@@ -88,9 +88,11 @@ def main():
             "新建任务应表现为独立创建动作，不应与当前步骤使用同一语义"
         assert any(s.label == "目标语言" for s in at.selectbox), \
             "目标语言选择框应紧邻文档输入"
-        assert any(b.label == "添加术语库" for b in at.button), \
-            "术语库应使用添加附件按钮，不应使用开关"
-        assert not at.toggle, "首屏不应以 Toggle 表达术语库附件操作"
+        assert any(b.label == "添加" for b in at.button), \
+            "术语库应使用轻量添加附件按钮"
+        profile_toggle = next(c for c in at.toggle if c.label == "自动分析")
+        assert profile_toggle.value is True, \
+            "智能画像默认应开启自动分析"
         assert next(b for b in at.button if b.label == "下一步").disabled, \
             "未上传原文时下一步必须禁用"
         next(b for b in at.sidebar.button if b.label == "02  翻译策略").click()
@@ -120,49 +122,32 @@ def main():
             "同一时刻只能显示一个文件状态"
         at.session_state["source_parse_state"] = "parsed"
         at.run()
-        assert any("文件已就绪" in m.value and "tp-source-ready" in m.value
+        assert any("已就绪" in m.value and "tp-source-ready" in m.value
                    for m in at.markdown), \
-            "解析完成后应切换到文件已就绪"
-        entry_btn = next(b for b in at.button if b.label == "开始智能画像")
-        assert entry_btn.icon == ":material/auto_awesome:", \
-            "智能画像入口应自带智能图标"
-        assert not any("智能风格建议" in m.value for m in at.markdown), \
-            "初始状态不展示风格建议卡，点击后才出现"
-        entry_btn.click()
+            "解析完成后应切换到单一的已就绪状态"
+        assert not any(b.label == "开始智能画像" for b in at.button), \
+            "智能画像不应暴露独立的手动启动按钮"
+        assert any("待下一步分析" in m.value for m in at.markdown), \
+            "智能画像卡应明确说明将在下一步自动分析"
+        next(b for b in at.button if b.label == "下一步").click()
         at.run()
-        assert at.status and "风格" in at.status[0].label, \
-            "智能画像执行时应显示进度状态，而不是白屏"
-        assert any("API 凭据未配置" in w.value and "无法自动画像" in w.value
-                   for w in at.warning), \
-            "API 凭据未配置时画像应降级并给出明确提示"
-        assert any("无法完成自动画像" in m.value for m in at.markdown), \
-            "画像失败后应确定性降级为通用风格，而不是伪造推荐"
-        assert any(b.label == "前往配置 API Key" for b in at.button), \
+        assert at.session_state["task_step"] == 1, \
+            "画像失败时应停留在文档步骤，等待用户处理"
+        assert any("自动分析未完成" in c.value for c in at.caption), \
+            "画像失败时应在紧凑设置卡内给出明确且可恢复的提示"
+        assert any(b.label == "配置 API Key" for b in at.button), \
             "API 凭据未配置时应提供前往配置入口"
         assert any(b.label == "重试" for b in at.button), \
-            "降级结果应允许重试"
-        next(b for b in at.button if b.label == "调整").click()
+            "画像失败后应允许重试"
+        next(c for c in at.toggle if c.label == "自动分析").set_value(False)
         at.run()
-        assert any(r.label == "基础风格" for r in at.radio), \
-            "风格调整面板应显示基础风格单选项"
-        assert all(any(s.label == label for s in at.slider) for label in (
-            "表达正式度", "句法重构幅度", "术语保守程度", "原文形式保留")), \
-            "风格调整面板应显示四个可调参数"
-        next(b for b in at.button if b.label == "应用风格").click()
+        next(b for b in at.button if b.label == "下一步").click()
         at.run()
-        assert at.session_state["style_selection"]["source"] == "user_override", \
-            "应用风格后应记录为用户覆盖"
-        next(b for b in at.button if b.label == "重试").click()
-        at.run()
-        assert any(b.label == "前往配置 API Key" for b in at.button), \
-            "重试后仍未配置引擎时继续提供配置引导"
-        next(b for b in at.button if b.label == "前往配置 API Key").click()
-        at.run()
-        assert at.session_state["app_view"] == "settings", \
-            "前往配置应跳转到 AI 引擎设置页"
+        assert at.session_state["task_step"] == 2, \
+            "关闭自动画像后可继续进入翻译策略"
         next(b for b in at.sidebar.button if b.label == "新建任务").click()
         at.run()
-        remove_source = next(b for b in at.button if b.label == "移除原文")
+        remove_source = next(b for b in at.button if b.label == "删除")
         assert remove_source.icon == ":material/delete_outline:", \
             "低频移除操作应收进文件卡并使用轻量图标"
         assert any("已保存" in m.value for m in at.markdown), \
@@ -188,14 +173,18 @@ def main():
                     if b.label == "01  文档与画像").icon == \
             ":material/check_circle:", "完成步骤应使用完成状态节点"
         assert all(any(text in m.value for m in at.markdown) for text in (
-            "快速生成可读初稿", "兼顾质量与效率", "适合需要研究过程材料的任务",
+            "适合快速产出可读初稿", "适合大多数正式翻译任务",
+            "适合论文、报告及需要证据追踪的材料", "深度研究",
             "翻译 → 基础检查", "术语增强 → 翻译 → 基础检查",
             "全文理解 → 术语治理 → 翻译 → 独立审校 → 研究证据",
-            "最快", "成本最低", "术语更一致", "成本适中", "专用能力", "耗时较长",
+            "包含", "速度", "成本", "审校深度", "高", "中", "低", "基础", "深度",
             "推荐")), \
-            "三个预设必须直接说明工作流、取舍与推荐项"
-        assert any("tp-preset-tag" in m.value for m in at.markdown), \
-            "预设卡片应使用紧凑标签而不是长句描述"
+            "三个预设必须直接说明结果预期、工作流、三项取舍与推荐项"
+        assert any("tp-preset-metric" in m.value for m in at.markdown), \
+            "预设卡片应使用统一的速度、成本、审校指标"
+        assert any("高级设置 · 可选" in m.value and "默认配置" in m.value
+                   for m in at.markdown), \
+            "折叠的高级设置应保留可选提示与默认配置摘要"
         assert not any("自动术语 · 翻译记忆" in m.value for m in at.markdown), \
             "折叠的高级设置不应在右侧展示配置摘要，展开后再看内容"
         next(b for b in at.button if b.label == "切换高级设置").click()
@@ -211,29 +200,33 @@ def main():
         strict_toggle = next(c for c in at.toggle if c.label == "审核并冻结候选术语")
         strict_toggle.set_value(True)
         at.run()
-        assert any("标准 · 已调整" in m.value for m in at.markdown), \
-            "修改预设后必须明确显示已调整"
+        assert any("标准 · 已调整 1 项" in m.value for m in at.markdown) \
+            and any("已自定义 1 项" in m.value for m in at.markdown), \
+            "修改预设后折叠条应显示自定义项数"
         next(b for b in at.button if b.label == "选择标准预设").click()
         at.run()
         assert not any("标准 · 已调整" in m.value for m in at.markdown), \
             "恢复标准预设后应恢复默认配置状态"
+        next(b for b in at.button if b.label == "选择深度研究预设").click()
+        at.run()
         next(b for b in at.button if b.label == "下一步").click()
         at.run()
         assert at.session_state["task_step"] == 3, "翻译策略完成后可进入输出设置"
-        assert all(any(c.label == label for c in at.toggle) for label in (
-            "重点标注版", "生成实践报告")), "重点标注与报告应归入输出步骤"
+        assert all(any(c.label == label for c in at.checkbox) for label in (
+            "标记术语与翻译难点", "翻译实践报告")), \
+            "重点标注与报告应归入输出步骤"
         assert not any(s.label == "译文风格" for s in at.selectbox), \
             "风格选择已移入 Step 01 画像流程，交付页不再出现风格下拉"
         assert all(any(c.label == label for c in at.checkbox) for label in (
-            "纯译文 DOCX", "双语对照 DOCX", "PDF 译文",
-            "术语表 XLSX", "TBX", "TMX", "JSONL")), \
+            "纯译文", "双语对照", "术语表", "翻译记忆",
+            "标准术语库", "结构化数据")), \
             "交付页应按 译文/语言资产 分组提供交付格式勾选"
         assert not any("风格与保留规则" in (t.label or "")
                        for t in at.text_area), \
             "交付页不应暴露可编辑风格规则"
         assert not any(s.label == "理论框架" for s in at.selectbox), \
             "实践报告关闭时不应显示理论框架"
-        next(c for c in at.toggle if c.label == "生成实践报告").set_value(True)
+        next(c for c in at.checkbox if c.label == "翻译实践报告").set_value(True)
         at.run()
         assert any(s.label == "理论框架" and s.value == "自动推荐（建议）"
                    for s in at.selectbox), \
@@ -259,7 +252,7 @@ def main():
         at.run()
         assert at.session_state["task_step"] == 4, "输出设置完成后可进入确认运行"
         assert all(any(text in m.value for m in at.markdown) for text in (
-            "任务配置", "将生成", "运行环境", "双语译文", "翻译实践报告")), \
+            "任务配置", "将生成", "运行环境", "双语对照", "翻译实践报告")), \
             "确认页应分别汇总配置、交付物与运行环境"
         confirmation_html = "\n".join(
             m.value for m in at.markdown if "tp-confirm-stack" in m.value)
@@ -275,7 +268,9 @@ def main():
 
         # Provider 设置是独立页面，模型目录仍按 A-Z 排序并支持中转站。
         at.session_state["model_choice_DeepSeek"] = "deepseek-chat"
-        next(b for b in at.sidebar.button if b.label == "设置").click()
+        # AI Engine 管理入口**只有一个**：贴底 status module 上的「管理」。
+        # 「工作区」分组里的独立「设置」行已退休（它是同一个页面的重复入口）。
+        next(b for b in at.sidebar.button if b.label == "管理").click()
         at.run()
         assert not at.exception, f"打开设置页异常：{at.exception}"
         engine_select = next(s for s in at.selectbox if s.label == "服务商")
@@ -293,7 +288,7 @@ def main():
         at.run()
         next(b for b in at.sidebar.button if b.label == "新建任务").click()
         at.run()
-        next(b for b in at.sidebar.button if b.label == "设置").click()
+        next(b for b in at.sidebar.button if b.label == "管理").click()
         at.run()
         assert next(s for s in at.selectbox if s.label == "模型").value == \
             "deepseek-v4-pro", "切换页面后模型选择必须保留"

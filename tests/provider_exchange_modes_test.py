@@ -171,8 +171,9 @@ def test_exchange_formats():
         assert entries[0] == {"source": "Skopos theory", "target": "目的论",
                               "behavior": "translate", "status": "locked"}
 
-        # TMX：入库 + 与现有记忆冲突时跳过
-        core.save_tm({"existing": {"target": "已有译文", "reviewed": True}})
+        # TMX：入库 + 与现有记忆冲突时跳过（记忆条目按目标语言作用域）
+        core.save_tm({core.tm_scope_key("简体中文", "existing"):
+                      core.tm_record("已有译文", "简体中文")})
         tmx = io.BytesIO('''<?xml version="1.0"?>
 <tmx version="1.4">
   <body>
@@ -180,11 +181,31 @@ def test_exchange_formats():
     <tu><tuv xml:lang="en"><seg>existing</seg></tuv><tuv xml:lang="zh-CN"><seg>冲突跳过</seg></tuv></tu>
   </body>
 </tmx>'''.encode("utf-8"))
-        result = core.import_tmx(tmx)
+        result = core.import_tmx(tmx, target_lang="简体中文")
         assert result == {"added": 1, "skipped": 1}
         tm = core.load_tm()
-        assert tm["Hello world"]["target"] == "你好世界"
-        assert tm["existing"]["target"] == "已有译文", "冲突源文不得覆盖项目内记忆"
+        assert core.tm_lookup(tm, "Hello world", target_lang="简体中文")[0]["target"] \
+            == "你好世界"
+        assert core.tm_lookup(tm, "existing", target_lang="简体中文")[0]["target"] \
+            == "已有译文", "冲突源文不得覆盖项目内记忆"
+        # 不同目标语言下同一个源文是另一条记忆，不会被这次导入覆盖
+        assert core.tm_lookup(tm, "Hello world", target_lang="Français")[0] is None
+
+        # 语言无法确定的 TMX 不得入库（宁可不导入，不可猜语言）
+        unlabelled = io.BytesIO('''<?xml version="1.0"?>
+<tmx version="1.4">
+  <body>
+    <tu><tuv><seg>No language declared</seg></tuv><tuv><seg>没有语言标注</seg></tuv></tu>
+  </body>
+</tmx>'''.encode("utf-8"))
+        try:
+            core.import_tmx(unlabelled)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("语言无法确定的 TMX 必须被拒绝，而不是猜一种语言")
+        assert core.tm_lookup(core.load_tm(), "No language declared",
+                              target_lang="简体中文")[0] is None
 
         hostile_xml = b'''<?xml version="1.0"?>
 <!DOCTYPE data [<!ENTITY injected "entity text">]>

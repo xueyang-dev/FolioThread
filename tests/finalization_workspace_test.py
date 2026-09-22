@@ -270,7 +270,9 @@ def test_case_and_qa_workspace_surfaces_render_without_conflating_states(tmp_pat
         at.session_state["workspace_section"] = "delivery"
         at.run()
         assert not at.exception, at.exception
-        assert any("暂不满足交付条件" in item.value for item in at.markdown)
+        # 交付页的标题与顶栏 verdict 同属 canonical 状态词汇：本轮是硬门禁未通过，
+        # 不是"暂不满足交付条件"这种含糊说法，也不是"可以准备交付"。
+        assert any("交付门禁未通过" in item.value for item in at.markdown)
         assert any("翻译审校" in item.value for item in at.markdown)
         assert any("冻结交付" in item.value for item in at.markdown)
         delivery_markup = "\n".join(item.value for item in at.markdown)

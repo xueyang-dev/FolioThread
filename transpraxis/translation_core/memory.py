@@ -94,6 +94,41 @@ def _unique(values: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return result
 
 
+# ---------------- 公开的"已确认知识"判定 ----------------
+# Project 层需要复用同一套判定标准来累积跨任务记忆；把私有实现包一层公开
+# 入口，避免出现第二套"什么算已确认"的语义。
+
+
+def confirmed_style_rules(values: Iterable[Any]) -> List[Dict[str, Any]]:
+    """只返回状态为已确认的风格规则。"""
+    return _style_rules(values)
+
+
+def reviewed_pairs(values: Iterable[Any]) -> List[Dict[str, Any]]:
+    """只返回审校通过的译对；未审校的模型输出不是记忆。"""
+    return _translation_memory({}, list(values or []),
+                               include_state_translation_memory=False)
+
+
+def human_records(values: Iterable[Any]) -> List[Dict[str, Any]]:
+    """只返回带明确人类 actor 的记录。"""
+    records = []
+    for value in values or []:
+        if not isinstance(value, Mapping):
+            continue
+        if str(value.get("actor_type") or "human").lower() != "human":
+            continue
+        if not str(value.get("actor") or "").strip():
+            continue
+        records.append(dict(value))
+    return _unique(records)
+
+
+def unique_records(values: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按内容去重，保持首次出现顺序。"""
+    return _unique(values)
+
+
 def project_memory_from_state(
     state: Mapping[str, Any],
     *,

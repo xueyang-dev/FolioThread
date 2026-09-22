@@ -94,8 +94,8 @@ def test_delivery_review_ui():
         at.run()
         assert not at.exception, f"交付队列渲染异常：{at.exception}"
         assert any("人工工作区" in x.value and "审校" in x.value for x in at.markdown)
-        assert any(button.label == "返回任务列表" for button in at.button)
-        assert any(button.label == "回到主页" for button in at.button)
+        assert any(button.label == "任务列表" for button in at.button)
+        assert any(button.label == "主页" for button in at.button)
         filter_control = next(x for x in at.segmented_control
                               if x.label == "筛选审校任务")
         assert "待处理 1" in filter_control.options
@@ -119,7 +119,14 @@ def test_delivery_review_ui():
         assert any('tp-review-span">Name source</mark>' in x.value for x in at.markdown)
         assert any("E1" in x.value and "E2" in x.value
                    for x in [*at.markdown, *at.caption])
-        assert "selected_finding_id" in at.session_state.filtered_state
+        # `selected_finding_id` must survive as user-visible state. Assert it
+        # through the Mapping surface (`in`), not through an attribute:
+        # streamlit 1.64 made AppTest.session_state a `_AppTestSessionState`
+        # wrapper that exposes `to_dict()` / `keys()` / `in` and has no
+        # `filtered_state` attribute at all, so `at.session_state.filtered_state`
+        # raises AttributeError there (1.63 still accepted it because
+        # session_state was the raw SafeSessionState).
+        assert "selected_finding_id" in at.session_state
 
         filter_control = next(x for x in at.segmented_control
                               if x.label == "筛选审校任务")
@@ -173,7 +180,7 @@ def test_delivery_review_ui():
         assert not at.exception, f"切换最终交付后异常：{at.exception}"
         assert any("最终交付" in x.value for x in at.markdown)
 
-        next(button for button in at.button if button.label == "返回任务列表").click()
+        next(button for button in at.button if button.label == "任务列表").click()
         at.run()
         assert not at.exception, f"返回任务列表异常：{at.exception}"
         assert at.session_state["app_view"] == "history"
@@ -182,7 +189,7 @@ def test_delivery_review_ui():
         at.session_state["workspace_mode"] = True
         at.session_state["workspace_section"] = "review"
         at.run()
-        next(button for button in at.button if button.label == "回到主页").click()
+        next(button for button in at.button if button.label == "主页").click()
         at.run()
         assert not at.exception, f"返回主页异常：{at.exception}"
         assert at.session_state["app_view"] == "new"

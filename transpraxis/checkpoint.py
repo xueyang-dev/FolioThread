@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import translation_target
+from .textual import has_textual_content
 
 
 EVENTS_FILE = "events.jsonl"
@@ -139,19 +139,29 @@ def recovery_summary(job_root: Path, state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _eligible(source: str, target: str) -> bool:
-    return bool(re.search(r"[A-Za-z0-9\u4e00-\u9fff]", str(source or ""))) \
+    return has_textual_content(source) \
         and bool(str(target or "").strip()) \
         and not translation_target.is_translation_transport_wrapper(target)
 
 
-def _state_entries(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+def _state_entries(
+    state: Dict[str, Any], scope: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Dict[str, Any]]:
     entries = {}
     for pair in state.get("pairs") or []:
         if not pair.get("reviewed") or pair.get("stale_due_to_glossary"):
             continue
         source, target = pair.get("source"), pair.get("target")
-        if _eligible(source, target):
-            entries[str(source)] = {"target": str(target), "reviewed": True}
+        if not _eligible(source, target):
+            continue
+        scoped = scope(str(source), str(target)) if scope else None
+        if scope is not None:
+            if not scoped:
+                continue
+            key, entry = scoped
+        else:
+            key, entry = str(source), {"target": str(target), "reviewed": True}
+        entries[key] = entry
     return entries
 
 
@@ -159,9 +169,16 @@ def reconcile_translation_memory(
     tm: Dict[str, Dict[str, Any]],
     state: Dict[str, Any],
     job_root: Path,
+    scope: Optional[Callable[..., Any]] = None,
 ) -> Tuple[bool, int]:
-    """Recover accepted state entries and pending TM promotions after restart."""
-    desired = _state_entries(state)
+    """Recover accepted state entries and pending TM promotions after restart.
+
+    `scope(source, target)` 返回 `(记忆键, 记录)`，由调用方把目标语言等**作用域
+    信息**编进键里；返回假值表示这条记忆的作用域无法确定（例如目标语言未知），
+    此时**不写入**。默认（`scope=None`）保持旧的"以原文为键"行为，只给不关心
+    作用域的调用方用。
+    """
+    desired = _state_entries(state, scope)
     initial_tm = dict(tm)
     recovered_sources = set()
     events = read_events(job_root)
@@ -174,16 +191,22 @@ def reconcile_translation_memory(
             continue
         for item in event.get("entries") or []:
             source, target = item.get("source"), item.get("target")
-            if _eligible(source, target):
-                source = str(source)
-                entry = {"target": str(target), "reviewed": True}
-                desired[source] = entry
-                if initial_tm.get(source) != entry:
-                    recovered_sources.add(source)
+            if not _eligible(source, target):
+                continue
+            scoped = scope(str(source), str(target)) if scope else None
+            if scope is not None:
+                if not scoped:
+                    continue
+                key, entry = scoped
+            else:
+                key, entry = str(source), {"target": str(target), "reviewed": True}
+            desired[key] = entry
+            if initial_tm.get(key) != entry:
+                recovered_sources.add(key)
     changed = False
-    for source, entry in desired.items():
-        if tm.get(source) != entry:
-            tm[source] = entry
+    for key, entry in desired.items():
+        if tm.get(key) != entry:
+            tm[key] = entry
             changed = True
     return changed, len(recovered_sources)
 

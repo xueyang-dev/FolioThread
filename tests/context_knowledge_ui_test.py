@@ -200,18 +200,30 @@ def test_context_and_knowledge_surfaces_rerun_without_widget_identity_errors():
         at.session_state["workspace_section"] = "translation"
         at.run()
         assert not at.exception, f"翻译工作台页面异常：{at.exception}"
-        assert any("浏览、检查和编辑双语段落" in item.value for item in at.markdown)
+        assert any("点段号选中" in item.value for item in at.markdown)
 
-        next(button for button in at.sidebar.button if button.label == "术语库与记忆").click()
+        next(button for button in at.sidebar.button
+             if button.label == "术语与翻译记忆").click()
         at.run()
-        assert not at.exception, f"待确认词条页面异常：{at.exception}"
-        assert any(item.value == "待确认词条" for item in at.subheader)
-        assert any(button.label == "仅本任务采用" for button in at.button)
-        next(button for button in at.button if button.label == "仅本任务采用").click()
+        assert not at.exception, f"语言资产页面异常：{at.exception}"
+        # 计数只在**一级 Tab** 上出现一次；不再有另一行重复的统计卡。
+        assert not any('class="la-summary"' in item.value for item in at.markdown), \
+            "顶部统计卡必须删掉：计数已经搬到一级 Tab 上"
+        assert any(str(label).startswith("待审核")
+                   for label in at.segmented_control[0].options), \
+            "待审核数量必须挂在 Tab 上"
+        at.segmented_control[0].set_value("review").run()
+        assert not at.exception, f"待审核 Tab 异常：{at.exception}"
+        quick = next(button for button in at.button
+                     if str(getattr(button, "key", "")).startswith("la_quick_"))
+        assert quick.label == "接受"
+        quick.click()
         at.run()
         assert not at.exception, f"处理知识词条后异常：{at.exception}"
         at.run()
-        assert not at.exception, f"重复运行待确认词条页面异常：{at.exception}"
+        assert not at.exception, f"重复运行待审核列表异常：{at.exception}"
+        decided = core.load_job_state(job_id)["knowledge_candidates"][0]
+        assert decided["decision"] == "project_term"
         print("  ✓ context/knowledge UI：上下文可见、知识决策持久化、重复 rerun 无 key 冲突")
     finally:
         core.OUTPUT_DIR = old_dir
@@ -230,26 +242,28 @@ def test_knowledge_library_bounds_large_pending_lists_and_supports_search():
         state = core.new_job_state("large-knowledge.docx")
         state.update(knowledge_candidates=[
             _candidate(f"term {index}", f"术语 {index}", index)
-            for index in range(25)
+            for index in range(60)
         ])
         core.save_job_state(job_id, state)
 
         at = AppTest.from_file(str(root / "app.py"), default_timeout=30)
         at.run()
         next(button for button in at.sidebar.button
-             if button.label == "术语库与记忆").click()
+             if button.label == "术语与翻译记忆").click()
         at.run()
+        at.segmented_control[0].set_value("review").run()
         assert not at.exception, at.exception
-        assert any(text.label == "搜索待确认词条" for text in at.text_input)
-        assert any("显示 20 / 25 条待确认词条" in item.value
-                   for item in at.caption)
+        assert any(text.label == "搜索候选术语、译文或来源" for text in at.text_input)
+        page = "\n".join(item.value for item in at.caption)
+        assert "待审核 60 条" in page, page
+        assert any("显示更多" in button.label for button in at.button), \
+            "长列表必须分批渲染，不能一次铺开 60 行"
 
-        at.session_state["knowledge_library_search"] = "term 24"
-        at.run()
+        at.text_input(key="la_review_query").set_value("term 24").run()
         assert not at.exception, at.exception
-        assert any("显示 1 / 1 条待确认词条" in item.value
-                   for item in at.caption)
-        assert any("术语 24" in item.value for item in at.markdown)
+        page = "\n".join(item.value for item in at.caption)
+        assert "待审核 1 条（已筛选）" in page, page
+        assert any("术语 24" in button.label for button in at.button)
     finally:
         core.OUTPUT_DIR = old_dir
         shutil.rmtree(tmp, ignore_errors=True)

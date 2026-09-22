@@ -1,0 +1,194 @@
+"""品牌资产一致性测试：logo 只有一个真源，位图必须是它的派生物。
+
+为什么需要它：FolioThread 的品牌资产在三个地方被引用——界面侧栏
+（`foliothread-source-lockup.png`）、README（同一张裁切图）、浏览器标签页
+（`foliothread-source-icon.png`）。这些位置各自独立，一旦有人只换了
+其中一个，"本项目只有一个 logo" 就会在界面上悄悄破功。本模块把这件事变成
+可执行的约束：
+
+1. 向量源存在且自洽（viewBox、渐变、没有外部字体依赖的关键字形）；
+2. 位图产物存在，且不比向量源旧（`scripts/render_brand_assets.py --check` 的语义）；
+3. 设计系统色板 = 品牌源文件里的取色，而不是各表面各写一个蓝；
+4. 界面/README 引用的路径真实存在。
+
+不做像素比对：那需要浏览器，属于 `scripts/render_brand_assets.py --check` 的职责，
+CI 里不应依赖 Chromium。
+
+运行：`python -m pytest tests/brand_assets_test.py -q`
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+ROOT = Path(__file__).resolve().parent.parent
+BRAND = ROOT / "transpraxis" / "resources" / "brand"
+MARK = BRAND / "foliothread-mark.svg"
+MARK_MONO = BRAND / "foliothread-mark-mono.svg"
+FAVICON = BRAND / "foliothread-favicon.svg"
+
+# 品牌色板：唯一真源是 logo 源文件，界面 token 必须与之一致。
+PALETTE = {
+    "navy": "#000d2d",     # 字标 / App 图标底
+    "cobalt": "#004cfd",   # 后页
+    "azure": "#0088fd",    # 渐变中段
+    "cyan": "#00e8fe",     # 渐变亮端
+}
+
+DERIVED_PNG = (
+    "foliothread-source-lockup.png",
+    "foliothread-source-icon.png",
+    "foliothread-logo.png",
+    "foliothread-logo-dark.png",
+    "foliothread-logo-stacked.png",
+    "foliothread-app-icon.png",
+    "foliothread-favicon.png",
+)
+# 期望尺寸：source-* 是原图裁切（界面/README 用），其余是向量派生位图。
+# 尺寸写死是为了让"有人手工换了一张别的图"立刻失败。
+DERIVED_PNG_SIZE = {
+    "foliothread-source-lockup.png": (1235, 340),
+    "foliothread-source-icon.png": (286, 280),
+    "foliothread-logo.png": (1498, 268),
+    "foliothread-logo-dark.png": (1498, 268),
+    "foliothread-logo-stacked.png": (560, 372),
+    "foliothread-app-icon.png": (512, 512),
+    "foliothread-favicon.png": (512, 512),
+}
+
+
+def _png_size(path: Path) -> tuple[int, int]:
+    """从 PNG 头里读宽高（IHDR 固定在第 16..24 字节），不需要图像库。"""
+    header = path.read_bytes()[:24]
+    assert header[:8] == b"\x89PNG\r\n\x1a\n", f"{path.name} 不是 PNG"
+    assert header[12:16] == b"IHDR", f"{path.name} 缺少 IHDR"
+    return (int.from_bytes(header[16:20], "big"),
+            int.from_bytes(header[20:24], "big"))
+
+
+def _read(path: Path) -> str:
+    assert path.is_file(), f"缺少品牌文件：{path.relative_to(ROOT)}"
+    return path.read_text(encoding="utf-8")
+
+
+def test_mark_source_shape():
+    svg = _read(MARK)
+    assert 'viewBox="0 0 274 268"' in svg, "图标画布尺寸变了，位图必须重新生成"
+    assert 'role="img"' in svg and "<title" in svg and "<desc" in svg, \
+        "品牌图标需要无障碍标题与描述"
+    # 两页 + 光标 + 文/A：缺任何一个都不再是 FolioThread 的图标
+    assert svg.count("<rect") == 3, \
+        "图标应是两页圆角矩形 + 一层前页高光；新增/删除图层需同步更新本断言"
+    assert svg.count("<path") == 1, "图标应只有一个光标路径"
+    assert "文" in svg and ">A<" in svg, "图标必须保留 文 / A 两个字形"
+
+
+def test_mark_uses_palette():
+    """图标本体只用渐变三色；深海军蓝属于字标/App 图标底，不在图标里。"""
+    svg = _read(MARK).lower()
+    for name in ("cobalt", "cyan"):
+        assert PALETTE[name] in svg, f"图标源里找不到品牌色 {name}={PALETTE[name]}"
+
+
+def test_mark_has_no_remote_font_dependency():
+    """图标要能离线渲染：可以挑字体家族，但不能 @import 远程字体。"""
+    svg = _read(MARK)
+    assert "@import" not in svg and "url(http" not in svg
+
+
+def test_mono_mark_is_single_color():
+    svg = _read(MARK_MONO)
+    assert "currentColor" in svg, "单色版必须用 currentColor，才能跟随宿主前景色"
+    colors = {c.lower() for c in re.findall(r'#[0-9A-Fa-f]{6}', svg)}
+    # 只允许掩膜里的黑/白，其余一律 currentColor
+    assert colors <= {"#ffffff", "#000000"}, \
+        f"单色版混入了彩色：{sorted(colors - {'#ffffff', '#000000'})}"
+
+
+def test_favicon_matches_mark_palette():
+    svg = _read(FAVICON).lower()
+    assert PALETTE["navy"] in svg, "标签页图标的底色必须是品牌深海军蓝"
+    assert PALETTE["cobalt"] in svg and PALETTE["cyan"] in svg, \
+        "标签页图标必须复用图标的渐变"
+
+
+def test_brand_bitmaps_exist_and_are_real():
+    """裁切资产与向量派生位图都必须存在，且是尺寸正确的真实 PNG。
+
+    刻意不比较 mtime：CI 从 git 检出时所有文件时间戳相同，按时间判"是否过期"
+    会变成随机失败。真正的重生成检查是 `python scripts/render_brand_assets.py
+    --check`（需要 Chromium，不进 CI）。
+    """
+    missing = [n for n in DERIVED_PNG if not (BRAND / n).is_file()]
+    assert not missing, (f"缺少品牌位图 {missing}；"
+                         f"运行 python scripts/render_brand_assets.py")
+    for name, (want_w, want_h) in DERIVED_PNG_SIZE.items():
+        path = BRAND / name
+        assert path.stat().st_size > 4_000, \
+            f"{name} 只有 {path.stat().st_size} 字节，像是占位文件"
+        width, height = _png_size(path)
+        assert (width, height) == (want_w, want_h), \
+            f"{name} 尺寸为 {width}x{height}，期望 {want_w}x{want_h}"
+
+
+def test_app_tokens_match_brand_palette():
+    """app.py 的 :root 品牌 token 必须等于品牌源文件的取色。"""
+    app = (ROOT / "app.py").read_text(encoding="utf-8")
+    block = app.split(":root {", 1)[1].split("}", 1)[0]
+
+    def token(name: str) -> str:
+        match = re.search(rf"--{name}:\s*(#[0-9A-Fa-f]{{6}})", block)
+        assert match, f"app.py 设计系统缺少 --{name}"
+        return match.group(1).lower()
+
+    assert token("tp-logo-blue") == PALETTE["cobalt"]
+    assert token("tp-primary") == PALETTE["cobalt"]
+    assert token("tp-navy") == PALETTE["navy"]
+    assert token("tp-azure") == PALETTE["azure"]
+    assert token("tp-cyan") == PALETTE["cyan"]
+    # hover / active 必须是同一色的更深阶，不能引入第二种蓝
+    assert token("tp-primary-hover") < PALETTE["cobalt"], "hover 应比主色更深"
+    assert token("tp-primary-active") < token("tp-primary-hover"), \
+        "active 应比 hover 更深"
+
+
+def test_streamlit_theme_matches_primary():
+    gui = (ROOT / "gui.py").read_text(encoding="utf-8")
+    assert f'"--theme.primaryColor", "{PALETTE["cobalt"]}"' in gui, \
+        "Streamlit 主题主色必须与设计系统主色一致"
+
+    app = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert 'page_icon=_BRAND_FAVICON' in app, "页面图标必须用品牌图标资产"
+
+
+def test_sidebar_uses_source_crop():
+    """侧栏使用用户原图裁切，禁止回退到重绘的竖向组合。"""
+    app = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert 'foliothread-source-lockup.png' in app, \
+        "侧栏品牌位应使用原图裁切"
+    assert 'alt="FolioThread Agentic Translation Workspace"' in app, \
+        "品牌位的替代文本要与新定位一致"
+
+
+def test_readme_references_existing_logo():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "transpraxis/resources/brand/foliothread-source-lockup.png" in readme, \
+        "README 首屏必须展示唯一 logo"
+    for rel in re.findall(r'src="(transpraxis/resources/brand/[^"]+)"', readme):
+        assert (ROOT / rel).is_file(), f"README 引用了不存在的资产：{rel}"
+
+
+def main() -> None:
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"  ✓ {name}")
+    print("品牌资产一致性测试通过 ✅")
+
+
+if __name__ == "__main__":
+    main()

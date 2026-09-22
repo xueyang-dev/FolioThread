@@ -27,9 +27,17 @@ def _default_new_fields() -> Dict[str, Any]:
     """新增字段的默认值（旧任务加载时补齐，避免 KeyError）。"""
     from .academic_writer import default_academic_state
     from .finalization import default_dependency_impact, default_final_qa
+    from .project import SYSTEM_PROJECT_ID
     return {
         "stage": "INGESTED",
         "delivery_status": "draft",
+        # 任务所属项目（蓝图 §3.2 的 Project / Job 边界）。旧任务统一归入系统
+        # 工作区「未分类」——它有真实持久化 UUID 与 is_system=true，不再是字符串
+        # "default" 这样的虚拟 project id。项目记录存放在 outputs/projects/。
+        # 显式 `None` 是**有效值**（用户选择「未分类」），由 migrate_state 保留。
+        "project_id": SYSTEM_PROJECT_ID,
+        # 项目记忆注入审计：哪些跨任务锁定术语/风格规则被注入过这个任务。
+        "project_memory": {},
         "document_profile": None,
         "profile_done": False,
         "profile_warnings": [],
@@ -152,9 +160,15 @@ def migrate_state(state: Any) -> Dict[str, Any]:
     if not isinstance(state, dict):
         return dict(_default_new_fields())
     out = dict(state)
+    # `project_id` 允许显式的 `None`：它表示用户选择了系统工作区「未分类」，是一个
+    # 有效选择，不能按"缺省字段"补默认值（默认值本身就是系统工作区 UUID，语义
+    # 相同但会掩盖"用户显式选过"这一事实）。其余新字段仍然在缺失/为 None 时补默认。
+    preserve_unassigned_project = "project_id" in out and out.get("project_id") is None
     for key, default in _default_new_fields().items():
         if key not in out or out[key] is None:
             out[key] = default
+    if preserve_unassigned_project:
+        out["project_id"] = None
     # v0.4 exposes one anonymous default profile. Unknown or private profile
     # identifiers are not preserved in public-facing state until custom
     # profile import exists.

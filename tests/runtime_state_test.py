@@ -346,6 +346,9 @@ def test_pipeline_persists_resume_and_delivery_configuration(tmp_path):
             "style_rules": "保留正式语域", "enable_review": True,
             "enable_annotate": True, "use_tm": False,
             "strict_terminology_governance": False,
+            # 批次参数必须随任务保存：恢复任务要沿用同一套批次划分
+            "batch_size": core.BATCH_SIZE,
+            "max_batch_chars": core.TRANSLATION_MAX_BATCH_CHARS,
             "enable_understanding": False,
             "translator": {"provider": "DeepSeek", "model": "deepseek-chat",
                             "base_url": "", "configured": True},
@@ -359,3 +362,132 @@ def test_pipeline_persists_resume_and_delivery_configuration(tmp_path):
         assert saved["delivery_config"]["deliver_bilingual_docx"] is False
     finally:
         core.OUTPUT_DIR = old_output
+
+
+def test_reading_a_never_run_job_writes_nothing(tmp_path):
+    """读取不得有写副作用：看一眼任务不应在磁盘上产生任何文件。
+
+    曾经的实现有两个这样的读路径：
+
+    - `get_job_runtime_status` 在推断状态时调用 `update_runtime_state`，于是
+      **从未运行过**的任务（runtime_state.json 不存在 → 默认 status="idle"）
+      只要被界面读过一次就会多出一个 runtime_state.json；
+    - `list_jobs()` 会先 `_ensure_output_dir()`，于是"列出任务"也会创建 outputs/。
+
+    保留的**唯一**写路径是死 worker 的纠正：当持久化状态仍是 running/queued
+    等活跃状态、而对应进程已不存在时，读取会把它纠正为 interrupted/stalled 并
+    落盘。那只发生在真正启动过 worker 的任务上，且是为了让各个界面看到一致的
+    状态，不是"看一眼就产生文件"。
+    """
+    old_dir = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "readonly-probe"
+        state = core.new_job_state("probe.docx")
+        core.save_job_state(job_id, state)
+        before = sorted(p.name for p in core.job_dir(job_id).iterdir())
+
+        # 各种"看一眼"的读操作
+        core.build_job_runtime_view(job_id, state)
+        core.get_job_runtime_status(job_id, state)
+        core.list_jobs()
+        core.delivery_snapshot_status(job_id, state)
+        core.recovery_summary(job_id, state)
+
+        assert sorted(p.name for p in core.job_dir(job_id).iterdir()) == before, \
+            "读取不得在任务目录里产生文件"
+        assert not (tmp_path / "projects").exists(), "读取不得创建项目目录"
+
+        # 目录整体不存在时，列出任务不应创建它
+        empty = tmp_path / "fresh"
+        core.OUTPUT_DIR = empty
+        assert core.list_jobs() == []
+        assert not empty.exists(), "列出任务不得创建输出目录"
+
+        # 推断出的状态仍然必须正确（纯计算，不需要持久化）
+        core.OUTPUT_DIR = tmp_path
+        state["p1_done"] = True
+        state["p2_done"] = True
+        core.save_job_state(job_id, state)
+        assert core.build_job_runtime_view(job_id, state)["runtime_status"] == "completed"
+    finally:
+        core.OUTPUT_DIR = old_dir
+
+
+def test_worker_base_exception_fails_closed(tmp_path):
+    """worker 抛 BaseException 时必须失败闭合，而不是把任务留在活跃态。
+
+    只捕 `Exception` 时，`SystemExit` 一类的 BaseException 会绕过 `except`，连
+    `finally` 也不执行：心跳线程继续续租 → lease 永不过期 → 应用还活着时这个任务
+    会**硬卡死**（状态停在活跃态，`start_job_worker` / `resume_job` 都会拒绝）。
+    """
+    old_dir = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    original = core.run_job_pipeline
+    try:
+        job_id = "base-exception-probe"
+        core.save_job_state(job_id, core.new_job_state("probe.docx"))
+
+        def boom(*args, **kwargs):
+            raise SystemExit("模拟第三方库调用 sys.exit()")
+
+        core.run_job_pipeline = boom
+        core._run_job_worker(job_id, "probe.docx", None, {"enable_report": False})
+
+        runtime = core.load_runtime_state(job_id)
+        assert runtime.get("status") == "failed", \
+            f"必须失败闭合，实际 status={runtime.get('status')}"
+        worker = runtime.get("worker") or {}
+        assert not worker.get("owner_pid"), "worker 必须被释放，否则 lease 会一直续租"
+        assert job_id not in core._RUNTIME_WORKERS, \
+            "worker 线程必须从注册表移除，否则无法重新启动"
+        # 而且必须可以重新启动（这正是"硬卡死"的反面）
+        assert core.get_job_runtime_status(job_id).get("status") not in \
+            core.RUNTIME_ACTIVE_STATUSES
+    finally:
+        core.run_job_pipeline = original
+        core.OUTPUT_DIR = old_dir
+
+
+def test_worker_lifecycle_is_logged_so_abrupt_death_is_diagnosable(tmp_path):
+    """worker 启动/释放都要写技术日志：进程被杀时"有启动、无释放"就是证据。"""
+    old_dir = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "lifecycle-log-probe"
+        core.save_job_state(job_id, core.new_job_state("probe.docx"))
+        core._run_job_worker(job_id, "probe.docx", None, {"enable_report": False})
+        log = core.runtime_technical_log_path(job_id).read_text(encoding="utf-8")
+        assert "worker started" in log, "启动必须留痕"
+        assert "worker released" in log, "释放必须留痕"
+        assert "pid=" in log
+    finally:
+        core.OUTPUT_DIR = old_dir
+
+
+def test_interrupted_message_explains_what_was_running(tmp_path):
+    """中断原因要说明"中断时在等什么、已完成多少段"，而不是笼统一句。"""
+    old_dir = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    try:
+        job_id = "interrupt-reason-probe"
+        state = core.new_job_state("probe.docx")
+        state.update({"p1_done": True, "p2_done": False,
+                      "paras": ["a", "b", "c"], "pairs": [{"source": "a"}]})
+        core.save_job_state(job_id, state)
+        # 模拟：worker 在等待模型响应时应用被关闭（pid 已不存在）
+        core.update_runtime_state(
+            job_id, status="waiting_external", phase="waiting_llm",
+            phase_label="等待模型响应", worker={
+                "owner_pid": 999999, "worker_id": "dead-worker",
+                "lease_expires_at": "2030-01-01T00:00:00+00:00"},
+            event="已向模型发送请求")
+
+        runtime = core.get_job_runtime_status(job_id, state)
+        assert runtime.get("status") == "interrupted"
+        message = str(runtime.get("phase_label") or "")
+        assert "等待模型响应" in message, f"必须说明中断时在做什么：{message}"
+        assert "1/3 段" in message, f"必须说明已完成进度：{message}"
+        assert "断点继续" in message, message
+    finally:
+        core.OUTPUT_DIR = old_dir

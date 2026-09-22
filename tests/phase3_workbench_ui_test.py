@@ -113,6 +113,18 @@ def _queue(at):
     return next(item for item in at.radio if item.label == "审校队列")
 
 
+def _save_row_editor(at, job_id, index):
+    """提交中央网格第 `index` 行的行内译文表单。
+
+    译文编辑器是段落网格的一部分（`cat_save_btn_{job_id}_{index}`）；
+    右栏 Inspector 只读不写，所以这里按行内保存按钮定位。
+    保存按钮只在有未保存改动时渲染，所以先 rerun 让 dirty 状态生效。
+    """
+    at.run()
+    return next(button for button in at.button
+                if button.key == f"cat_save_btn_{job_id}_{index}").click()
+
+
 def test_blocking_review_decisions_are_reachable_before_finding_evidence(
         tmp_path):
     old_output = core.OUTPUT_DIR
@@ -244,7 +256,7 @@ def test_review_actions_select_same_segment_next_then_cross_navigate(tmp_path):
         at.run()
         assert at.session_state["workspace_section"] == "translation"
         assert at.session_state["selected_segment_id"] == assets.segment_id(job_id, 1)
-        assert any("当前段落 · #2" in item.value for item in at.markdown)
+        assert any("段落 #2" in item.value for item in at.markdown)
 
         next(button for button in at.button if button.label == "查看审校").click()
         at.run()
@@ -450,7 +462,8 @@ def test_no_review_translation_edit_and_restore_feedback_has_no_review_claims(
     selected_id = assets.segment_id(job_id, 0)
     editor_key = f"translation_editor_{selected_id}"
     at.session_state[editor_key] = "修改后的译文"
-    next(button for button in at.button if button.label == "保存修改").click()
+    # 译文编辑器现在在中央网格的行内表单里；右栏不再有第二个编辑器和全局"保存修改"。
+    _save_row_editor(at, job_id, 0)
     at.run()
 
     updated = core.load_job_state(job_id)
@@ -487,7 +500,7 @@ def test_review_required_translation_edit_and_restore_feedback_keeps_rereview_co
     selected_id = assets.segment_id(job_id, 0)
     editor_key = f"translation_editor_{selected_id}"
     at.session_state[editor_key] = "修改后的译文"
-    next(button for button in at.button if button.label == "保存修改").click()
+    _save_row_editor(at, job_id, 0)
     at.run()
 
     assert any("需要重新审校" in item.value for item in at.warning)

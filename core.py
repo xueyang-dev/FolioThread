@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import threading
 import tempfile
+import unicodedata
 import time
 import traceback
 import uuid
@@ -42,6 +43,9 @@ from transpraxis import translation_protocol as _translation_protocol
 from transpraxis import translation_target as _translation_target
 from transpraxis import finalization as _finalization
 from transpraxis import rendered_qa as _rendered_qa
+from transpraxis import project as _project
+from transpraxis import translation_memory as _tm_scope
+from transpraxis.textual import has_textual_content, normalize_language
 
 # ================= 常量 =================
 # 任务进度与过程文件的本地存储目录（已加入 .gitignore）
@@ -557,43 +561,60 @@ def parse_termbase_tbx(file_stream):
     return entries
 
 
-def import_tmx(file_stream):
+def import_tmx(file_stream, project_id=None, target_lang=None):
     """导入 TMX 翻译记忆（Trados / memoQ 等导出的标准格式）。
 
     按 <tu> 的 <tuv><seg> 文本对入库：仅接受源文含字母/数字且译文非空的
     单元；与现有翻译记忆冲突的源文跳过（不覆盖项目内已审校条目）。
+
+    条目必须带上**目标语言**，否则不入库——语言未知的记忆一旦落盘，就会成为
+    下一次跨语言命中的来源。语言取调用方显式给出的 `target_lang`（调用方
+    知道"这份记忆是给哪个目标语言的"）；调用方没给时退回目标 <tuv xml:lang>。
+    刻意**不**把 BCP-47 代码（`zh-CN`）翻译成本应用的显示名（`简体中文`）：
+    猜测式映射会让导入"看起来成功、实际永不命中"，比显式失败更糟。
+
+    导入目标为指定项目的记忆（默认项目即历史的全局记忆）。
     返回 {"added": n, "skipped": m}。
     """
     try:
         root = ET.fromstring(file_stream.read())
     except Exception as e:
         raise ValueError(f"无法解析 TMX 文件：{e}") from e
-    existing = load_tm()
+    existing = load_tm(project_id)
+    declared_lang = str(target_lang or "").strip()
     added = skipped = 0
     for tu in root.iter():
         if _local_name(tu.tag) != "tu":
             continue
         texts = []
+        languages = []
         for tuv in tu:
             if _local_name(tuv.tag) != "tuv":
                 continue
             seg = next((c for c in tuv if _local_name(c.tag) == "seg"), None)
             if seg is not None and (seg.text or "").strip():
                 texts.append(seg.text.strip())
+                languages.append(tuv.get("{http://www.w3.org/XML/1998/namespace}lang")
+                                 or tuv.get("lang") or "")
             if len(texts) >= 2:
                 break
         if len(texts) >= 2:
             src, tgt = texts[0], texts[-1]
-            if _tm_eligible(src, tgt):
-                if src not in existing:
-                    existing[src] = {"target": tgt, "reviewed": True,
-                                     "source": "tmx_import"}
+            language = declared_lang or str(languages[-1] or "").strip()
+            key = tm_scope_key(language, src)
+            if _tm_eligible(src, tgt) and key:
+                if key not in existing:
+                    record = tm_record(tgt, language)
+                    record["source"] = "tmx_import"
+                    existing[key] = record
                     added += 1
                 else:
                     skipped += 1
     if not added:
-        raise ValueError("TMX 中未找到可导入的新翻译单元（源文需含字母/数字，且不与现有记忆冲突）")
-    save_tm(existing)
+        raise ValueError(
+            "TMX 中未找到可导入的新翻译单元（源文需含字母/数字、目标语言需显式指定"
+            "或可从 xml:lang 确定，且不与现有记忆冲突）")
+    save_tm(existing, project_id)
     return {"added": added, "skipped": skipped}
 
 
@@ -998,24 +1019,151 @@ def _batch_section_profile(document_profile, offset, batch_len):
 
 
 # ================= 翻译记忆（对齐 localize-anything 的 TM：仅收录审校通过段落）=================
-def tm_path():
-    return OUTPUT_DIR / "translation_memory.json"
+DEFAULT_TARGET_LANG = "简体中文"
+
+
+def tm_path(project_id=None):
+    """翻译记忆的存储路径；**按项目隔离**。
+
+    翻译记忆是"已审校译文的受控记忆"，蓝图 §3.2 把它列在 Project 之下。
+    条目键是「目标语言 + 原文」的作用域键（见 `tm_scope_key`）——因此同一个
+    项目里同一段原文可以有多个目标语言的译法，而不会互相串用。
+
+    系统工作区「未分类」沿用历史上的全局路径 `outputs/translation_memory.json`
+    ——「未分类」就是旧默认项目的后继实体，因此既有任务的**行为与数据**完全
+    不变（无迁移、无丢失）；命名项目各自使用
+    `outputs/projects/<project_uuid>/translation_memory.json`。
+    """
+    project_id = _project.canonical_project_id(project_id) if project_id \
+        else _project.SYSTEM_PROJECT_ID
+    if _project.is_system_project_id(project_id):
+        return OUTPUT_DIR / "translation_memory.json"
+    return _project.project_dir(OUTPUT_DIR, project_id) / "translation_memory.json"
 
 
 def _tm_eligible(source, target):
     """翻译记忆资格：源文必须有字母/数字（纯符号装饰行不入库），译文非空。"""
-    return bool(re.search(r"[A-Za-z0-9\u4e00-\u9fff]", source or "")) \
+    return has_textual_content(source) \
         and bool((target or "").strip()) \
         and not _translation_target.is_translation_transport_wrapper(target)
 
 
-def load_tm():
-    """加载翻译记忆并自清洗：非法条目（无字母源文/空译文/未过审校）直接丢弃。
+# ---------------- 翻译记忆的作用域键 ----------------
+# 一条翻译记忆的身份是「目标语言 + 原文」，**不是**「原文」。
+# 同一段原文在 Français 与简体中文任务里的正确译文不同；只用原文当键，一种
+# 语言的译文就会串进另一种语言的任务，并以"已审校"的名义静默通过交付检查。
+# 因此作用域键是结构性的：不给出目标语言就**无法**命中任何条目。
+# 定义放在 `transpraxis.translation_memory`，核心层与展示层共用同一份格式。
+TM_SCOPE_SEP = _tm_scope.TM_SCOPE_SEP
+tm_scope_key = _tm_scope.tm_scope_key
+tm_unscope_key = _tm_scope.tm_unscope_key
+tm_record_language = _tm_scope.tm_record_language
+tm_record = _tm_scope.tm_record
+tm_put = _tm_scope.tm_put
+tm_discard = _tm_scope.tm_discard
+tm_legacy_keys = _tm_scope.tm_legacy_keys
+
+
+# 归一化只做**可证明等价**的处理：同一段文字在不同来源下的排版差异。
+# 刻意不做语义近似（编辑距离、词序、同义替换）：翻译记忆是错误放大器，
+# 一次错配会复制到整篇文档，所以匹配必须是"同一句话"而不是"相似的话"。
+_TM_CHAR_MAP = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+    "\u2013": "-", "\u2014": "-", "\u2212": "-", "\u00ad": "",
+    "\u2026": "...", "\u00a0": " ", "\u3000": " ",
+})
+_TM_SPACE_RE = re.compile(r"\s+")
+
+
+def tm_normalize(text):
+    """翻译记忆的规范化键：排版等价 → 同一键。
+
+    处理的是真实来源差异，而不是"相似文本"：
+
+    - PDF 与 DOCX 抽取出的换行、制表与连续空格；
+    - 不间断空格（U+00A0）、全角空格（U+3000）；
+    - 弯引号/直引号、en/em dash 与连字符、省略号、软连字符；
+    - Unicode 兼容等价（NFKC，如全角字母数字）。
+
+    不做大小写折叠：首字母大小写不同的段落是不同的段落。
+    """
+    if text is None:
+        return ""
+    value = unicodedata.normalize("NFKC", str(text))
+    value = value.translate(_TM_CHAR_MAP)
+    return _TM_SPACE_RE.sub(" ", value).strip()
+
+
+def tm_index(tm, target_lang=None):
+    """规范化原文 -> 作用域键的索引，**只收录目标语言可证明相同的条目**。
+
+    没有目标语言上下文（`target_lang` 为空）时返回空索引：作用域不可证明
+    就不建立任何可命中路径。
+    """
+    language = normalize_language(target_lang)
+    index = {}
+    if not language:
+        return index
+    for key, record in (tm or {}).items():
+        if tm_record_language(key, record) != language:
+            continue
+        _, source = tm_unscope_key(key)
+        normalized = tm_normalize(source)
+        if normalized and normalized not in index:
+            index[normalized] = key
+    return index
+
+
+def _tm_hit(record, language, key):
+    return isinstance(record, dict) and bool(record.get("reviewed")) \
+        and bool(record.get("target")) \
+        and tm_record_language(key, record) == language
+
+
+def tm_lookup(tm, source, index=None, *, target_lang=None):
+    """查找翻译记忆条目，返回 (记录, 命中方式)。
+
+    **必须显式给出目标语言**：语言未知（旧条目没有语言标注）或目标语言不同
+    -> 不命中。这是发布阻断级的正确性约束，不是可选过滤。
+
+    先精确匹配，再退到归一化匹配。归一化命中是"同一段文字的排版差异"，
+    不涉及语义猜测，因此可以安全复用译文；命中方式会被记录，便于审计。
+    """
+    language = normalize_language(target_lang)
+    if not language:
+        return None, ""
+    cleaned = str(source or "").replace("\n", " ")
+    for key in (tm_scope_key(target_lang, cleaned), cleaned):
+        if not key:
+            continue
+        if _tm_hit((tm or {}).get(key), language, key):
+            return (tm or {}).get(key), "exact"
+    normalized = tm_normalize(cleaned)
+    if not normalized:
+        return None, ""
+    scoped_index = index if index is not None else tm_index(tm, target_lang)
+    raw_key = scoped_index.get(normalized)
+    if raw_key is None or raw_key == cleaned:
+        return None, ""
+    record = (tm or {}).get(raw_key)
+    if _tm_hit(record, language, raw_key):
+        return record, "normalized"
+    return None, ""
+
+
+def load_tm(project_id=None):
+    """加载指定项目的翻译记忆并自清洗：非法条目直接丢弃。
 
     翻译记忆是错误放大器（一次错译会复制到全书），因此加载即消毒，
     防止旧版本或异常写入留下的污染条目继续命中。
+
+    语言无法证明的旧条目**保留在文件里**（不丢用户数据），但不会被
+    `tm_lookup` 命中：证明不了目标语言的记忆不能自动复用。可用
+    `tm_legacy_keys` 把它们单独列出来。
+
+    `project_id=None` 表示默认项目（即历史的全局记忆）。
     """
-    p = tm_path()
+    p = tm_path(project_id)
     if p.is_file():
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))
@@ -1023,16 +1171,753 @@ def load_tm():
             return {}
         return {k: v for k, v in raw.items()
                 if isinstance(v, dict) and v.get("reviewed")
-                and _tm_eligible(k, v.get("target"))}
+                and _tm_eligible(tm_unscope_key(k)[1], v.get("target"))}
     return {}
 
 
-def save_tm(tm):
-    p = tm_path()
+def save_tm(tm, project_id=None):
+    p = tm_path(project_id)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(tm, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(p)
+
+
+def tm_project_id(state):
+    """任务使用的翻译记忆所属项目（与任务的项目归属一致）。"""
+    return resolved_project_id(state or {})
+
+
+def state_target_lang(state, fallback=None):
+    """任务的目标语言（TM 作用域用），返回**原样写法**（用于落盘与展示）。
+
+    只认 state 里真正记下来的目标语言；没有就退回调用方显式给出的 fallback，
+    两者都没有则返回空串。这里**不补默认值**——补一个默认语言等于猜语言，
+    而猜错的代价是把一条已审校的错译文复用到另一种语言的任务里。
+    """
+    raw = (state or {}).get("target_lang")
+    if normalize_language(raw):
+        return str(raw)
+    return str(fallback or "")
+
+
+def copy_system_tm_to_project(project_id):
+    """把系统工作区「未分类」的已审校记忆并入指定项目（人工动作）。
+
+    新建项目从空白记忆开始（隔离的代价）。如果用户希望把既有积累带过去，
+    这是一个显式的、可解释的动作，而不是静默共享或静默复制。
+    返回本次并入的条目数。
+    """
+    target_id = _project.canonical_project_id(project_id)
+    if _project.is_system_project_id(target_id):
+        return 0
+    if load_project(target_id) is None:
+        raise ValueError(f"项目不存在：{project_id}")
+    source_tm = load_tm(_project.SYSTEM_PROJECT_ID)
+    if not source_tm:
+        return 0
+    target_tm = load_tm(target_id)
+    added = 0
+    for source, record in source_tm.items():
+        if source in target_tm:
+            continue
+        target_tm[source] = record
+        added += 1
+    if added:
+        save_tm(target_tm, target_id)
+    return added
+
+
+# 向后兼容别名（旧名字里的"默认项目"现在叫系统工作区「未分类」）。
+copy_default_tm_to_project = copy_system_tm_to_project
+
+
+# ================= Project：跨任务复用的已确认项目记忆 =================
+# Project 层本身是领域模块（transpraxis/project.py，显式接收 root）；
+# 这里只是把它接到本地 OUTPUT_DIR，并负责"任务属于哪个项目"的读写。
+#
+# 身份模型（v0.5 定死）：
+#   - 每个项目都有不可变 UUID；display name 只是标签，不是主键，也不进路由；
+#   - 系统工作区「未分类」是**真实项目**（真实 UUID + is_system=true），承载
+#     所有没有 project_id 的任务；它不能重命名 / 归档 / 删除；
+#   - 字符串 "default" 只是历史别名，任何入口都先归一到系统项目 UUID。
+
+SYSTEM_PROJECT_ID = _project.SYSTEM_PROJECT_ID
+SYSTEM_PROJECT_NAME = _project.SYSTEM_PROJECT_NAME
+# 向后兼容别名：值现在是系统项目的真实 UUID，不再是字符串 "default"。
+DEFAULT_PROJECT_ID = _project.DEFAULT_PROJECT_ID
+DEFAULT_PROJECT_NAME = _project.DEFAULT_PROJECT_NAME
+# 任务归属「未分类」时写进 state["project_id"] 的值就是系统项目 UUID。
+UNCLASSIFIED_PROJECT_ID = SYSTEM_PROJECT_ID
+
+
+def system_project_id():
+    """系统工作区「未分类」的 UUID。"""
+    return _project.SYSTEM_PROJECT_ID
+
+
+def is_system_project_id(project_id):
+    return _project.is_system_project_id(project_id)
+
+
+def is_system_project(project):
+    return _project.is_system_project(project)
+
+
+def resolved_project_id(state):
+    """任务所属项目 ID；**永远返回一个真实项目 UUID，或空字符串**。
+
+    三种输入被刻意区分开，因为它们语义不同：
+
+    - 字段缺失：迁移前创建的旧任务 -> 归入系统工作区「未分类」；
+    - 显式 `None` / 空字符串：用户选择了「未分类」-> 同样是系统工作区。
+      这是产品模型允许的状态，且**它仍然是一个真实的容器**：未分类的任务
+      与普通项目走同一套读写，因此"打开项目"不会撞上不存在的记录；
+    - 其它值：可能是历史别名 `"default"`（旧版本的虚拟 project id）或旧版本
+      按名称派生的 slug。两者都经 `canonical_project_id` 归一，`"default"`
+      收敛到系统项目 UUID，旧 slug 原样保留以便仍能打开旧项目记录。
+
+    重要：本函数**不做磁盘 I/O**，"未分类"的落盘由变更路径
+    （`ensure_system_project`）负责，读取路径保持无副作用。
+    """
+    raw = state or {}
+    if "project_id" not in raw:
+        return _project.SYSTEM_PROJECT_ID
+    value = raw.get("project_id")
+    if value is None or not str(value).strip():
+        return _project.SYSTEM_PROJECT_ID
+    return _project.canonical_project_id(value)
+
+
+def list_projects():
+    """列出磁盘上的项目（含系统工作区）。
+
+    **纯读取：不创建任何东西。** 系统工作区由变更路径（创建项目、归档任务、
+    提升记忆）通过 `ensure_system_project()` 落盘；只读展示用
+    `system_project_view()` 在内存中给出。
+    """
+    return _project.list_projects(OUTPUT_DIR)
+
+
+def project_sections():
+    """界面用的分区视图：{system, active, archived}（同一次扫盘的分区）。"""
+    return _project.split_projects(list_projects())
+
+
+def system_project_view():
+    """系统工作区「未分类」的只读表示：磁盘上没有时也在内存中给出。
+
+    它带真实 UUID 与 `is_system=True`，因此界面渲染、路由、任务归属都能直接
+    使用，不需要先写文件，也不会出现"虚拟 project id"。
+    """
+    existing = load_project(_project.SYSTEM_PROJECT_ID)
+    return existing if existing is not None else _project.empty_system_project()
+
+
+# 向后兼容别名：旧名字里的「默认项目」现在叫系统工作区「未分类」。
+default_project_view = system_project_view
+
+
+def ensure_default_project():
+    """兼容别名：把系统工作区落盘（旧名字）。"""
+    return ensure_system_project()
+
+
+def ensure_system_project():
+    """把系统工作区落盘（幂等）。只有变更路径调用它。"""
+    _project.migrate_legacy_layout(OUTPUT_DIR)
+    _project.ensure_system_project(OUTPUT_DIR)
+    _migrate_legacy_system_tm()
+    return system_project_view()
+
+
+def _migrate_legacy_system_tm():
+    """把历史遗留的 `projects/default/translation_memory.json` 补到根路径。
+
+    系统工作区的 TM 只有一个权威位置：`outputs/translation_memory.json`
+    （旧默认项目的全局记忆路径）。旧版本里某些路径曾经把 TM 写进
+    `projects/<id>/translation_memory.json`；迁移时**只在权威文件不存在时**
+    搬过来，绝不合并两份——那会造成"同一实体两份 TM 真值"。
+    """
+    authoritative = OUTPUT_DIR / "translation_memory.json"
+    if authoritative.is_file():
+        return False
+    legacy = _project.projects_root(OUTPUT_DIR) \
+        / _project.SYSTEM_PROJECT_ID / "translation_memory.json"
+    if not legacy.is_file():
+        return False
+    try:
+        authoritative.parent.mkdir(parents=True, exist_ok=True)
+        legacy.replace(authoritative)
+    except OSError:
+        return False
+    return True
+
+
+def list_active_projects():
+    """活动项目 + 系统工作区（不含已归档）：新建任务与选择器用它。"""
+    return [p for p in list_projects() if not p.get("archived_at")]
+
+
+def list_active_project_options():
+    """活动项目选项，**始终包含系统工作区**（只读，不落盘）。
+
+    系统工作区是「未分类」这个真实选择的落点：磁盘上还没有它的记录时，
+    也在内存中作为一项给出，界面因此不会少一个选项、也不会多一个假项目。
+    """
+    projects = list_active_projects()
+    if not any(_project.is_system_project(p) for p in projects):
+        projects = [_project.empty_system_project(), *projects]
+    return projects
+
+
+def find_project_by_name(name, *, exclude=""):
+    """按显示名称查找项目（读取路径）。名称不是主键，仅用于人工输入入口。"""
+    return _project.find_by_name(list_projects(), name, exclude=exclude)
+
+
+# ---- CRUD：创建 / 读取 / 更新 / 归档 / 删除 ----
+
+PROJECT_DESCRIPTION_LIMIT = 600
+PROJECT_NAME_LIMIT = 80
+
+
+def validate_project_name(name, *, exclude=""):
+    """校验项目显示名称；返回清理后的名称，不合法时抛 ValueError。
+
+    名称不是主键，但仍然要唯一：项目页与 picker 都用名称做人工入口，
+    重名会让"选哪个项目"变成猜谜。
+    """
+    cleaned = str(name or "").strip()
+    if not cleaned:
+        raise ValueError("项目名称不能为空")
+    if len(cleaned) > PROJECT_NAME_LIMIT:
+        raise ValueError(f"项目名称最多 {PROJECT_NAME_LIMIT} 个字符")
+    if cleaned.casefold() == _project.SYSTEM_PROJECT_NAME.casefold():
+        raise ValueError(f"「{_project.SYSTEM_PROJECT_NAME}」是系统工作区名称，"
+                         "不能用作项目名称")
+    if existing := find_project_by_name(cleaned, exclude=exclude):
+        raise ValueError(f"已存在同名项目「{existing['name']}」")
+    return cleaned
+
+
+def create_project(name, description=""):
+    """创建项目；返回项目记录。
+
+    ID 是现场生成的 UUIDv4，**不由名称派生**：改名不换 ID，同名不同项目也不会
+    互相覆盖。名称仍要求唯一（人工入口用名称检索）。
+    """
+    cleaned = validate_project_name(name)
+    project = _project.empty_project(
+        _project.new_project_id(), cleaned,
+        description=str(description or "").strip()[:PROJECT_DESCRIPTION_LIMIT])
+    return _project.save_project(OUTPUT_DIR, project)
+
+
+def load_project(project_id):
+    """按 ID 读取项目；不存在时返回 None（读取路径不创建任何东西）。"""
+    return _project.load_project(OUTPUT_DIR, project_id)
+
+
+def save_project(project):
+    return _project.save_project(OUTPUT_DIR, project)
+
+
+def require_project(project_id):
+    """按 ID 读取项目；不存在时抛带原因的 ValueError。
+
+    系统工作区在磁盘上还没有记录时返回内存视图——它的 ID 是固定 UUID，
+    "记录还没落盘"不等于"项目不存在"。
+    """
+    if not str(project_id or "").strip():
+        raise ValueError("必须指定项目")
+    if _project.is_system_project_id(project_id):
+        record = load_project(_project.SYSTEM_PROJECT_ID)
+        return record if record is not None else system_project_view()
+    project = load_project(project_id)
+    if project is None:
+        raise ValueError(f"项目不存在：{project_id}")
+    return project
+
+
+def rename_project(project_id, name):
+    """改名（**不改 ID**）。返回更新后的项目。"""
+    project = require_project(project_id)
+    cleaned = validate_project_name(name, exclude=project["project_id"])
+    return save_project(_project.set_metadata(project, name=cleaned))
+
+
+def update_project(project_id, *, name=None, description=None):
+    """更新项目基本信息（名称 / 描述）。名称变化走同一套唯一性校验。"""
+    project = require_project(project_id)
+    cleaned = None
+    if name is not None:
+        cleaned = validate_project_name(name, exclude=project["project_id"])
+    updated = _project.set_metadata(project, name=cleaned, description=description)
+    return save_project(updated)
+
+
+def archive_project(project_id, archived=True):
+    """归档 / 恢复项目。归档可恢复，不删除任务，也不删除项目记忆。
+
+    系统工作区一律拒绝归档——这项保护先于磁盘状态判断，不能因为"记录还不存在"
+    而失效。
+    """
+    if _project.is_system_project_id(project_id):
+        raise ValueError(f"「{_project.SYSTEM_PROJECT_NAME}」是系统工作区，不能归档")
+    project = load_project(project_id)
+    if project is None:
+        raise ValueError(f"项目不存在：{project_id}")
+    return save_project(_project.set_archived(project, bool(archived)))
+
+
+def restore_project(project_id):
+    """恢复已归档项目（`archive_project(id, False)` 的语义化入口）。"""
+    return archive_project(project_id, False)
+
+
+def project_for_job(job_id, state=None):
+    """返回任务所属项目；任务不存在时返回 None。
+
+    **每个任务都属于某个真实项目**：没有归属的任务属于系统工作区「未分类」，
+    因此这里返回的是带真实 UUID 的记录（磁盘上还没落盘时给出内存只读视图），
+    而不是 None。调用方因此可以直接用 `project["project_id"]` 打开项目详情，
+    不会撞上"项目不存在"。
+
+    **纯读取**：不创建文件。需要真正落盘的地方（提升记忆、归档任务）会自己调用
+    `ensure_system_project()`。
+    """
+    state = state if state is not None else load_job_state(job_id)
+    if state is None:
+        return None
+    project_id = resolved_project_id(state)
+    if not str(project_id or "").strip():
+        return None
+    project = load_project(project_id)
+    if project is not None:
+        return project
+    if _project.is_system_project_id(project_id):
+        return system_project_view()
+    return None
+
+
+def resolve_project_ref(project_id_or_name, *, create=False, description=""):
+    """把"项目 ID 或名称"解析成真实项目记录。
+
+    - 命中 ID（含历史别名 `default` -> 系统工作区）→ 直接返回；
+    - 命中名称 → 返回同名项目（名称只是人工入口，解析后一律改用 ID）；
+    - 都没命中：`create=True` 时新建一个 UUID 项目，否则抛 ValueError。
+    """
+    label = str(project_id_or_name or "").strip()
+    if not label:
+        raise ValueError("必须指定项目")
+    if _project.is_system_project_id(label):
+        return ensure_system_project()
+    direct = load_project(label)
+    if direct is not None:
+        return direct
+    if by_name := find_project_by_name(label):
+        return by_name
+    if create:
+        return create_project(label, description=description)
+    raise ValueError(f"项目不存在：{label}")
+
+
+def assign_job_to_project(job_id, project_id_or_name):
+    """把任务归入项目（人工动作）。
+
+    参数是项目 ID 或项目名称：名称经 `find_project_by_name` 解析成 ID 之后
+    一律用 ID 落盘。**不会**因为"名称没命中"就静默新建项目——那会让一次误输入
+    产生一个幽灵项目；确实要新建请用 `create_project`。
+    """
+    state = load_job_state(job_id)
+    if state is None:
+        return None
+    project = resolve_project_ref(project_id_or_name)
+    state["project_id"] = project["project_id"]
+    save_job_state(job_id, state)
+    return project
+
+
+def list_project_jobs(project_id):
+    """项目的任务列表：由各任务的 project_id 派生，不另存一份 job_ids。
+
+    系统工作区的列表包含所有"没有归属"的任务（字段缺失、显式 null、
+    历史别名 `default`），因为它就是这些任务的容器。
+    """
+    target = _project.canonical_project_id(project_id) \
+        if str(project_id or "").strip() else _project.SYSTEM_PROJECT_ID
+    return [job for job in list_jobs()
+            if resolved_project_id(job["state"]) == target]
+
+
+def list_unassigned_jobs():
+    """未分类任务（系统工作区「未分类」里的任务）。"""
+    return list_project_jobs(_project.SYSTEM_PROJECT_ID)
+
+
+def project_name_for_id(project_id):
+    """项目 ID 的可读名称；找不到记录时如实说「未知项目」。
+
+    空值 / 历史别名 `default` 都指向系统工作区，因此返回「未分类」——这正是
+    "所有没有 projectId 的任务归入系统项目"的直接体现。
+    """
+    if not str(project_id or "").strip():
+        return _project.SYSTEM_PROJECT_NAME
+    project = load_project(project_id)
+    if project is None and _project.is_system_project_id(project_id):
+        project = system_project_view()
+    return str(project["name"]) if project else "未知项目"
+
+
+# 任务正在运行的状态：此时它已经读取过一个项目的记忆，改归属会让同一个任务
+# 在两套记忆之间漂移，因此这些状态一律拒绝移动。
+_ACTIVE_RUNTIME_STATUSES = {
+    "resume_requested", "queued", "starting", "running",
+    "waiting_external", "cancelling",
+}
+
+
+def job_is_active(job_id, state=None):
+    """任务是否正在运行（不可改归属）。"""
+    try:
+        view = build_job_runtime_view(job_id, state)
+        status = view.get("runtime_status") or view.get("status")
+    except Exception:  # 运行状态不可读时不阻止用户操作，由后续流程兜底
+        return False
+    return str(status or "") in _ACTIVE_RUNTIME_STATUSES
+
+
+def assign_jobs_to_project(job_ids, project_id_or_name, *,
+                           move_translations=False):
+    """把一个或多个任务移入项目（人工动作，支持批量）。
+
+    - 正在运行的任务会被跳过：它已经读过某个项目的记忆，中途改归属会让同一个
+      任务在两套记忆之间漂移；
+    - 只改变归属。`move_translations=True` 时额外把该任务**已审校**的译文并入
+      目标项目的翻译记忆——只增不改，不覆盖目标项目已有的译法；
+    - 不迁移术语或风格：那些需要通过 Memory gate 显式提升
+      （`promote_job_to_project`）。
+
+    返回 {"project", "moved", "skipped", "tm_added"}。
+    """
+    target = resolve_project_ref(project_id_or_name, create=True)
+
+    moved, skipped, tm_added = [], [], 0
+    target_tm = load_tm(target["project_id"])
+    for job_id in job_ids or []:
+        state = load_job_state(job_id)
+        if state is None:
+            skipped.append({"job_id": job_id, "reason": "任务不存在"})
+            continue
+        if resolved_project_id(state) == target["project_id"]:
+            skipped.append({"job_id": job_id, "reason": "已在该项目中"})
+            continue
+        if job_is_active(job_id, state):
+            skipped.append({"job_id": job_id, "reason": "任务正在运行，无法改归属"})
+            continue
+        if move_translations:
+            job_lang = state_target_lang(state)
+            for pair in state.get("pairs") or []:
+                source = str(pair.get("source") or "")
+                target_text = str(pair.get("target") or "")
+                if not pair.get("reviewed") or not _tm_eligible(source, target_text):
+                    continue
+                key = tm_scope_key(job_lang, source)
+                if not key:
+                    continue  # 目标语言无法证明：不迁移记忆，也不猜
+                if key in target_tm:
+                    continue  # 目标项目已有该语言下的译法：不覆盖
+                tm_put(target_tm, source, target_text, job_lang)
+                tm_added += 1
+        state["project_id"] = target["project_id"]
+        save_job_state(job_id, state)
+        moved.append(job_id)
+    if tm_added:
+        save_tm(target_tm, target["project_id"])
+    return {"project": target, "moved": moved, "skipped": skipped,
+            "tm_added": tm_added}
+
+
+def promote_job_to_project(job_id, *, actor="user", state=None):
+    """把任务中**已被人工确认**的知识提升进项目记忆（Memory gate）。
+
+    只提升：locked 术语、confirmed 风格规则、human 决定与其授权记录。
+    候选术语与未审校输出一律留在任务里。
+
+    任务不属于任何项目时抛 `ValueError`：提升是把知识写进某个容器，静默落到
+    默认项目会让用户在不知情的情况下污染另一个项目。
+    """
+    state = state if state is not None else load_job_state(job_id)
+    if state is None:
+        return None
+    project = project_for_job(job_id, state)
+    if project is None:
+        raise ValueError("这个任务还没有归入任何项目；请先把任务移入一个项目。")
+
+    frozen = state.get("glossary_frozen") or {}
+    glossary_source = frozen.get("entries") or state.get("glossary") or []
+    human_actions = [item for item in state.get("human_actions") or []
+                     if isinstance(item, dict)
+                     and str(item.get("record_type") or "") == "human_decision"]
+
+    merged = _project.merge_confirmed_knowledge(
+        project,
+        glossary=glossary_source,
+        style_rules=state.get("confirmed_style_rules") or [],
+        human_decisions=human_actions,
+        source_job_id=job_id,
+        actor=actor,
+    )
+    return _project.save_project(OUTPUT_DIR, merged)
+
+
+def project_memory_view(project=None):
+    """项目记忆摘要；TM 计数取自既有受控存储（项目文件不持有 TM）。"""
+    project = project if project is not None else system_project_view()
+    return _project.memory_view(project,
+                                translation_memory_count=len(
+                                    load_tm(project["project_id"])))
+
+
+def project_summary(project):
+    """项目页卡片需要的派生数据：记忆摘要 + 任务数（不落任何文件）。"""
+    view = project_memory_view(project)
+    jobs = list_project_jobs(project["project_id"])
+    view["job_count"] = len(jobs)
+    view["jobs"] = jobs
+    return view
+
+
+def _project_backup_dir():
+    return _project.projects_root(OUTPUT_DIR) / "_deleted"
+
+
+def delete_project(project_id, *, confirm_name, move_jobs_to=None):
+    """删除项目（永久，不可逆），删除前先写可恢复备份。
+
+    四重保护，缺一不可：
+
+    1. 系统工作区「未分类」永远不可删除：它是所有无归属任务的容器；
+    2. 必须逐字输入项目名称确认（`confirm_name`），避免误点；
+    3. 项目下仍有任务时**拒绝删除**，提示先移动或删除任务。可选参数
+       `move_jobs_to` 保留给程序化调用（先批量移走再删），界面不再提供——
+       "删项目顺手挪任务"是最容易误伤的动作，不应该是一个按钮；
+    4. 删除前把完整项目记忆（含已审校译对）写入
+       `outputs/projects/_deleted/<id>-<时间>.json`。
+
+    备份就是 `import_project_memory` 能直接吃回去的格式，因此误删在实践中
+    仍然可恢复。
+    """
+    if _project.is_system_project_id(project_id):
+        raise ValueError(
+            f"「{_project.SYSTEM_PROJECT_NAME}」是系统工作区，不能删除")
+    project = load_project(project_id)
+    if project is None:
+        raise ValueError(f"项目不存在：{project_id}")
+
+    label = str(confirm_name or "").strip()
+    if label != project["name"]:
+        raise ValueError(f"确认名称不匹配：请输入项目名称「{project['name']}」")
+
+    jobs = list_project_jobs(project["project_id"])
+    reassigned: list[str] = []
+    if jobs:
+        if move_jobs_to is None:
+            raise ValueError(
+                f"项目下仍有 {len(jobs)} 个任务，请先移动或删除这些任务，再删除项目")
+        target = resolve_project_ref(move_jobs_to, create=False)
+        result = assign_jobs_to_project([job["job_id"] for job in jobs],
+                                        target["project_id"])
+        reassigned = result["moved"]
+        if result["skipped"]:
+            reasons = "；".join(f"{item['job_id']}：{item['reason']}"
+                               for item in result["skipped"])
+            raise ValueError(f"有任务无法移出，已取消删除：{reasons}")
+
+    backup_dir = _project_backup_dir()
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = backup_dir / f"{project['project_id']}-{stamp}.json"
+    backup.write_text(export_project_memory(project["project_id"]),
+                      encoding="utf-8")
+
+    shutil.rmtree(_project.project_dir(OUTPUT_DIR, project["project_id"]),
+                  ignore_errors=True)
+    return {"project_id": project["project_id"], "name": project["name"],
+            "backup": backup, "reassigned_jobs": reassigned}
+
+
+def list_project_conflicts(project_id):
+    """项目的待决冲突（导入时发现、等待人工决定）。"""
+    project = load_project(project_id)
+    if project is None:
+        return []
+    return _project.pending_conflicts(project)
+
+
+def resolve_project_conflict(project_id, conflict_id, *, adopt_incoming=True,
+                             actor="用户"):
+    """处理一条待决冲突：采纳导入版本，或保留本地版本。
+
+    两种选择都会被记入项目 `promotion_log`，因此"为什么是这个译名"可追溯。
+    翻译记忆的改动在这里写入，因为 TM 存储不归项目文件所有。
+    """
+    project = require_project(project_id)
+    conflict = next((item for item in _project.pending_conflicts(project)
+                     if item.get("conflict_id") == conflict_id), None)
+    if conflict is None:
+        raise ValueError("冲突不存在或已处理")
+    updated, tm_change = _project.resolve_conflict(
+        project, conflict, adopt_incoming=adopt_incoming, actor=actor)
+    saved = save_project(updated)
+    if tm_change:
+        target_tm = load_tm(saved["project_id"])
+        for key, record in tm_change.items():
+            # 冲突记录里的 source 就是记忆**键**，因此作用域（目标语言）随之保留；
+            # 记录字段缺失时从键前缀补上，让"这条记忆属于哪种语言"不依赖键格式。
+            language, _ = tm_unscope_key(key)
+            if language and not record.get("target_lang"):
+                record["target_lang"] = language
+            target_tm[key] = record
+        save_tm(target_tm, saved["project_id"])
+    return saved
+
+
+def resolve_all_project_conflicts(project_id, *, adopt_incoming=False, actor="用户"):
+    """批量处理全部待决冲突；返回处理条数。
+
+    默认**保留本地**：批量操作最容易误伤，默认值必须是保守的那一边。
+    """
+    handled = 0
+    for conflict in list(list_project_conflicts(project_id)):
+        resolve_project_conflict(project_id, conflict["conflict_id"],
+                                 adopt_incoming=adopt_incoming, actor=actor)
+        handled += 1
+    return handled
+
+
+def export_project_memory(project_id):
+    """导出项目记忆为可移植 JSON 文本（含该项目自己的已审校记忆）。
+
+    `project_id` 可以是历史别名 `default`——它归一到系统工作区，因此旧链接
+    与旧脚本不会撞上"项目不存在：default"。
+    """
+    project = require_project(project_id)
+    payload = _project.export_memory(
+        project, translation_memory=load_tm(project["project_id"]))
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def import_project_memory(raw, *, name=None, description=""):
+    """导入项目记忆（只增不改），返回 (项目, 报告)。
+
+    同名项目会被**并入**，而不是新建重复项目；`name` 可以显式改名。名称没命中
+    时新建一个 UUID 项目（ID 现场生成，不再由名称派生）。
+    翻译记忆由本层合并，因为 TM 存储不归项目文件所有。
+    """
+    if isinstance(raw, (bytes, bytearray)):
+        if len(raw) > _project.MAX_IMPORT_BYTES:
+            raise ValueError("项目记忆文件过大，已拒绝导入")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError("项目记忆文件必须是 UTF-8 编码的 JSON") from exc
+        except ValueError as exc:
+            raise ValueError(f"项目记忆文件不是合法 JSON：{exc}") from exc
+    elif isinstance(raw, str):
+        if len(raw.encode("utf-8")) > _project.MAX_IMPORT_BYTES:
+            raise ValueError("项目记忆文件过大，已拒绝导入")
+        payload = json.loads(raw)
+    elif isinstance(raw, dict):
+        payload = raw
+    else:
+        raise ValueError("无法识别的项目记忆输入")
+
+    payload = _project.validate_memory_payload(payload)
+    source_name = str(name or (payload.get("project") or {}).get("name") or "").strip()
+    existing = find_project_by_name(source_name) if source_name else None
+    project, report, imported_tm = _project.import_memory(
+        existing, payload, name=name, project_id=_project.new_project_id(),
+        description=description)
+    saved = save_project(project)
+
+    if imported_tm:
+        current = load_tm(saved["project_id"])
+        recorded = _project.record_tm_conflicts(
+            saved, current, imported_tm,
+            imported_from=str((payload.get("project") or {}).get("name") or ""))
+        if recorded:
+            report["conflicts_recorded"] = report.get("conflicts_recorded", 0) + recorded
+            saved = save_project(saved)
+        added = conflicts = 0
+        for key, record in imported_tm.items():
+            if key in current:
+                if current[key].get("target") != record["target"]:
+                    conflicts += 1
+                continue
+            language = _tm_scope.tm_record_language(key, record)
+            if language:
+                # 语言可证明：经 tm_put 写入，保证键与记录字段都是规范形态
+                # （只靠键前缀传语言，任何一次键重写都会静默丢掉语言身份）。
+                tm_put(current, _tm_scope.tm_unscope_key(key)[1],
+                       record["target"], language)
+            else:
+                # 语言不可证明：条目保留，但永不参与自动命中（fail closed）。
+                current[key] = record
+            added += 1
+        if added:
+            save_tm(current, saved["project_id"])
+        report["tm_added"] = added
+        report["tm_conflicts_count"] = conflicts
+    return saved, report
+
+
+def project_injection(project_id):
+    """新任务启动时注入的项目记忆（锁定术语 + 确认风格规则）。
+
+    系统工作区同样可以持有记忆（它就是"未分类任务"的容器），因此这里不特殊
+    跳过；找不到记录时才返回空注入。
+    """
+    if not str(project_id or "").strip():
+        project_id = _project.SYSTEM_PROJECT_ID
+    project = load_project(project_id)
+    if project is None and _project.is_system_project_id(project_id):
+        project = system_project_view()
+    if project is None:
+        return {"glossary": [], "style_rules": "", "glossary_version": None,
+                "glossary_hash": ""}
+    return _project.injection_for(project)
+
+
+def _project_now_iso():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _project_memory_injection(state):
+    """读取任务所属项目的记忆，供管线注入。
+
+    返回 (glossary_entries, style_text, meta)；任务**不属于任何项目**、项目不存在
+    或记忆为空时返回空值，因此对「无项目」的任务与没有项目的旧任务都是完全无副
+    作用的。
+    """
+    try:
+        project_id = resolved_project_id(state)
+        if not project_id:
+            return [], "", {}
+        project = load_project(project_id)
+        if project is None:
+            return [], "", {}
+        injection = _project.injection_for(project)
+    except Exception:  # 项目记忆损坏不应阻断翻译
+        return [], "", {}
+    meta = {
+        "project_id": project_id,
+        "glossary_version": injection.get("glossary_version"),
+        "glossary_hash": injection.get("glossary_hash") or "",
+    }
+    return injection["glossary"], injection["style_rules"], meta
 
 
 # ================= 翻译 / 修复 / 审校（对齐 localize-anything 的三通道）=================
@@ -1106,6 +1991,7 @@ def translate_batch(segments, ctx_prev, ctx_next, glossary_text, style_rules, ta
             last_err = e
             if is_rate_limited(e):
                 time.sleep(15)
+
     raise RuntimeError(
         f"批次翻译失败（{len(segments)} 段）："
         f"{last_err or '模型返回格式异常或数量不匹配'}"
@@ -1475,7 +2361,7 @@ def annotate_stage(state, job_id, glossary, provider, api_key, model, target_lan
 def translate_stage(state, job_id, glossary, provider, api_key, model, target_lang,
                     style_rules, enable_review, use_tm=True, document_profile=None,
                     on_status=None, on_caption=None, translator_config=None,
-                    reviewer_config=None):
+                    reviewer_config=None, batch_size=None, max_batch_chars=None):
     """阶段二：语义批次翻译 + 确定性检查/修复 + 独立审校 + 翻译记忆。
 
     对齐 localize-anything 经验：
@@ -1504,12 +2390,23 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
         fallback_api_key=api_key)
     translator_call = _model_roles.make_role_call(call_llm, translator_config)
     reviewer_call = _model_roles.make_role_call(call_llm, reviewer_config)
-    tm = load_tm() if use_tm else {}
+    _tm_project = tm_project_id(state)
+    # 目标语言是 TM 作用域的一部分：没有它就不建立任何命中路径（fail closed）。
+    _tm_lang = str(target_lang or "").strip() or str(state.get("target_lang") or "").strip()
+    tm = load_tm(_tm_project) if use_tm else {}
+    tm_norm_index = tm_index(tm, _tm_lang) if use_tm else {}
     if use_tm:
+        def _tm_scope(source, target):
+            """把目标语言编进记忆键；语言无法证明时不恢复任何记忆。"""
+            key = tm_scope_key(_tm_lang, source)
+            if not key:
+                return None
+            return key, tm_record(target, _tm_lang)
+
         recovered, pending_events = _checkpoint.reconcile_translation_memory(
-            tm, state, job_dir(job_id))
+            tm, state, job_dir(job_id), scope=_tm_scope)
         if recovered:
-            save_tm(tm)
+            save_tm(tm, _tm_project)
             state["tm_recovered_count"] = state.get("tm_recovered_count", 0) + pending_events
             save_job_state(job_id, state)
     paras = state["paras"]
@@ -1539,10 +2436,19 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
             truncated_indexes = []
         save_job_state(job_id, state)
 
+    # 批次大小直接影响调用次数与耗时（本仓库 82 段文档实测：4/2400 → 32 批，
+    # 6/4800 → 17 批）。默认沿用模块常量以保持既有行为，只有显式配置时才改变。
+    effective_batch_size = int(batch_size or BATCH_SIZE)
+    effective_max_chars = int(max_batch_chars or TRANSLATION_MAX_BATCH_CHARS)
+    state["batch_plan"] = {
+        "batch_size": effective_batch_size,
+        "max_batch_chars": effective_max_chars,
+    }
     batches = make_batches(
-        paras, max_chars=TRANSLATION_MAX_BATCH_CHARS,
+        paras, batch_size=effective_batch_size, max_chars=effective_max_chars,
         semantic_units=state.get("semantic_units")
         or state.get("section_digests") or None)
+    state["batch_plan"]["batch_count"] = len(batches)
     registry = _entity_registry.EntityRegistry(state.get("entity_registry") or [])
 
     # 断点：从第一个未完成批次继续；若中间批次不完整则截断重译
@@ -1596,17 +2502,20 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
         to_translate = []  # (index, clean_source)
         for i, para in enumerate(batch):
             clean_src = para.replace('\n', ' ')
-            hit = tm.get(clean_src)
-            if hit and hit.get("reviewed") and hit.get("target"):
+            hit, tm_match = tm_lookup(tm, clean_src, tm_norm_index,
+                                      target_lang=_tm_lang)
+            if hit:
                 batch_pairs[i] = {"source": clean_src, "target": hit["target"],
                                   "initial_target": hit["target"],
                                   "accepted_target": hit["target"],
                                   "target_provenance": "tm_approved",
                                   "reviewed": True, "review_status": "tm_approved",
-                                  "from_tm": True}
+                                  "from_tm": True, "tm_match": tm_match}
                 state["tm_used_count"] = state.get("tm_used_count", 0) + 1
-            elif not re.search(r"[A-Za-z0-9\u4e00-\u9fff]", clean_src):
-                # 纯符号段落（章节分隔装饰等）：不是正文，原样保留，不调模型
+            elif not has_textual_content(clean_src):
+                # 纯符号段落（章节分隔装饰等）：不是正文，原样保留，不调模型。
+                # 判定按 Unicode 类别（字母/数字），不枚举语言区间——西里尔、
+                # 谚文、阿拉伯等脚本同样是正文，必须走翻译路径。
                 batch_pairs[i] = {"source": clean_src, "target": clean_src,
                                   "initial_target": clean_src,
                                   "accepted_target": clean_src,
@@ -2083,7 +2992,12 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                     p["accepted_target"] = p["target"]
                     p["target_provenance"] = "tm_approved" if p.get("from_tm") else "reviewed"
                     if use_tm:
-                        tm[p["source"]] = {"target": p["target"], "reviewed": True}
+                        # 键 = 目标语言 + 原文：写进去的记忆只属于这一种目标语言。
+                        _key = tm_put(tm, p["source"], p["target"], _tm_lang)
+                        if _key:
+                            _norm = tm_normalize(p["source"])
+                            if _norm and _norm not in tm_norm_index:
+                                tm_norm_index[_norm] = _key
                     stats["reviewed_segments"] += 1
 
         _commit_translation_batch(batch_pairs, offset)  # 正式状态先提交，TM 只随后晋升
@@ -2101,7 +3015,7 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                 "batch": bi, "offset": offset, "phase": "tm_promotion_pending",
                 "entries": tm_entries,
             })
-            save_tm(tm)
+            save_tm(tm, _tm_project)
             _checkpoint.append_event(job_dir(job_id), {
                 "batch": bi, "offset": offset, "phase": "tm_promotion_done",
                 "entries": tm_entries,
@@ -2887,10 +3801,45 @@ def _runtime_worker_registered(job_id, worker_id=None):
             worker_id is None or getattr(worker, "worker_id", None) == worker_id))
 
 
+def _annotation_blocks_completion(state):
+    """标注是否仍然阻止"业务完成"。
+
+    只有**显式要求**标注（`enable_annotate is True`）且尚未完成时才阻止。
+    缺失该字段不能当作"要求标注"：产品自身的默认是关闭
+    （`DELIVERY_CONFIG_DEFAULTS["enable_annotate"] = False`），而旧任务里往往
+    根本没有这个键。把它当作 True 会让一个已经完成的任务被报成
+    `idle_incomplete`，于是概览一边说"可以准备交付"、一边渲染出「继续处理」。
+    """
+    if not isinstance(state, dict):
+        return False
+    return state.get("enable_annotate") is True and not state.get("annotations_done")
+
+
 def _runtime_business_complete(state):
     return bool(state and state.get("p1_done") and state.get("p2_done") and (
-        state.get("p3_done") or not state.get("report_enabled", True)) and (
-        state.get("annotations_done") or not state.get("enable_annotate", True)))
+        state.get("p3_done") or not state.get("report_enabled", True)) and not
+        _annotation_blocks_completion(state))
+
+
+def _lost_worker_message(runtime, state, *, stalled=False):
+    """中断/停滞时给用户一个有信息量的原因。
+
+    以前这里只有一句笼统的"上次运行已中断"，用户无法判断是模型卡住了、还是应用
+    被关掉了。现在带上：中断时正在做什么、已经提交了多少段、能否从断点继续。
+    """
+    label = str(runtime.get("phase_label") or runtime.get("operation_label")
+                or runtime.get("phase") or "").strip()
+    pairs = len((state or {}).get("pairs") or [])
+    paras = len((state or {}).get("paras") or [])
+    if stalled:
+        parts = ["超过预期时间没有收到运行信号"]
+    else:
+        parts = ["上次运行的进程已退出（应用被关闭或中断），翻译线程随之终止"]
+    if label:
+        parts.append(f"中断时正在：{label}")
+    if paras:
+        parts.append(f"已完成 {pairs}/{paras} 段，可从断点继续")
+    return "；".join(parts)
 
 
 def _runtime_mark_lost(job_id, status, message):
@@ -2919,26 +3868,33 @@ def get_job_runtime_status(job_id, state=None):
                 and transition_age is not None and transition_age <= RUNTIME_STALL_SECONDS:
             return runtime
         if not _runtime_pid_alive(pid):
-            return _runtime_mark_lost(job_id, "interrupted", "上次运行已中断")
+            return _runtime_mark_lost(job_id, "interrupted",
+                                   _lost_worker_message(runtime, state))
         if lease and lease < now or heartbeat and (
                 now - heartbeat).total_seconds() > RUNTIME_STALL_SECONDS:
             if registered:
-                return _runtime_mark_lost(job_id, "stalled", "暂无新的运行信号")
-            return _runtime_mark_lost(job_id, "interrupted", "上次运行已中断")
+                return _runtime_mark_lost(job_id, "stalled",
+                                       _lost_worker_message(
+                                           runtime, state, stalled=True))
+            return _runtime_mark_lost(job_id, "interrupted",
+                                   _lost_worker_message(runtime, state))
         if not registered and pid == os.getpid() \
                 and status in {"queued", "starting"} \
                 and transition_age is not None and transition_age <= RUNTIME_STALL_SECONDS:
             return runtime
         if not registered and pid == os.getpid():
-            return _runtime_mark_lost(job_id, "interrupted", "上次运行已中断")
+            return _runtime_mark_lost(job_id, "interrupted",
+                                   _lost_worker_message(runtime, state))
         return runtime
     if status == "idle":
         inferred = "completed" if _runtime_business_complete(state) else "idle_incomplete"
         if inferred != status:
-            return update_runtime_state(job_id, status=inferred,
-                                        phase=inferred,
-                                        phase_label="已完成" if inferred == "completed"
-                                        else "尚未完成")
+            # 只影响本次读取的返回值，**不落盘**：读取不应有写副作用。
+            # 此前的实现会在这里 update_runtime_state，于是"看一眼任务"就会给
+            # 从未运行过的任务写出 runtime_state.json。真实状态由 worker 在任务
+            # 运行时写入；这里的推断每次都能重新得出同样结果，不需要持久化。
+            return {**runtime, "status": inferred, "phase": inferred,
+                    "phase_label": "已完成" if inferred == "completed" else "尚未完成"}
     return runtime
 
 
@@ -3044,6 +4000,22 @@ def build_job_runtime_view(job_id, state=None):
     }
 
 
+def _append_runtime_technical_log(job_id, text):
+    """向技术日志追加一行。
+
+    进程被直接杀掉时不会有机会写任何东西，所以关键节点必须**主动**留痕：
+    worker 启动/释放都记一条，这样"有启动、没有释放"本身就说明了中断方式。
+    """
+    try:
+        path = runtime_technical_log_path(job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(f"[{_utc_now_iso()}] {text}\n")
+            stream.flush()
+    except OSError:
+        pass  # 日志失败不得影响任务本身
+
+
 def _write_runtime_technical_log(job_id, exc):
     path = runtime_technical_log_path(job_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3110,7 +4082,7 @@ def _runtime_overall_progress(stage_info, state):
         return 0.0
     if state.get("p1_done") and state.get("p2_done") \
             and (state.get("p3_done") or not state.get("report_enabled", True)) \
-            and (state.get("annotations_done") or not state.get("enable_annotate", True)):
+            and not _annotation_blocks_completion(state):
         return 1.0
     return None
 
@@ -3224,6 +4196,13 @@ def _run_job_worker(job_id, filename, file_bytes, pipeline_kwargs, base_url=None
     _RUNTIME_CTX.job_id = job_id
     set_llm_base_url(base_url)
     heartbeat.start()
+    # 主动留痕：进程被直接杀掉时没有机会写日志，所以"有启动、没有释放"本身就是
+    # 最有价值的证据（本次排查正是靠它区分"被关闭"与"抛异常"）。
+    _append_runtime_technical_log(
+        job_id,
+        f"worker started pid={os.getpid()} thread={threading.current_thread().name}"
+        f" attempt={load_runtime_state(job_id).get('attempt')}"
+        f" resume={bool(load_runtime_state(job_id).get('resume_request_id'))}")
     try:
         kwargs = dict(pipeline_kwargs or {})
         kwargs.pop("on_status", None)
@@ -3271,7 +4250,11 @@ def _run_job_worker(job_id, filename, file_bytes, pipeline_kwargs, base_url=None
                                  worker={"owner_pid": None, "worker_id": None,
                                          "lease_expires_at": None})
         return result
-    except Exception as exc:  # noqa: BLE001 - worker must publish failure to UI
+    # 捕获 BaseException 而不是 Exception：worker 只捕 Exception 时，若线程抛出
+    # SystemExit 一类的 BaseException，`finally` 不会执行 → 心跳线程继续续租 →
+    # lease 永不过期 → 应用还活着时这个任务会**真的硬卡死**（状态一直停在活跃态，
+    # start_job_worker / resume_job 都会拒绝）。这里必须失败闭合。
+    except BaseException as exc:  # noqa: BLE001 - worker must publish failure to UI
         cancelled = _runtime_cancel_requested(job_id) or "请求取消" in str(exc)
         if not cancelled:
             _write_runtime_technical_log(job_id, exc)
@@ -3298,6 +4281,9 @@ def _run_job_worker(job_id, filename, file_bytes, pipeline_kwargs, base_url=None
                     "lease_expires_at": None})
         return None
     finally:
+        _append_runtime_technical_log(
+            job_id, f"worker released pid={os.getpid()}"
+                    f" thread={threading.current_thread().name}")
         stop_event.set()
         set_llm_base_url(None)
         _RUNTIME_CTX.__dict__.clear()
@@ -3570,8 +4556,9 @@ def _invalidate_translation_reviews(
         review_event_ids=review_event_ids)
     if not any(changed.values()):
         return changed
-    tm = load_tm()
+    tm = load_tm(tm_project_id(state))
     tm_changed = False
+    job_lang = state_target_lang(state)
     pairs = state.get("pairs") or []
     for index in indexes:
         if not 0 <= index < len(pairs):
@@ -3583,11 +4570,10 @@ def _invalidate_translation_reviews(
         for key in ("accepted_target", "human_accepted", "accepted_by_human"):
             pair.pop(key, None)
         source = str(pair.get("source") or "")
-        if source in tm:
-            del tm[source]
+        if tm_discard(tm, source, job_lang):
             tm_changed = True
     if tm_changed:
-        save_tm(tm)
+        save_tm(tm, tm_project_id(state))
     _recount_reviewed_segments(state)
     return changed
 
@@ -4402,8 +5388,10 @@ def restore_translation_edit(job_id, index, actor="user"):
 
 
 def list_jobs():
+    """列出本地任务。**纯读取**：目录不存在时返回空列表，不创建它。"""
     jobs = []
-    _ensure_output_dir()
+    if not OUTPUT_DIR.is_dir():
+        return jobs
     for d in sorted(OUTPUT_DIR.iterdir()):
         sp = d / "state.json"
         if sp.is_file():
@@ -4418,15 +5406,93 @@ def list_jobs():
     return jobs
 
 
-def delete_job(job_id):
+def delete_job(job_id, *, allow_active=False):
+    """永久删除一个翻译任务（含其输出目录）。
+
+    正在运行的任务默认拒绝删除：worker 还在往这个目录写状态，删掉会留下一个
+    半写状态并让运行时报错。返回是否真的删除。
+    """
+    if not str(job_id or "").strip():
+        return False
     d = job_dir(job_id)
-    if d.exists():
-        shutil.rmtree(d)
+    if not d.exists():
+        return False
+    if not allow_active and job_is_active(job_id):
+        raise ValueError("任务正在运行，无法删除；请先取消或等它结束。")
+    shutil.rmtree(d)
+    return True
 
 
 def file_job_id(file_bytes):
-    """以文件内容哈希作为任务 ID：同一文件重传可自动续传，不同文件不会串状态。"""
+    """**文档身份**：文件内容哈希。同一份文档重传得到同一个值。
+
+    注意：这**不是任务身份**。同一份文档在不同项目 / 不同目标语言下是彼此
+    独立的本地化任务，内容哈希无法区分它们——用内容哈希当任务 ID 会让
+    "同一个文件、另一个项目、另一种目标语言"静默打开旧任务。任务身份见
+    `task_job_id` / `resolve_task_id`。
+    """
     return hashlib.sha256(file_bytes).hexdigest()[:16]
+
+
+# 任务身份 = 文档身份 + 本地化上下文（项目 + 目标语言 + 源语言）。
+# 文档内容相同不等于本地化任务相同：项目决定注入哪一套项目记忆与术语，
+# 目标语言决定译文本身。把它们丢掉，就等于让内容哈希替用户决定
+# "这两个语义不同的活是同一个活"。
+_TASK_ID_FIELDS = ("project_id", "target_lang", "source_lang")
+
+
+def task_context(project_id=None, target_lang=None, source_lang=None):
+    """本地化上下文的规范化三元组（用于任务身份与"是否同一个任务"的比较）。"""
+    return {
+        "project_id": resolved_project_id({"project_id": project_id}),
+        "target_lang": normalize_language(target_lang),
+        "source_lang": normalize_language(source_lang),
+    }
+
+
+def task_context_of(state):
+    """一个已存在任务记录的本地化上下文（缺字段按"未指定"处理）。"""
+    state = state or {}
+    return task_context(state.get("project_id"), state.get("target_lang"),
+                        state.get("source_lang"))
+
+
+def task_job_id(file_bytes, *, project_id=None, target_lang=None,
+                source_lang=None):
+    """**任务身份**：文档身份 + 本地化上下文，确定性推导，不读磁盘。"""
+    context = task_context(project_id, target_lang, source_lang)
+    digest = "\x1f".join([file_job_id(file_bytes)]
+                         + [context[field] for field in _TASK_ID_FIELDS])
+    return hashlib.sha256(digest.encode("utf-8")).hexdigest()[:16]
+
+
+def resolve_task_id(file_bytes, *, project_id=None, target_lang=None,
+                    source_lang=None):
+    """这份文档在**这个本地化上下文**下应当打开的任务 ID。
+
+    三条规则，顺序即优先级：
+
+    1. 按上下文推导出的任务已存在 -> 续做它（"同一个文件、同一个项目、
+       同一种目标语言"就是同一个任务，重传即续传）；
+    2. 否则，若历史版本留下的、以**内容哈希**命名的旧任务存在，且它记录的
+       项目 / 目标语言与请求的上下文**可证明一致** -> 沿用它（旧任务不因
+       这次修复而失联）；
+    3. 否则 -> 用推导出的新 ID 建一个独立任务。
+
+    规则 2 里的"可证明一致"是关键：旧任务没有目标语言记录时**不会**被认领，
+    宁可让用户重建一个任务，也不把另一种语言的旧任务当成这个活。
+    """
+    context = task_context(project_id, target_lang, source_lang)
+    candidate = task_job_id(file_bytes, project_id=project_id,
+                            target_lang=target_lang, source_lang=source_lang)
+    if load_job_state(candidate) is not None:
+        return candidate
+    legacy_id = file_job_id(file_bytes)
+    if legacy_id != candidate:
+        legacy_state = load_job_state(legacy_id)
+        if legacy_state is not None and task_context_of(legacy_state) == context:
+            return legacy_id
+    return candidate
 
 
 def save_source(job_id, file_bytes):
@@ -5041,6 +6107,147 @@ def save_glossary_draft(job_id, entries):
     return state
 
 
+def _glossary_mutation_note(action, detail, actor):
+    return {
+        "action": action,
+        "finding_id": detail.get("finding_id") or "glossary",
+        "note": detail.get("note") or "",
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "actor": str(actor or "user"),
+        "actor_type": "human",
+        "previous_status": detail.get("previous_status"),
+        "new_status": detail.get("new_status"),
+    }
+
+
+def update_glossary_entry(job_id, entry_id, *, preferred=None, domain=None,
+                          status=None, note=None, actor="user"):
+    """原地修改一条术语条目并生成新的术语版本。返回 (state, ok, message)。
+
+    与 `save_glossary_draft` 的区别：后者是「翻译前准备术语」，会把任务阶段改回
+    TERMS_PREPARED。语言资产管理中心对**已完成任务**做一次术语修订，不应该把
+    任务打回准备阶段，因此这里直接改条目、记录人工动作，然后走既有的
+    `freeze_glossary` —— 术语决策变化必须产生新版本并失效受影响段落，这条
+    不变量不能被绕过。
+    """
+    state = load_job_state(job_id)
+    if state is None:
+        return None, False, "任务不存在"
+    entries = normalize_glossary(state.get("glossary") or [])
+    target = next((item for item in entries
+                   if str(item.get("id")) == str(entry_id)), None)
+    if target is None:
+        return state, False, "找不到该术语"
+    before = {key: target.get(key)
+              for key in ("preferred", "target", "domain", "status", "note")}
+    if preferred is not None:
+        text = str(preferred or "").strip()
+        if not text:
+            return state, False, "推荐译法不能为空"
+        target["preferred"] = text
+        target["target"] = text
+        target["proposed_target"] = text
+    if domain is not None:
+        target["domain"] = str(domain or "").strip()
+    if status is not None:
+        if status not in _models.STATUSES:
+            return state, False, f"非法术语状态：{status}"
+        target["status"] = status
+    if note is not None:
+        target["note"] = str(note or "").strip()
+    after = {key: target.get(key) for key in before}
+    if before == after:
+        return state, True, "没有需要保存的改动"
+    entries = normalize_glossary(entries)
+    state["glossary"] = entries
+    state["glossary_draft"] = entries
+    state.setdefault("human_actions", []).append(_glossary_mutation_note(
+        "glossary_entry_updated",
+        {"finding_id": f"glossary:{entry_id}",
+         "note": "在语言资产管理中心修改术语条目",
+         "previous_status": before.get("status"),
+         "new_status": after.get("status")}, actor))
+    save_job_state(job_id, state)
+    frozen = freeze_glossary(job_id, entries=entries, frozen_by=actor)
+    version = (frozen or {}).get("glossary_frozen", {}).get("version") \
+        if isinstance(frozen, dict) else None
+    suffix = f"，术语版本已更新为 v{version}" if version else ""
+    return frozen or state, True, f"已更新术语并生成新的术语版本{suffix}"
+
+
+def delete_glossary_entry(job_id, entry_id, actor="user"):
+    """删除一条术语条目并生成新的术语版本。返回 (state, ok, message)。"""
+    state = load_job_state(job_id)
+    if state is None:
+        return None, False, "任务不存在"
+    entries = normalize_glossary(state.get("glossary") or [])
+    kept = [item for item in entries if str(item.get("id")) != str(entry_id)]
+    if len(kept) == len(entries):
+        return state, False, "找不到该术语"
+    state["glossary"] = kept
+    state["glossary_draft"] = kept
+    state.setdefault("human_actions", []).append(_glossary_mutation_note(
+        "glossary_entry_deleted",
+        {"finding_id": f"glossary:{entry_id}",
+         "note": "在语言资产管理中心删除术语条目"}, actor))
+    save_job_state(job_id, state)
+    frozen = freeze_glossary(job_id, entries=kept, frozen_by=actor)
+    return frozen or state, True, "已删除该术语并生成新的术语版本"
+
+
+def add_glossary_entry(job_id, source, target, *, domain="", scope="document",
+                       status="locked", actor="user"):
+    """在指定任务中新增一条术语并生成新的术语版本。
+
+    返回 (state, ok, message, entry_id)。长期保存位置只有「项目术语」——
+    术语写在任务的术语表里并通过冻结版本生效；当前没有独立的全局术语库。
+    """
+    source = str(source or "").strip()
+    target = str(target or "").strip()
+    if not source:
+        return None, False, "原术语不能为空", ""
+    if not target:
+        return None, False, "推荐译法不能为空", ""
+    if status not in _models.STATUSES:
+        return None, False, f"非法术语状态：{status}", ""
+    state = load_job_state(job_id)
+    if state is None:
+        return None, False, "任务不存在", ""
+    entries = normalize_glossary(state.get("glossary") or [])
+    existing = next((item for item in entries
+                     if str(item.get("source") or "").casefold()
+                     == source.casefold()), None)
+    if existing is not None:
+        current = str(existing.get("preferred") or existing.get("target") or "").strip()
+        if current.casefold() != target.casefold():
+            return state, False, f"该术语已存在，推荐译法为「{current}」；请先编辑原条目", \
+                str(existing.get("id") or "")
+        return state, False, "该术语已存在", str(existing.get("id") or "")
+    entry = _models.normalize_glossary_entry({
+        "source": source, "target": target, "preferred": target,
+        "behavior": "translate", "status": status, "scope": scope,
+        "domain": str(domain or "").strip(),
+        "note": "由人工在语言资产管理中心新增",
+        "evidence": [{
+            "evidence_type": "user", "source_name": "语言资产管理中心",
+            "note": "人工新增术语", "quote": "", "url": "",
+        }],
+    })
+    if entry is None:
+        return state, False, "术语内容无效", ""
+    entries.append(entry)
+    entries = normalize_glossary(entries)
+    state["glossary"] = entries
+    state["glossary_draft"] = entries
+    state.setdefault("human_actions", []).append(_glossary_mutation_note(
+        "glossary_entry_added",
+        {"finding_id": f"glossary:{entry.get('id')}",
+         "note": f"在语言资产管理中心新增术语「{source}」"}, actor))
+    save_job_state(job_id, state)
+    frozen = freeze_glossary(job_id, entries=entries, frozen_by=actor)
+    return frozen or state, True, "已新增术语并生成新的术语版本", str(entry.get("id") or "")
+
+
 def _apply_glossary_staleness(state, job_id=None):
     """把受冻结术语表变更影响的段落标记 stale，并清除其 TM 信任。
 
@@ -5112,15 +6319,15 @@ def _apply_glossary_staleness(state, job_id=None):
         })
 
     # 受影响段不得继续作为可信翻译记忆
-    tm = load_tm()
+    tm = load_tm(tm_project_id(state))
     dirty = False
+    job_lang = state_target_lang(state)
     for i in stale:
         src = pairs[i]["source"]
-        if src in tm:
-            del tm[src]
+        if tm_discard(tm, src, job_lang):
             dirty = True
     if dirty:
-        save_tm(tm)
+        save_tm(tm, tm_project_id(state))
     state["delivery_approved_by_human"] = False
     state["delivery_approval"] = None
 
@@ -5179,8 +6386,11 @@ def set_glossary_entry_status(job_id, entry_ids, status):
 def review_knowledge_candidate(job_id, candidate_id, decision, actor="user"):
     """Apply an explicit human decision to one persisted knowledge candidate.
 
-    The only project-wide promotion path is the existing per-task glossary
-    freeze/version workflow.  There is intentionally no global glossary store.
+    This preserves the existing task-level mutation contract: ``project_term``
+    locks the candidate in the task glossary and freezes its version. Callers
+    that need cross-task reuse must then explicitly pass that confirmed state
+    through ``promote_job_to_project`` (the Memory gate). There is intentionally
+    no global glossary store.
     """
     allowed = {"project_term", "task_only", "rejected"}
     if decision not in allowed:
@@ -5545,11 +6755,10 @@ def _promote_human_reviewed_segment(state, segment_id, actor):
     pair["human_accepted"] = True
     pair["accepted_by_human"] = actor
     if state.get("use_tm", True) and _tm_eligible(pair.get("source"), pair.get("target")):
-        tm = load_tm()
-        tm[str(pair.get("source") or "")] = {
-            "target": str(pair.get("target") or ""), "reviewed": True,
-        }
-        save_tm(tm)
+        tm = load_tm(tm_project_id(state))
+        tm_put(tm, str(pair.get("source") or ""), str(pair.get("target") or ""),
+               state_target_lang(state))
+        save_tm(tm, tm_project_id(state))
 
 
 def decide_translation_review_finding(
@@ -5606,7 +6815,7 @@ def review_translation_segments(
         state.get("glossary") or (state.get("glossary_frozen") or {}).get(
             "entries") or [])
     reviewed, failed_ids = [], []
-    tm = load_tm() if state.get("use_tm", True) else {}
+    tm = load_tm(tm_project_id(state)) if state.get("use_tm", True) else {}
     tm_changed = False
     for segment_id in segment_ids:
         pair = pairs[segment_id]
@@ -5658,8 +6867,8 @@ def review_translation_segments(
             pair["accepted_target"] = target
             pair["target_provenance"] = "reviewed"
             if state.get("use_tm", True) and _tm_eligible(source, target):
-                tm[source] = {"target": target, "reviewed": True}
-                tm_changed = True
+                if tm_put(tm, source, target, state_target_lang(state)):
+                    tm_changed = True
         else:
             pair["reviewed"] = False
             pair["review_status"] = "reviewed_with_findings"
@@ -5668,7 +6877,7 @@ def review_translation_segments(
             "refresh": True, "failed": failed,
         })
     if tm_changed:
-        save_tm(tm)
+        save_tm(tm, tm_project_id(state))
     _recount_reviewed_segments(state)
     queue = _delivery.review_queue_findings(state)
     stats = state.setdefault("review_stats", {})
@@ -5796,6 +7005,17 @@ def approve_delivery(job_id, note="", accept_blocking=False, actor="user",
         save_job_state(job_id, state)
         reasons = [issue.get("message", "译文未通过交付检查")
                    for issue in validation.get("issues") or []]
+        # `blocking` can also come from deterministic QA blocking findings
+        # (`core.validate_translation_pairs` -> `blocking_findings`), which carry a
+        # segment and a summary.  Without them the user is told only
+        # "译文未通过最终交付检查" and cannot tell what to fix.
+        for finding in validation.get("blocking_findings") or []:
+            index = finding.get("segment_index")
+            location = "" if index is None else f"第 {int(index) + 1} 段 "
+            category = str(finding.get("category") or "check")
+            summary = (finding.get("summary") or finding.get("reason")
+                       or "译文未通过交付检查")
+            reasons.append(f"{location}[{category}] {summary}")
         return state, False, reasons or ["译文未通过最终交付检查"]
     state, ok, errors = _delivery.approve_delivery(state, note, actor, accept_blocking)
     if not ok:
@@ -5955,7 +7175,7 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
                      enable_annotate=True, use_tm=True,
                      strict_terminology_governance=False, mode=None,
                      research_settings=None, literature_sources=None,
-                     delivery_config=None,
+                     delivery_config=None, batch_size=None, max_batch_chars=None,
                      enable_understanding=None, reviewer_provider=None,
                      reviewer_api_key=None, reviewer_model=None,
                      reviewer_base_url=None, translator_base_url=None,
@@ -5971,6 +7191,30 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
     state = load_job_state(job_id) or base
     state = {**base, **state}  # 兼容旧版本状态缺字段
     state = _state_migration.migrate_state(state)
+
+    # ---- 项目记忆注入（蓝图 §3.2 的跨任务复用）----
+    # 必须在 state/pipeline_config 定型之前完成，否则 state["style_rules"] 与
+    # 运行时实际使用的风格会不一致（存储值与实际值分叉）。
+    # 只对尚未开始工作的任务注入：进行中的任务不能因为项目记忆变化而改术语。
+    project_entries: list = []
+    if not state.get("glossary") and not str(state.get("glossary_frozen") or ""):
+        project_entries, project_style, project_meta = _project_memory_injection(state)
+        if project_entries or project_style:
+            known = {str(e.get("source") or "").casefold()
+                     for e in normalize_glossary(list(user_glossary or []))}
+            added = [e for e in project_entries
+                     if str(e.get("source") or "").casefold() not in known]
+            user_glossary = list(user_glossary or []) + added
+            if project_style:
+                style_rules = "；".join(
+                    part for part in (project_style, str(style_rules or "").strip())
+                    if part)
+            state["project_memory"] = {
+                **project_meta,
+                "injected_entry_ids": [e["id"] for e in added],
+                "injected_at": _project_now_iso(),
+            }
+
     previous_target_lang = str(state.get("target_lang") or "")
     previous_style_rules = str(state.get("style_rules") or "")
     review_required = bool(state.get("translation_core_review_required")) \
@@ -6001,6 +7245,10 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
         "enable_annotate": bool(enable_annotate),
         "use_tm": bool(use_tm),
         "strict_terminology_governance": bool(strict_terminology_governance),
+        # 批次参数随任务保存：恢复任务必须沿用原配置，否则同一任务的批次划分
+        # 会在中途变化。
+        "batch_size": int(batch_size or BATCH_SIZE),
+        "max_batch_chars": int(max_batch_chars or TRANSLATION_MAX_BATCH_CHARS),
         "enable_understanding": enable_understanding,
         "translator": _model_roles.public_role_config(translator_config),
         "reviewer": _model_roles.public_role_config(reviewer_config),
@@ -6192,6 +7440,7 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
                 e["status"] = "provisional"
     working = normalize_glossary(state.get("glossary") or [])
     if not working:
+        # 项目记忆已在本函数开头注入到 user_glossary/style_rules，这里只做合并。
         working = normalize_glossary(user_entries + auto_entries)
     else:
         # 新上传/新抽取的术语若不在已保存审核表中，追加（不覆盖人工审核结果）
@@ -6229,12 +7478,15 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
     if not state["p2_done"]:
         if on_status:
             on_status("【阶段二】双语翻译与术语严格注入（批次翻译 + 确定性检查 + 独立审校）...")
+        _batch_cfg = state.get("pipeline_config") or {}
         translate_stage(state, job_id, glossary, provider, api_key, model, target_lang,
                         style_rules, enable_review, use_tm=use_tm,
                         document_profile=state.get("document_profile"),
                         translator_config=translator_config,
                         reviewer_config=reviewer_config,
-                        on_status=on_status, on_caption=on_caption)
+                        on_status=on_status, on_caption=on_caption,
+                        batch_size=_batch_cfg.get("batch_size", batch_size),
+                        max_batch_chars=_batch_cfg.get("max_batch_chars", max_batch_chars))
         state["p2_done"] = True
         from transpraxis import delivery as _delivery
         state["delivery_status"] = _delivery.compute_delivery_status(state)

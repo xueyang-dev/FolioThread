@@ -124,21 +124,32 @@ def main():
           f"旧译文截断疑似跳过 {stats['skipped_suspect']} 段；"
           f"旧文本被 LLM 改动无法定位 {stats['not_found']} 段")
 
-    # 新任务：job_id 派生自文件哈希 + v2 标记，旧任务保留可回滚
-    new_job = core.file_job_id(file_bytes + b"-v2")
+    # 新任务：任务身份 = 文档身份（文件哈希 + v2 标记）+ 本地化上下文，旧任务保留可回滚。
+    # 用 task_job_id 而不是裸内容哈希：同一个 PDF 重建到另一种目标语言必须是另一个
+    # 任务，否则第二次运行会覆盖第一次的 state 与产物（内容相同不等于任务相同）。
+    new_job = core.task_job_id(
+        file_bytes + b"-v2", project_id=old_state.get("project_id"),
+        target_lang=args.target_lang)
     print(f"【3/4】新任务 {new_job}：重译剩余 {len(new_paras) - stats['reused']} 段...")
     core.save_source(new_job, file_bytes)
     state = core.new_job_state(pdf_path.name)
     state["paras"] = new_paras
     state["p1_done"] = True
     state["auto_terms"] = old_state.get("auto_terms") or {}
+    # 目标语言必须落盘：翻译记忆的作用域、以及后续的失效/人工晋升都要读它。
+    state["target_lang"] = args.target_lang
     core.save_job_state(new_job, state)
 
-    # 复用译文注入翻译记忆（标记 reviewed，translate_stage 精确命中直接用）
+    # 复用译文注入翻译记忆（标记 reviewed，translate_stage 精确命中直接用）。
+    # 必须用 tm_put 带上目标语言：裸 source 键写进去的记忆语言不可证明，
+    # 会被 tm_lookup 一律拒绝——脚本会"跑成功"却一段都复用不上。
     tm = core.load_tm()
+    reused_entries = 0
     for j, tgt in reused.items():
-        tm[new_paras[j].replace("\n", " ")] = {"target": tgt, "reviewed": True}
+        if core.tm_put(tm, new_paras[j].replace("\n", " "), tgt, args.target_lang):
+            reused_entries += 1
     core.save_tm(tm)
+    print(f"  已注入翻译记忆 {reused_entries} 条（目标语言 {args.target_lang}）")
 
     glossary = core.normalize_glossary(
         [{"source": k, "target": v, "behavior": "translate", "status": "provisional"}

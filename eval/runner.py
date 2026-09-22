@@ -142,7 +142,9 @@ def main() -> int:
         return 2
 
     docx_bytes = Path(args.corpus).read_bytes()
-    job_id = core.file_job_id(docx_bytes)
+    # 任务身份 = 文档身份 + 目标语言：同一份语料跑不同目标语言是两次独立运行，
+    # 不能让第二次复用第一次的任务目录（内容相同不等于任务相同）。
+    job_id = core.task_job_id(docx_bytes, target_lang=args.target_lang)
     filename = Path(args.corpus).name
     core.save_job_state(job_id, core.new_job_state(filename))
 

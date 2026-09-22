@@ -124,7 +124,8 @@ def test_p0_glossary_staleness():
         assert state["pairs"][0].get("glossary_hash_used") == hash_a, \
             "已翻译段落必须记录所用冻结 hash（本断言失败 = 无依赖追踪）"
         tm_after_v1 = core.load_tm()
-        assert state["pairs"][0]["source"] in tm_after_v1
+        assert core.tm_lookup(tm_after_v1, state["pairs"][0]["source"],
+                              target_lang="简体中文")[0] is not None
         approved, approved_ok, approved_errors = core.approve_delivery(jid)
         assert approved_ok and approved_errors == []
         assert approved["delivery_approved_by_human"] is True
@@ -158,8 +159,10 @@ def test_p0_glossary_staleness():
             "stale 段存在时交付必须为 review_required"
         assert st["delivery_approved_by_human"] is False
         assert st["delivery_approval"] is None
-        assert "Skopos theory is frequently discussed" not in core.load_tm(), \
-            "stale 译文必须从 TM 清除"
+        assert core.tm_lookup(
+            core.load_tm(),
+            "Skopos theory is frequently discussed in translation studies.",
+            target_lang="简体中文")[0] is None, "stale 译文必须从 TM 清除"
         # stale blocking 未被接受时不能 final
         st2, ok, errs = core.approve_delivery(jid)
         assert ok is False and errs, "stale blocking 未解决时不得 final"
@@ -808,6 +811,13 @@ def test_external_evidence_attack_and_prompt_scan():
             continue
         if any(endpoint in line for endpoint in (
                 "https://api.deepseek.com", "https://opencode.ai/zen/go/v1")):
+            continue
+        # 本机回环地址是本地开发/验证工具的默认目标，不是 prompt 里的引用 URL
+        if any(host in line for host in (
+                "http://127.0.0.1", "http://localhost", "http://0.0.0.0")):
+            continue
+        # 品牌资产渲染脚本的字体样式表是本地排版输入，不进入任何 prompt
+        if "fonts.googleapis.com" in line:
             continue
         prompt_files.append(line)
     assert not prompt_files, f"发现可疑 URL 引用：{prompt_files}"
