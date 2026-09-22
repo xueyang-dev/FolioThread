@@ -119,7 +119,14 @@ def test_delivery_review_ui():
         assert any('tp-review-span">Name source</mark>' in x.value for x in at.markdown)
         assert any("E1" in x.value and "E2" in x.value
                    for x in [*at.markdown, *at.caption])
-        assert "selected_finding_id" in at.session_state.filtered_state
+        # `selected_finding_id` must survive as user-visible state. Assert it
+        # through the Mapping surface (`in`), not through an attribute:
+        # streamlit 1.64 made AppTest.session_state a `_AppTestSessionState`
+        # wrapper that exposes `to_dict()` / `keys()` / `in` and has no
+        # `filtered_state` attribute at all, so `at.session_state.filtered_state`
+        # raises AttributeError there (1.63 still accepted it because
+        # session_state was the raw SafeSessionState).
+        assert "selected_finding_id" in at.session_state
 
         filter_control = next(x for x in at.segmented_control
                               if x.label == "筛选审校任务")
