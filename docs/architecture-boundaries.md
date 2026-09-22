@@ -1,4 +1,4 @@
-# FolioThread：产品与架构边界
+# Folith / 译页：产品与架构边界
 
 2026-09-14 更新。下文 Phase 1 / v0.4 / v0.5 条目是历史边界记录，不是当前待办顺序。当前本地进度与后续优先级以[开发蓝图](foliothread-agentic-native-blueprint.md#7-当前进度与开发路线)为准；近期先完成 UI 打磨并正式发布，再推进 CAT 内核。
 
@@ -15,7 +15,7 @@
 
 ## 1. 产品定位
 
-FolioThread 的一级产品是 **长文档翻译工作空间**。用户首先看到并使用的是一条可恢复的翻译主路径：
+Folith（中文品牌：译页）的一级产品是 **Agentic 本地化工作台**。用户首先看到并使用的是一条可恢复的本地化主路径：
 
 ```text
 文档解析 → 文档上下文 → 术语与翻译记忆 → 翻译 → 人工审校 → 交付
@@ -26,7 +26,7 @@ MTI、论文和翻译实践报告不再作为产品的默认解释，而是“�
 - 只在用户选择研究资产或报告输出时进入；
 - 继续复用翻译主路径产生的证据，不另造一份译文真值；
 - 保留现有 MTI 合规、案例 provenance、文献证据和报告 QA 能力；
-- 不占据普通翻译任务的首屏，也不限制 FolioThread 的使用对象。
+- 不占据普通本地化任务的首屏，也不限制 Folith 的使用对象。
 
 ## 2. v0.4 基础设施：继续保留
 
@@ -42,11 +42,11 @@ MTI、论文和翻译实践报告不再作为产品的默认解释，而是“�
 | 交付、快照与页面 QA | `delivery.py`、`snapshots.py`、`rendered_qa.py`、`finalization.py` | 保留，作为可追溯交付基础 |
 | Provider 与模型配置 | `core.py`、`model_roles.py`、`gui.py` | 保留，Phase 1 不改变调用方式 |
 
-公共品牌已经改为 FolioThread，但 v0.4 的 Python import namespace `transpraxis`、既有状态字段、内部 artifact ID、`transpraxis:` 导出字段和 `TRANSPRAXIS_*` 环境变量继续保留。这些是技术兼容边界，不是产品定位。
+公共品牌已经改为 Folith / 译页，但 v0.4 的 Python import namespace `transpraxis`、既有状态字段、内部 artifact ID、`transpraxis:` 导出字段和 `TRANSPRAXIS_*` 环境变量继续保留。这些是技术兼容边界，不是产品定位。
 
 ## 3. MTI / 论文能力：legacy / specialized
 
-以下能力继续存在，但属于可选、专用的研究下游，而非 FolioThread 的默认产品中心：
+以下能力继续存在，但属于可选、专用的研究下游，而非 Folith 的默认产品中心：
 
 | 专用能力 | 组成 | 进入条件 |
 | --- | --- | --- |
@@ -56,7 +56,7 @@ MTI、论文和翻译实践报告不再作为产品的默认解释，而是“�
 | MTI 规则与终稿 QA | `thesis_constraints.py`、`compliance.py`、`final_docx.py`、`rendered_qa.py` | 使用 MTI/报告型交付 |
 | 专用 UI | “研究与报告（专用能力）”、案例、合规与报告工作区 | 用户主动进入专用工作流 |
 
-`MTI_PRACTICE_REPORT_DEFAULT`、`translation_practice_report` 等内部 profile/schema 名称暂不改动。它们描述的是现有专用能力的技术契约，不应被误读为 FolioThread 的全局产品定位。
+`MTI_PRACTICE_REPORT_DEFAULT`、`translation_practice_report` 等内部 profile/schema 名称暂不改动。它们描述的是现有专用能力的技术契约，不应被误读为 Folith 的全局产品定位。
 
 ## 4. v0.5 演化方向
 
@@ -73,9 +73,9 @@ v0.5 在现有边界上演化，不在 Phase 1 提前实现：
 
 ## 5. 命名与迁移规则
 
-- 用户可见产品名、页面标题、启动器、README、发布链接和资源名使用 `FolioThread`。
+- 用户可见产品名、页面标题、启动器、README、发布说明和资源名使用 `Folith` / `译页`。
 - `transpraxis/` 目录继续作为 v0.4 稳定内部模块边界；当前阶段不进行全仓库 import rename。
-- `foliothread` 是新的公开安装包名和 console 入口；`transpraxis` 入口作为 v0.4 legacy alias 保留。
+- `foliothread` 是已发布的包名和 console 入口；`transpraxis` 入口以及旧环境变量作为兼容别名保留。
 - 现有 `TRANSPRAXIS_API_KEY`、`TRANSPRAXIS_EVAL_API_KEY` 等环境变量保留，避免把品牌迁移误变成运行时迁移。
 - 旧的论文全文、渲染页面、临时截图和旧 logo 不属于产品资产；它们不应进入仓库。`.codex_tmp/` 已加入忽略规则。
 

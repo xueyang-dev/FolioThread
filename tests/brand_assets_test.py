@@ -1,15 +1,14 @@
-"""品牌资产一致性测试：logo 只有一个真源，位图必须是它的派生物。
+"""品牌资产一致性测试：Folith logo 只有一个真源，位图必须是它的派生物。
 
-为什么需要它：FolioThread 的品牌资产在三个地方被引用——界面侧栏
-（`foliothread-source-lockup.png`）、README（同一张裁切图）、浏览器标签页
-（`foliothread-source-icon.png`）。这些位置各自独立，一旦有人只换了
-其中一个，"本项目只有一个 logo" 就会在界面上悄悄破功。本模块把这件事变成
-可执行的约束：
+为什么需要它：Folith 的品牌资产在界面侧栏、README 和浏览器标签页各有一个
+正式入口。这些位置各自独立，一旦只换了其中一个，品牌就会在界面上悄悄破功。
+本模块把这件事变成可执行的约束：
 
 1. 向量源存在且自洽（viewBox、渐变、没有外部字体依赖的关键字形）；
 2. 位图产物存在，且不比向量源旧（`scripts/render_brand_assets.py --check` 的语义）；
 3. 设计系统色板 = 品牌源文件里的取色，而不是各表面各写一个蓝；
-4. 界面/README 引用的路径真实存在。
+4. 界面/README 引用的路径真实存在；
+5. 旧裁切资源仍存在，但不再作为当前产品入口。
 
 不做像素比对：那需要浏览器，属于 `scripts/render_brand_assets.py --check` 的职责，
 CI 里不应依赖 Chromium。
@@ -27,9 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 ROOT = Path(__file__).resolve().parent.parent
 BRAND = ROOT / "transpraxis" / "resources" / "brand"
-MARK = BRAND / "foliothread-mark.svg"
-MARK_MONO = BRAND / "foliothread-mark-mono.svg"
-FAVICON = BRAND / "foliothread-favicon.svg"
+MARK = BRAND / "folith-mark.svg"
+MARK_MONO = BRAND / "folith-mark-mono.svg"
+FAVICON = BRAND / "folith-favicon.svg"
 
 # 品牌色板：唯一真源是 logo 源文件，界面 token 必须与之一致。
 PALETTE = {
@@ -40,24 +39,22 @@ PALETTE = {
 }
 
 DERIVED_PNG = (
-    "foliothread-source-lockup.png",
-    "foliothread-source-icon.png",
-    "foliothread-logo.png",
-    "foliothread-logo-dark.png",
-    "foliothread-logo-stacked.png",
-    "foliothread-app-icon.png",
-    "foliothread-favicon.png",
+    "folith-logo.png",
+    "folith-logo-zh.png",
+    "folith-logo-dark.png",
+    "folith-logo-stacked.png",
+    "folith-app-icon.png",
+    "folith-favicon.png",
 )
-# 期望尺寸：source-* 是原图裁切（界面/README 用），其余是向量派生位图。
+# 期望尺寸：这些是向量派生位图，界面与 README 使用横向 lockup，浏览器使用 favicon。
 # 尺寸写死是为了让"有人手工换了一张别的图"立刻失败。
 DERIVED_PNG_SIZE = {
-    "foliothread-source-lockup.png": (1235, 340),
-    "foliothread-source-icon.png": (286, 280),
-    "foliothread-logo.png": (1498, 268),
-    "foliothread-logo-dark.png": (1498, 268),
-    "foliothread-logo-stacked.png": (560, 372),
-    "foliothread-app-icon.png": (512, 512),
-    "foliothread-favicon.png": (512, 512),
+    "folith-logo.png": (1498, 268),
+    "folith-logo-zh.png": (1498, 268),
+    "folith-logo-dark.png": (1498, 268),
+    "folith-logo-stacked.png": (560, 372),
+    "folith-app-icon.png": (512, 512),
+    "folith-favicon.png": (512, 512),
 }
 
 
@@ -80,7 +77,7 @@ def test_mark_source_shape():
     assert 'viewBox="0 0 274 268"' in svg, "图标画布尺寸变了，位图必须重新生成"
     assert 'role="img"' in svg and "<title" in svg and "<desc" in svg, \
         "品牌图标需要无障碍标题与描述"
-    # 两页 + 光标 + 文/A：缺任何一个都不再是 FolioThread 的图标
+    # 两页 + 光标 + 文/A：缺任何一个都不再是 Folith 的图标
     assert svg.count("<rect") == 3, \
         "图标应是两页圆角矩形 + 一层前页高光；新增/删除图层需同步更新本断言"
     assert svg.count("<path") == 1, "图标应只有一个光标路径"
@@ -117,7 +114,7 @@ def test_favicon_matches_mark_palette():
 
 
 def test_brand_bitmaps_exist_and_are_real():
-    """裁切资产与向量派生位图都必须存在，且是尺寸正确的真实 PNG。
+    """向量派生位图必须存在，且是尺寸正确的真实 PNG。
 
     刻意不比较 mtime：CI 从 git 检出时所有文件时间戳相同，按时间判"是否过期"
     会变成随机失败。真正的重生成检查是 `python scripts/render_brand_assets.py
@@ -165,18 +162,28 @@ def test_streamlit_theme_matches_primary():
     assert 'page_icon=_BRAND_FAVICON' in app, "页面图标必须用品牌图标资产"
 
 
-def test_sidebar_uses_source_crop():
-    """侧栏使用用户原图裁切，禁止回退到重绘的竖向组合。"""
+def test_sidebar_uses_formal_lockup():
+    """侧栏使用正式 Folith lockup，避免回退到旧品牌裁切图。"""
     app = (ROOT / "app.py").read_text(encoding="utf-8")
-    assert 'foliothread-source-lockup.png' in app, \
-        "侧栏品牌位应使用原图裁切"
-    assert 'alt="FolioThread Agentic Translation Workspace"' in app, \
+    assert 'folith-logo-zh.png' in app, "中文侧栏品牌位应使用正式译页 lockup"
+    assert '译页 Agentic 本地化工作台' in app, \
         "品牌位的替代文本要与新定位一致"
+
+
+def test_legacy_source_crops_are_retained_but_not_current_entries():
+    """旧裁切图供历史/兼容读取，当前 UI 不得继续引用它们。"""
+    for name in ("foliothread-source-lockup.png", "foliothread-source-icon.png"):
+        assert (BRAND / name).is_file(), f"兼容资源缺失：{name}"
+    app = (ROOT / "app.py").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for legacy in ("foliothread-source-lockup.png", "foliothread-source-icon.png"):
+        assert legacy not in app and legacy not in readme, \
+            f"当前入口不应继续引用旧品牌裁切图：{legacy}"
 
 
 def test_readme_references_existing_logo():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "transpraxis/resources/brand/foliothread-source-lockup.png" in readme, \
+    assert "transpraxis/resources/brand/folith-logo.png" in readme, \
         "README 首屏必须展示唯一 logo"
     for rel in re.findall(r'src="(transpraxis/resources/brand/[^"]+)"', readme):
         assert (ROOT / rel).is_file(), f"README 引用了不存在的资产：{rel}"

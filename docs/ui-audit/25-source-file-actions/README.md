@@ -22,7 +22,7 @@
 # 1) 起应用（隔离 CWD，避免污染真实 outputs/）
 mkdir -p /tmp/folio-verify && cd /tmp/folio-verify
 NO_PROXY='127.0.0.1,localhost' env -u PYTHONPATH \
-  /path/to/FolioThread/venv/bin/streamlit run /path/to/FolioThread/app.py \
+  /path/to/Folith/venv/bin/streamlit run /path/to/Folith/app.py \
   --server.port 8599 --server.headless true
 
 # 2) 打开「新建任务」并上传一个 PDF，然后量几何 / 截图（本机 playwright-core + Chrome）

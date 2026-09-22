@@ -1,4 +1,4 @@
-"""FolioThread 跨平台 HTML GUI 启动器。
+"""译页跨平台 HTML GUI 启动器。
 
 把 Streamlit 的 HTML 界面包装成可直接使用的形式，Windows / macOS / Linux
 三平台同一入口：
@@ -21,9 +21,11 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
+from transpraxis import brand
+
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PORT = 8501
-APP_TITLE = "FolioThread · 长文档翻译工作空间"
+APP_TITLE = brand.APP_TITLE_ZH
 
 # 绑定地址是**产品边界**，不能交给 Streamlit 的隐式默认值。
 # Streamlit 不指定 `--server.address` 时监听所有网卡（`0.0.0.0`），也就是
@@ -121,7 +123,7 @@ def _check_streamlit() -> bool:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog=Path(sys.argv[0]).name,
-        description="FolioThread 跨平台 HTML GUI 启动器")
+        description="译页跨平台 HTML GUI 启动器")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help="服务端口（默认 8501，被占用时自动顺延）")
     parser.add_argument("--lan", action="store_true",

@@ -143,15 +143,16 @@ def _task_identity() -> str:
 
 def _entry_points() -> str:
     bindir = pathlib.Path(sys.executable).parent
-    found = [n for n in ("foliothread", "transpraxis") if (bindir / n).exists()]
-    assert len(found) == 2, f"缺少控制台入口点，只有 {found}"
+    found = [n for n in ("folith", "foliothread", "transpraxis")
+             if (bindir / n).exists()]
+    assert len(found) == 3, f"缺少控制台入口点，只有 {found}"
     return f"入口点存在: {', '.join(found)}"
 
 
 def _help() -> str:
     bindir = pathlib.Path(sys.executable).parent
     proc = subprocess.run(
-        [str(bindir / "foliothread"), "--help"],
+        [str(bindir / "folith"), "--help"],
         capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, f"exit={proc.returncode}\n{proc.stderr[:400]}"
@@ -201,7 +202,7 @@ def main() -> int:
     smoke.check("#3 Unicode 正文判定", _textual)
     smoke.check("#4 任务身份隔离", _task_identity)
     smoke.check("控制台入口点", _entry_points)
-    smoke.check("foliothread --help", _help)
+    smoke.check("folith --help", _help)
     smoke.check("真实 socket 绑定语义", _socket_probe)
     return smoke.report()
 

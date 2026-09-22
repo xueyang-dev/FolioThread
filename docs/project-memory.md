@@ -1,6 +1,6 @@
 # Project：任务、术语、风格规则、人工决定与已审校记忆的长期容器
 
-本文件说明 FolioThread 的 Project 层——蓝图 §3.2 定义的 Project / Job 边界，
+本文件说明 Folith 的 Project 层——蓝图 §3.2 定义的 Project / Job 边界，
 以及"跨任务复用"具体是怎么发生的。
 
 - 领域模块：`transpraxis/project.py`
@@ -252,7 +252,7 @@ outputs/
 
 ## 翻译记忆按项目隔离
 
-翻译记忆是"已审校译文的受控记忆"，蓝图 §3.2 把它列在 Project 之下。FolioThread
+翻译记忆是"已审校译文的受控记忆"，蓝图 §3.2 把它列在 Project 之下。Folith
 的记录形状是 `{"<目标语言>␟<原文>": {target, target_lang, reviewed}}`——键是
 「目标语言 + 原文」的**作用域键**（见下一节）。同一个 source 在不同项目里译法不同
 时，一份文件无法同时表示两种译法。这就是为什么按**项目分文件**，而不是在单文件里

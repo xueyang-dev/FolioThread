@@ -350,6 +350,7 @@ def test_pipeline_persists_resume_and_delivery_configuration(tmp_path):
             "batch_size": core.BATCH_SIZE,
             "max_batch_chars": core.TRANSLATION_MAX_BATCH_CHARS,
             "enable_understanding": False,
+            "reasoning_effort": "",
             "translator": {"provider": "DeepSeek", "model": "deepseek-chat",
                             "base_url": "", "configured": True},
             "reviewer": {"provider": "DeepSeek", "model": "deepseek-chat",

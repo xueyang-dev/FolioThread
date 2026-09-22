@@ -152,9 +152,17 @@ def profile_document(
                 warnings.append(f"文档画像提示：{p}")
             return profile, warnings
         except Exception as e:
-            last_err = str(e)
-            if "429" in last_err or "RESOURCE_EXHAUSTED" in last_err \
-                    or "rate limit" in last_err.lower():
+            raw_error = str(e)
+            try:
+                import core
+                provider_status = core.provider_error_status(e)
+                last_err = (provider_status["message"]
+                            if provider_status["status"] != "unknown"
+                            else raw_error)
+            except Exception:  # pragma: no cover - defensive import fallback
+                last_err = raw_error
+            if ("429" in raw_error or "RESOURCE_EXHAUSTED" in raw_error
+                    or "rate limit" in raw_error.lower()):
                 import time
                 time.sleep(10)
                 continue

@@ -7,7 +7,7 @@
 
 ## 0. 先更正一个前提
 
-需求里提到「主要 React / TSX 组件」。**FolioThread 里没有 React/TSX。**
+需求里提到「主要 React / TSX 组件」。**Folith 里没有 React/TSX。**
 仓库里不存在 `.tsx` / `.ts` 应用代码，整个 UI 是 **Streamlit**（Python）：
 `app.py`（~12.8k 行 Python + 内联 CSS）、`core.py`、`gui.py` 和 `transpraxis/` 包。
 

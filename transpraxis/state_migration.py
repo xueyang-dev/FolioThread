@@ -28,6 +28,7 @@ def _default_new_fields() -> Dict[str, Any]:
     from .academic_writer import default_academic_state
     from .finalization import default_dependency_impact, default_final_qa
     from .project import SYSTEM_PROJECT_ID
+    from .usage import empty_usage
     return {
         "stage": "INGESTED",
         "delivery_status": "draft",
@@ -39,6 +40,17 @@ def _default_new_fields() -> Dict[str, Any]:
         # 项目记忆注入审计：哪些跨任务锁定术语/风格规则被注入过这个任务。
         "project_memory": {},
         "document_profile": None,
+        # PDF text-layer/OCR cleanup is a separate source checkpoint.  The raw
+        # extraction is retained so a correction can be audited or retried
+        # without re-reading the uploaded file.
+        "source_paras": [],
+        # Cleaned paragraph structure is retained separately from the CAT
+        # sentence units in ``paras``.  This keeps source audit/export stable
+        # while allowing translation to use sentence-sized segments.
+        "source_paragraphs": [],
+        "segmentation": {},
+        "source_cleanup_done": False,
+        "source_cleanup": {},
         "profile_done": False,
         "profile_warnings": [],
         "semantic_units": [],
@@ -47,6 +59,15 @@ def _default_new_fields() -> Dict[str, Any]:
         "understanding_done": False,
         "understanding_warnings": [],
         "context_packet_log": [],
+        "llm_usage": empty_usage(),
+        # Auxiliary model is optional; when absent the translator configuration
+        # remains the fallback for all analysis/continuity calls.
+        "auxiliary_config": {},
+        "knowledge_feedback_policy": {},
+        "targeted_final_review": {
+            "status": "not_run", "segment_ids": [],
+            "reviewed_segment_ids": [], "failed_segment_ids": [],
+        },
         "knowledge_candidates": [],
         "translation_continuity": [],
         "knowledge_events": [],
@@ -66,6 +87,18 @@ def _default_new_fields() -> Dict[str, Any]:
         "glossary_injection_log": [],
         "human_actions": [],
         "delivery_manifest": {},
+        # CAT 工作台的结构编辑：稳定段落身份、排除清单、撤销留档。
+        # 这些字段让"同一段在拆分/合并之后仍然是同一段"，以及"被排除的原文还能
+        # 原样恢复"成为持久事实，而不是只活在浏览器会话里。
+        "segment_uid_seq": 0,
+        "segment_structure_history": [],
+        "segment_structure_undo_log": [],
+        "excluded_segments": [],
+        "exclusion_seq": 0,
+        # 导入范围报告：本次提取到了什么、哪些内容没有进入翻译。
+        "extraction_report": {},
+        # Stage-level timing is an audit artifact, never a workflow gate.
+        "performance": {},
         "delivery_approved_by_human": False,
         "delivery_approval": None,
         "delivery_snapshots": [],

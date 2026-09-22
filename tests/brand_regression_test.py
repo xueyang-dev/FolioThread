@@ -1,0 +1,149 @@
+"""用户可见品牌回归：新品牌必须完整出现，旧品牌只能留在显式兼容边界。
+
+仓库里仍有包名、环境变量、项目格式、历史 changelog 和旧资源文件不能改名。
+因此这里采用逐文件/逐行 allowlist，而不是对整个目录做粗暴忽略；任何新的旧品牌
+命中都会先在本测试中失败，再由维护者把它归入真实兼容边界或改掉。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from transpraxis import brand
+
+ROOT = Path(__file__).resolve().parent.parent
+TOKENS = (
+    "FolioThread",
+    "Foliothread",
+    "Folio Thread",
+    "foliothread",
+    "FOLIOTHREAD",
+    "folio_thread",
+    "folio-thread",
+)
+TEXT_SUFFIXES = {
+    ".bat", ".command", ".css", ".html", ".js", ".json", ".md", ".py",
+    ".sh", ".svg", ".toml", ".ts", ".tsx", ".txt", ".yml", ".yaml",
+}
+
+# These files are historical evidence or technical compatibility contracts. They are
+# named individually so a newly created public file is scanned by default.
+LEGACY_ALLOWLIST_FILES = {
+    "CHANGELOG.md",
+    "docs/assets/foliothread-workflow.html",
+    "docs/assets/foliothread-workflow.svg",
+    "docs/brand.md",
+    "pyproject.toml",
+    "transpraxis/brand.py",
+    "transpraxis/project.py",
+    "transpraxis/source_cleanup.py",
+    "transpraxis/translation_core/memory.py",
+}
+
+# Current docs and source files may mention a legacy token only when the whole line is
+# an explicit package, path, environment variable, schema, or published-repo reference.
+LEGACY_LINE_ALLOWLIST = {
+    "README.md": (
+        "foliothread-0.4.0",
+        "`foliothread`",
+        "FOLIOTHREAD_",
+        "docs/foliothread-agentic-native-blueprint.md",
+    ),
+    "core.py": ("FOLIOTHREAD_",),
+    "docs/architecture-boundaries.md": (
+        "foliothread-agentic-native-blueprint.md",
+        "`foliothread`",
+    ),
+    "docs/console-loop.md": ("foliothread-agentic-native-blueprint.md",),
+    "docs/docx-contract-v1.md": ("foliothread-agentic-native-blueprint.md",),
+    "docs/foliothread-agentic-native-blueprint.md": ("foliothread/",),
+    "docs/mti-practice-driven-roadmap.md": ("foliothread-agentic-native-blueprint.md",),
+    "docs/pdf-ingestion-performance-audit.md": ("FOLIOTHREAD_",),
+    "docs/project-memory.md": (
+        "foliothread-agentic-native-blueprint.md",
+        "foliothread-project-memory",
+    ),
+    "docs/release-plan.md": (
+        "foliothread-agentic-native-blueprint.md",
+        "foliothread-0.4.0",
+        "`foliothread`",
+    ),
+    "docs/scenario-gate.md": ("foliothread-agentic-native-blueprint.md",),
+    "docs/translation-core-phase2-completion.md": (
+        "foliothread-agentic-native-blueprint.md",
+    ),
+    "scripts/make_scenario_fixtures.py": (
+        "foliothread-agentic-native-blueprint.md",
+    ),
+    "scripts/release_smoke.py": ("foliothread-0.4.0", '"foliothread"'),
+}
+
+
+def _relative(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
+def _iter_text_files():
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
+            continue
+        rel = _relative(path)
+        if rel.startswith((".git/", "venv/", ".venv/", "outputs/", "dist/",
+                           "build/", ".pytest_cache/", ".workbuddy/",
+                           ".workbuddy-ai/", "tmp/", "skills/", "tests/")):
+            continue
+        if rel.endswith(".egg-info/SOURCES.txt") or ".egg-info/" in rel:
+            continue
+        if rel.startswith("transpraxis/resources/brand/foliothread-"):
+            continue
+        yield path
+
+
+def _legacy_hits() -> list[str]:
+    hits: list[str] = []
+    for path in _iter_text_files():
+        rel = _relative(path)
+        if rel in LEGACY_ALLOWLIST_FILES:
+            continue
+        allowed = LEGACY_LINE_ALLOWLIST.get(rel, ())
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            found = [token for token in TOKENS if token in line]
+            if not found:
+                continue
+            if allowed and any(marker in line for marker in allowed):
+                continue
+            hits.append(f"{rel}:{number}: {line.strip()}")
+    return hits
+
+
+def test_public_brand_constants_are_canonical():
+    assert brand.APP_NAME == "Folith"
+    assert brand.APP_NAME_ZH == "译页"
+    assert brand.TAGLINE == "Agentic Localization Workspace"
+    assert brand.TAGLINE_ZH == "Agentic 本地化工作台"
+
+    app = (ROOT / "app.py").read_text(encoding="utf-8")
+    gui = (ROOT / "gui.py").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "folith-logo-zh.png" in app and "folith-favicon.png" in app
+    assert "译页 Agentic 本地化工作台" in app
+    assert "brand.APP_TITLE_ZH" in gui
+    assert 'description = "Folith — Agentic Localization Workspace"' in pyproject
+    assert "Agentic Localization Workspace" in readme
+    assert "Agentic 本地化工作台" in readme
+
+
+def test_legacy_brand_hits_are_allowlisted():
+    hits = _legacy_hits()
+    assert not hits, "发现未归类的旧品牌命中：\n" + "\n".join(hits)
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"  ✓ {name}")

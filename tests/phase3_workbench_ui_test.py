@@ -468,9 +468,9 @@ def test_no_review_translation_edit_and_restore_feedback_has_no_review_claims(
 
     updated = core.load_job_state(job_id)
     assert updated["pairs"][0]["target"] == "修改后的译文"
-    assert any("译文已修改" in item.value for item in at.success)
-    assert not any(word in item.value
-                   for item in at.success for word in ("审校", "复审", "过期"))
+    save_feedback = " ".join(str(item.value) for item in at.success)
+    assert "已保存" in save_feedback and "第 1 段" in save_feedback, save_feedback
+    assert not any(word in save_feedback for word in ("审校", "复审", "过期"))
     view = review_workbench_view(updated)
     assert view["readiness"]["status"] == "not_required"
     assert not any(item["kind"] in {"stale", "missing", "failed"}

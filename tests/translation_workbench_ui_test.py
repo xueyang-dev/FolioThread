@@ -133,8 +133,12 @@ def test_translation_workspace_master_detail_selection_and_editing(tmp_path):
         assert updated["pairs"][7]["target"] == "保存后的第八段译文"
         assert updated["pairs"][7]["human_edited"] is True
         assert updated["pairs"][2]["target"] == "译文 3"
-        # 网格里的原文列必须仍然整句可读，译文行内可直接编辑
-        assert any(editor_key == area.key for area in at.text_area), \
+        # 网格里的原文列必须仍然整句可读，译文行内可直接编辑。
+        # key 尾部可能带"重挂载序号"（保存会换 key 强制前端重建，见
+        # app.py 的 _reset_translation_editor），按前缀认。
+        assert any(str(area.key) == editor_key
+                   or str(area.key).startswith(f"{editor_key}#")
+                   for area in at.text_area), \
             "中央网格每一行都要有可编辑的译文框"
 
         # CAT 导航：上一段/下一段直接切换选中段落，不必回到网格里点段号

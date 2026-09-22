@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# FolioThread —— macOS / Linux 一键启动（HTML GUI）
+# 译页 —— macOS / Linux 一键启动（HTML GUI）
 set -e
 cd "$(dirname "$0")"
 
 echo "=========================================="
-echo "    FolioThread 正在启动..."
+echo "    译页正在启动..."
 echo "=========================================="
 echo
 

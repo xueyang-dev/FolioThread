@@ -17,12 +17,28 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 DEFAULT_UNIT_CHARS = 12000
 DEFAULT_DIGEST_WORKERS = 4
 MAX_SYNOPSIS_CHARS = 12000
+# The context packet is an input budget, separate from the source batch budget.
+# Keeping it bounded prevents a large synopsis/profile from silently multiplying
+# prompt tokens for every translation batch.
+DEFAULT_CONTEXT_BUDGET_CHARS = 7200
 TARGET_CONTEXT_LEVELS = (
     "human_accepted",
     "reviewed",
     "tm_approved",
     "generated",
 )
+
+
+def _provider_failure_detail(error, fallback):
+    """Use readable provider copy while preserving local parser diagnostics."""
+    try:
+        import core
+        status = core.provider_error_status(error)
+        if status["status"] != "unknown":
+            return status["message"]
+    except Exception:  # pragma: no cover - defensive import fallback
+        pass
+    return fallback
 
 
 def _clean(value: Any, limit: int = 1200) -> str:
@@ -43,6 +59,28 @@ def _string_list(value: Any, limit: int = 12, item_limit: int = 160) -> List[str
         if len(out) >= limit:
             break
     return out
+
+
+def _dedupe_strings(values: Sequence[Any], *, exclude: Optional[Sequence[str]] = None,
+                    limit: int = 12) -> List[str]:
+    """Keep context order while removing repeated source snippets.
+
+    Repeated neighboring paragraphs are common after PDF extraction and can
+    otherwise be sent twice (once as previous context and once as next context).
+    Exact matching is intentional: semantic deduplication would risk removing
+    a genuinely repeated sentence that is useful for continuity.
+    """
+    seen = {str(item).strip() for item in (exclude or []) if str(item).strip()}
+    result: List[str] = []
+    for value in values or []:
+        item = str(value or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+        if len(result) >= max(0, int(limit or 0)):
+            break
+    return result
 
 
 def _parse_object(text: Any) -> Optional[Dict[str, Any]]:
@@ -243,7 +281,9 @@ def generate_section_digests(
                 return _fallback_digest(unit), f"{unit['unit_id']}：返回不是结构化 JSON"
             return _normalize_digest(unit, raw), None
         except Exception as exc:  # provider failures must not corrupt the job
-            return _fallback_digest(unit), f"{unit['unit_id']}：语义摘要失败（{str(exc)[:160]}）"
+            detail = _provider_failure_detail(
+                exc, str(exc)[:160] or "模型请求失败")
+            return _fallback_digest(unit), f"{unit['unit_id']}：语义摘要失败（{detail}）"
 
     existing_by_id = {
         str(item.get("unit_id")): dict(item)
@@ -272,7 +312,9 @@ def generate_section_digests(
                     digest, warning = future.result()
                 except Exception as exc:  # defensive around custom executors/providers
                     digest = _fallback_digest(units[index])
-                    warning = f"{units[index]['unit_id']}：语义摘要失败（{str(exc)[:160]}）"
+                    detail = _provider_failure_detail(
+                        exc, str(exc)[:160] or "模型请求失败")
+                    warning = f"{units[index]['unit_id']}：语义摘要失败（{detail}）"
                 results[index] = digest
                 if warning:
                     warnings.append(warning)
@@ -396,7 +438,9 @@ def generate_document_synopsis(
             [_digest_text(digest) for digest in digests],
             provider, api_key, model, target_lang, call_llm, max_chunk_chars), []
     except Exception as exc:
-        warning = f"全文概要失败（{str(exc)[:160]}）"
+        detail = _provider_failure_detail(
+            exc, str(exc)[:160] or "模型请求失败")
+        warning = f"全文概要失败（{detail}）"
     else:
         warning = "全文概要失败：模型未返回结构化 JSON"
 
@@ -570,19 +614,54 @@ def compile_context_packet(
     current_batch: Sequence[str],
     style_rules: str = "",
     entity_hints: Optional[Sequence[Dict[str, Any]]] = None,
+    context_budget_chars: int = DEFAULT_CONTEXT_BUDGET_CHARS,
 ) -> Dict[str, Any]:
-    """Compile a stable-order packet for generation/review prompts."""
+    """Compile a stable-order packet for generation/review prompts.
+
+    The packet keeps the source batch authoritative and treats all surrounding
+    material as bounded context.  Exact duplicate source snippets are removed
+    at the boundary so callers can safely provide overlapping windows.
+    """
+    current = [str(item or "").strip() for item in current_batch or []]
+    current = [item for item in current if item]
+    raw_previous_source_count = len(previous_source or [])
+    raw_next_source_count = len(next_source or [])
+    previous_source = _dedupe_strings(previous_source, exclude=current, limit=8)
+    next_source = _dedupe_strings(
+        next_source, exclude=[*current, *previous_source], limit=8)
+    raw_previous_targets = list(previous_target or [])
+    previous_target: List[Dict[str, Any]] = []
+    seen_target = set()
+    for raw in raw_previous_targets:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        key = (item.get("segment_index"), item.get("source"), item.get("target"))
+        if key in seen_target:
+            continue
+        seen_target.add(key)
+        previous_target.append(item)
+        if len(previous_target) >= 8:
+            break
+    try:
+        budget = max(1200, int(context_budget_chars or DEFAULT_CONTEXT_BUDGET_CHARS))
+    except (TypeError, ValueError):
+        budget = DEFAULT_CONTEXT_BUDGET_CHARS
     return {
         "document_profile": document_profile or {},
         "document_synopsis": document_synopsis or {},
         "section_digest": section_digest or {},
         "locked_glossary": glossary_text or "",
         "style_rules": style_rules or "",
-        "previous_source_context": list(previous_source or []),
-        "previous_accepted_target_context": list(previous_target or []),
-        "next_source_context": list(next_source or []),
-        "current_batch": list(current_batch or []),
+        "previous_source_context": previous_source,
+        "previous_accepted_target_context": previous_target,
+        "next_source_context": next_source,
+        "current_batch": current,
         "entity_hints": [dict(item) for item in entity_hints or []],
+        "context_budget_chars": budget,
+        "context_dedupe_removed_count": max(
+            0, raw_previous_source_count - len(previous_source)
+        ) + max(0, raw_next_source_count - len(next_source)),
     }
 
 
@@ -611,49 +690,94 @@ def _compact_profile(profile: Dict[str, Any]) -> str:
     return "\n".join(lines)[:1800] or "{}"
 
 
-def render_context_packet(packet: Dict[str, Any]) -> str:
-    """Render the packet with a stable prefix and current batch at the end."""
+def _render_context_packet(packet: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Render a packet and return prompt text plus bounded-context diagnostics."""
     profile = _compact_profile(packet.get("document_profile") or {})
     synopsis = packet.get("document_synopsis") or {}
     digest = packet.get("section_digest") or {}
-    lines = [
-        "【文档画像】\n" + profile,
-        "【文体与翻译规则】\n" + (packet.get("style_rules") or ""),
-        "【全文概要】\n" + _clean(synopsis.get("summary"), 2400),
-        "【全文发展/论证】\n" + _clean(synopsis.get("document_arc"), 1600),
-        "【当前语义单元摘要】\n" + _clean(digest.get("summary"), 1600),
-        "【当前单元翻译提示】\n" + "、".join(digest.get("translation_notes") or []),
-        "【锁定术语与范围规则（项目人工锁定优先）】\n"
-        + (packet.get("locked_glossary") or ""),
-        "【专名/实体连续性提示（仅作建议；人工实体选择优先）】\n" + "\n".join(
+    sections = [
+        ("【文档画像】", profile),
+        ("【文体与翻译规则】", _clean(packet.get("style_rules"), 1600)),
+        # Locked terminology is authoritative and therefore gets budget
+        # priority over broad narrative context.
+        ("【锁定术语与范围规则（项目人工锁定优先）】",
+         _clean(packet.get("locked_glossary"), 2200)),
+        ("【当前语义单元摘要】", _clean(digest.get("summary"), 1600)),
+        ("【当前单元翻译提示】", "、".join(digest.get("translation_notes") or [])),
+        ("【全文概要】", _clean(synopsis.get("summary"), 2400)),
+        ("【全文发展/论证】", _clean(synopsis.get("document_arc"), 1600)),
+        ("【专名/实体连续性提示（仅作建议；人工实体选择优先）】", "\n".join(
             f"- {item.get('source_form', '')} -> {item.get('preferred_target', '')}"
             f"（{item.get('entity_type', 'proper noun')}；"
             f"{item.get('provenance', 'generated_observation')}；"
             f"优先级：{item.get('precedence', 'entity_continuity_hint')}）"
             for item in packet.get("entity_hints") or []
-        ),
-        "【前文原文上下文】\n" + "\n".join(
-            f"- {item}" for item in packet.get("previous_source_context") or []),
-        "【前文已接受译文连续性】\n" + "\n".join(
+        )),
+        ("【前文原文上下文】", "\n".join(
+            f"- {item}" for item in packet.get("previous_source_context") or [])),
+        ("【前文已接受译文连续性】", "\n".join(
             f"- 段 {item.get('segment_index', '?')} [{item.get('level', 'generated')}] "
             f"原文：{item.get('source', '')}\n  译文：{item.get('target', '')}"
-            for item in packet.get("previous_accepted_target_context") or []),
-        "【后文原文上下文】\n" + "\n".join(
-            f"- {item}" for item in packet.get("next_source_context") or []),
-        "【待翻译段落（按序号返回等长数组）】",
+            for item in packet.get("previous_accepted_target_context") or [])),
+        ("【后文原文上下文】", "\n".join(
+            f"- {item}" for item in packet.get("next_source_context") or [])),
     ]
-    lines.extend(f"{index + 1}. {source}" for index, source in
-                 enumerate(packet.get("current_batch") or []))
-    return "\n\n".join(lines)
+    try:
+        budget = max(1200, int(packet.get("context_budget_chars") or
+                               DEFAULT_CONTEXT_BUDGET_CHARS))
+    except (TypeError, ValueError):
+        budget = DEFAULT_CONTEXT_BUDGET_CHARS
+    rendered_sections: List[str] = []
+    used = 0
+    truncated = False
+    for title, body in sections:
+        body = str(body or "").strip()
+        if not body:
+            continue
+        full = f"{title}\n{body}"
+        remaining = budget - used
+        if remaining <= len(title) + 1:
+            truncated = True
+            break
+        if len(full) > remaining:
+            body = body[:max(0, remaining - len(title) - 1)].rstrip()
+            if not body:
+                truncated = True
+                break
+            rendered_sections.append(f"{title}\n{body}…")
+            used = budget
+            truncated = True
+            break
+        rendered_sections.append(full)
+        used += len(full) + 2
+    prefix_text = "\n\n".join(rendered_sections)
+    if len(prefix_text) > budget:
+        # Account for the separators inserted by the join.  This final guard
+        # makes the advertised budget a hard bound even when a clipped section
+        # ends exactly at the boundary.
+        prefix_text = prefix_text[:budget]
+        truncated = True
+    current = packet.get("current_batch") or []
+    current_section = "【待翻译段落（按序号返回等长数组）】\n" + "\n".join(
+        f"{index + 1}. {source}" for index, source in enumerate(current))
+    rendered = "\n\n".join([prefix_text, current_section]) if prefix_text \
+        else current_section
+    return rendered, {
+        "context_budget_chars": budget,
+        "context_prefix_chars": len(prefix_text),
+        "context_truncated": truncated,
+        "dedupe_removed_count": int(packet.get("context_dedupe_removed_count") or 0),
+    }
+
+
+def render_context_packet(packet: Dict[str, Any]) -> str:
+    """Render the packet with a stable prefix and current batch at the end."""
+    return _render_context_packet(packet)[0]
 
 
 def context_metadata(packet: Dict[str, Any]) -> Dict[str, Any]:
     """Small audit record; do not persist full prompt text in job state."""
-    rendered = render_context_packet(packet)
-    marker = "【待翻译段落（按序号返回等长数组）】"
-    prefix_chars = rendered.find(marker)
-    if prefix_chars < 0:
-        prefix_chars = len(rendered)
+    rendered, render_stats = _render_context_packet(packet)
     return {
         "section_id": (packet.get("section_digest") or {}).get("unit_id"),
         "previous_source_count": len(packet.get("previous_source_context") or []),
@@ -666,7 +790,10 @@ def context_metadata(packet: Dict[str, Any]) -> Dict[str, Any]:
         "next_source_count": len(packet.get("next_source_context") or []),
         "current_batch_count": len(packet.get("current_batch") or []),
         "prompt_chars": len(rendered),
-        "context_prefix_chars": prefix_chars,
+        "context_prefix_chars": render_stats["context_prefix_chars"],
+        "context_budget_chars": render_stats["context_budget_chars"],
+        "context_truncated": render_stats["context_truncated"],
+        "dedupe_removed_count": render_stats["dedupe_removed_count"],
         "current_batch_chars": sum(len(item) for item in packet.get("current_batch") or []),
         "entity_hint_count": len(packet.get("entity_hints") or []),
     }

@@ -47,19 +47,20 @@ CHIP_TONES = {
     "neutral": "neutral",
 }
 
-# CTA → 工作台落点（"overview" 表示只打开概览，不再往下跳）。
+# CTA → 工作台落点（任务工作台已取消「概览」路由：打开任务 = 落到翻译工作台，
+# 全局状态摘要由任务 Banner 承担，续跑/重试动作也在那一条运行区里可见）。
 #
 # 注意兜底 CTA 必须是「打开任务」而不是「打开项目」：Project 与翻译任务是两个
 # 实体，任务卡片用「打开项目」会让文案层面把两者混同（既有回归测试守住这条）。
 CTA_DESTINATIONS = {
-    "查看进度": "overview",
-    "继续处理": "overview",
+    "查看进度": "translation",
+    "继续处理": "translation",
     "继续翻译": "translation",
     "继续审校": "review",
     "更新报告": "report",
     "查看交付": "delivery",
     "准备交付": "delivery",
-    "打开任务": "overview",
+    "打开任务": "translation",
 }
 
 _EXTENSION_LABELS = {

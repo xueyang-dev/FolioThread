@@ -38,7 +38,7 @@ def _make_layout_pdf():
     document = fitz.open()
     for page_number in range(2):
         page = document.new_page(width=612, height=792)
-        page.insert_text((72, 30), "FolioThread running header", fontsize=9)
+        page.insert_text((72, 30), "Folith running header", fontsize=9)
         page.insert_text((72, 100), "The winds, temperature, and", fontsize=11)
         if page_number == 0:
             page.insert_image(fitz.Rect(72, 115, 500, 250), stream=image)
@@ -250,6 +250,53 @@ def test_standard_continuity_observation_is_bounded_and_available_without_review
         assert len(later_translation_users) == 2
         assert "volumetric sensing -> 体积感知" in later_translation_users[1]
         assert all(item.get("scope") == "document" for item in candidates)
+    finally:
+        core.OUTPUT_DIR, core.call_llm = old_output, old_llm
+
+
+def test_auxiliary_model_and_adaptive_feedback_policy_are_audited(tmp_path):
+    old_output, old_llm = core.OUTPUT_DIR, core.call_llm
+    core.OUTPUT_DIR = tmp_path
+    calls = []
+    try:
+        paragraphs = [f"A paragraph containing a recurring term number {index}."
+                      for index in range(16)]
+
+        def llm(provider, key, model, system, user, temperature=0.1, **kwargs):
+            calls.append((provider, model, system))
+            if "翻译流知识抽取器" in system:
+                return json.dumps([{
+                    "segment_id": 0,
+                    "source_expression": "recurring term",
+                    "observed_target": "重复术语",
+                    "kind": "term",
+                }])
+            if "学术翻译专家" in system:
+                current = user.split("【待翻译段落（按序号返回等长数组）】", 1)[-1]
+                count = len(re.findall(r"(?m)^\d+\.\s+", current))
+                return json.dumps(["重复术语在这里。"] * count)
+            raise AssertionError(f"unexpected prompt: {system[:80]}")
+
+        core.call_llm = llm
+        state = core.new_job_state("adaptive.docx")
+        state.update(p1_done=True, paras=paragraphs, quality_mode=False)
+        result = core.translate_stage(
+            state, "adaptive-0001", [], "DeepSeek", "main-key", "main-model",
+            "简体中文", "", enable_review=False, use_tm=False,
+            auxiliary_config={"provider": "DeepSeek", "api_key": "aux-key",
+                              "model": "cheap-model"},
+        )
+        policy = result["knowledge_feedback_policy"]
+        assert policy["interval"] == 2
+        assert policy["skipped_batches"] == [1]
+        assert any(provider == "DeepSeek" and model == "cheap-model"
+                   for provider, model, system in calls
+                   if "翻译流知识抽取器" in system)
+        assert all(model != "cheap-model" for provider, model, system in calls
+                   if "学术翻译专家" in system)
+        assert result["llm_usage"]["by_role"]["translation"]["calls"] > 0
+        assert result["llm_usage"]["by_role"]["auxiliary"]["calls"] > 0
+        assert result["llm_usage"]["estimated_total_tokens"] > 0
     finally:
         core.OUTPUT_DIR, core.call_llm = old_output, old_llm
 

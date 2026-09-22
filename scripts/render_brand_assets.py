@@ -1,12 +1,11 @@
-"""重新生成 FolioThread 的**向量版**品牌位图（SVG 源 → 各尺寸 PNG）。
+"""重新生成 Folith 的**向量版**品牌位图（SVG 源 → 各尺寸 PNG）。
 
-界面与 README 当前用的是原图裁切资产（`foliothread-source-lockup.png`、
-`foliothread-source-icon.png`），那两个**不由本脚本管理**，也不要在这里覆盖：
-它们是用户提供品牌图的保真裁切，见 `docs/brand.md`。
+旧的原图裁切资产不由本脚本管理，也不要在这里覆盖；它们作为兼容素材保留，
+当前界面与 README 使用本脚本生成的 Folith lockup。
 
 本脚本负责同一 logo 的向量派生版本——源文件是
-`transpraxis/resources/brand/` 下的两个 SVG（`foliothread-mark.svg` 彩色图标、
-`foliothread-mark-mono.svg` 单色图标）。改了 SVG 之后必须能一条命令重新生成：
+`transpraxis/resources/brand/` 下的两个 SVG（`folith-mark.svg` 彩色图标、
+`folith-mark-mono.svg` 单色图标）。改了 SVG 之后必须能一条命令重新生成：
 手工导出的位图会漂移，很快就不再等于向量源，而深色底材料、App 图标、
 需要任意缩放的场景又都在引用这些 PNG。
 
@@ -24,11 +23,12 @@
 
 产物（全部是向量派生，不含 source-*.png 裁切资产）：
 
-    foliothread-logo.png         横向组合（图标 + 字标 + 副标题）
-    foliothread-logo-dark.png    深色底横向组合
-    foliothread-logo-stacked.png 竖向组合（窄栏 / 方形版位）
-    foliothread-app-icon.png     App 图标（海军蓝圆角方块 + 图标）
-    foliothread-favicon.png      标签页图标位图
+    folith-logo.png         English 横向组合（图标 + 字标 + 双语副标题）
+    folith-logo-zh.png      中文横向组合（图标 + 中文字标 + 中文副标题）
+    folith-logo-dark.png    深色底横向组合
+    folith-logo-stacked.png 竖向组合（窄栏 / 方形版位）
+    folith-app-icon.png     App 图标（海军蓝圆角方块 + 图标）
+    folith-favicon.png      标签页图标位图
 """
 from __future__ import annotations
 
@@ -69,9 +69,10 @@ FONT_STACK = ("Manrope, 'Helvetica Neue', Helvetica, Arial, "
 FONT_CSS = ("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800"
             "&display=swap")
 
-WORDMARK = "FolioThread"
-TAGLINE_EN = "Agentic Translation Workspace"
-TAGLINE_ZH = "智能体翻译工作台"
+WORDMARK_EN = "Folith"
+WORDMARK_ZH = "译页"
+TAGLINE_EN = "Agentic Localization Workspace"
+TAGLINE_ZH = "Agentic 本地化工作台"
 
 # 横向组合的版式，单位是「图标高度 = 268」，可无级缩放。
 LOCKUP = {"gap": 44, "size": 76, "tag_en": 40, "tag_zh": 38,
@@ -161,22 +162,24 @@ def _inline_svg(path: Path, color: str | None = None) -> str:
     return svg
 
 
-def _lockup(mark_href: str, on_dark: bool) -> tuple[str, int, int]:
+def _lockup(mark_href: str, on_dark: bool, *, wordmark: str,
+            taglines: tuple[tuple[str, int, str], ...]) -> tuple[str, int, int]:
     icon_h, icon_w = 268, 274
     width = icon_w + LOCKUP["gap"] + LOCKUP["text_w"]
     height = icon_h
     word = PALETTE["on_dark"] if on_dark else PALETTE["navy"]
     sub = PALETTE["sub_dark"] if on_dark else PALETTE["sub"]
+    tags = "".join(
+        f'<div class="tag" style="font-size:{size}px;color:{sub};'
+        f'margin-top:{LOCKUP["line_gap"] if index == 0 else LOCKUP["tag_gap"]}px;'
+        f'letter-spacing:{spacing}">{text}</div>'
+        for index, (text, size, spacing) in enumerate(taglines))
     body = (
         f'<div class="lockup">'
         f'<img src="{mark_href}" width="{icon_w}" height="{icon_h}" alt="">'
         f'<div class="text" style="margin-left:{LOCKUP["gap"]}px">'
         f'<div class="wordmark" style="font-size:{LOCKUP["size"]}px;color:{word}">'
-        f'{WORDMARK}</div>'
-        f'<div class="tag" style="font-size:{LOCKUP["tag_en"]}px;color:{sub};'
-        f'margin-top:{LOCKUP["line_gap"]}px;letter-spacing:-.01em">{TAGLINE_EN}</div>'
-        f'<div class="tag" style="font-size:{LOCKUP["tag_zh"]}px;color:{sub};'
-        f'margin-top:{LOCKUP["tag_gap"]}px;letter-spacing:.14em">{TAGLINE_ZH}</div>'
+        f'{wordmark}</div>{tags}'
         f'</div></div>')
     return _page(body, width, height), width, height
 
@@ -191,7 +194,7 @@ def _stacked(mark_href: str, on_dark: bool) -> tuple[str, int, int]:
         f'width:{width}px">'
         f'<img src="{mark_href}" width="{icon}" height="{int(icon * 268 / 274)}" alt="">'
         f'<div class="wordmark" style="font-size:50px;color:{word};margin-top:18px">'
-        f'{WORDMARK}</div>'
+        f'{WORDMARK_EN}</div>'
         f'<div class="tag" style="font-size:25px;color:{sub};margin-top:10px;'
         f'letter-spacing:-.01em">{TAGLINE_EN}</div>'
         f'<div class="tag" style="font-size:24px;color:{sub};margin-top:8px;'
@@ -215,32 +218,41 @@ def _mark_block(svg: str, size: int, tile: str | None = None,
 
 
 def _jobs(extra: bool) -> list[dict]:
-    color_mark = BRAND / "foliothread-mark.svg"
-    mono_mark = BRAND / "foliothread-mark-mono.svg"
+    color_mark = BRAND / "folith-mark.svg"
+    mono_mark = BRAND / "folith-mark-mono.svg"
     for path in (color_mark, mono_mark):
         if not path.is_file():
             raise SystemExit(f"[错误] 缺少品牌源文件：{path}")
     href = _data_uri(color_mark)
     jobs: list[dict] = []
 
-    for on_dark, name in ((False, "foliothread-logo.png"),
-                          (True, "foliothread-logo-dark.png")):
-        html, w, h = _lockup(href, on_dark=on_dark)
+    english_tags = ((TAGLINE_EN, LOCKUP["tag_en"], "-.01em"),
+                    (TAGLINE_ZH, LOCKUP["tag_zh"], ".14em"))
+    chinese_tags = ((TAGLINE_ZH, LOCKUP["tag_en"], ".14em"),)
+    for on_dark, name in ((False, "folith-logo.png"),
+                          (True, "folith-logo-dark.png")):
+        html, w, h = _lockup(href, on_dark=on_dark, wordmark=WORDMARK_EN,
+                              taglines=english_tags)
         jobs.append({"html": html, "w": w, "h": h,
                      "selector": "#stage", "out": str(BRAND / name)})
 
+    html, w, h = _lockup(href, on_dark=False, wordmark=WORDMARK_ZH,
+                          taglines=chinese_tags)
+    jobs.append({"html": html, "w": w, "h": h, "selector": "#stage",
+                 "out": str(BRAND / "folith-logo-zh.png")})
+
     html, w, h = _stacked(href, on_dark=False)
     jobs.append({"html": html, "w": w, "h": h, "selector": "#stage",
-                 "out": str(BRAND / "foliothread-logo-stacked.png")})
+                 "out": str(BRAND / "folith-logo-stacked.png")})
 
     html, w, h = _mark_block(_inline_svg(color_mark), 512,
                              tile=PALETTE["navy"], radius=115, inner=0.74)
     jobs.append({"html": html, "w": w, "h": h, "selector": "#stage",
-                 "out": str(BRAND / "foliothread-app-icon.png")})
+                 "out": str(BRAND / "folith-app-icon.png")})
 
     html, w, h = _mark_block(_inline_svg(color_mark), 512)
     jobs.append({"html": html, "w": w, "h": h, "selector": "#stage",
-                 "out": str(BRAND / "foliothread-favicon.png")})
+                 "out": str(BRAND / "folith-favicon.png")})
 
     if extra:
         # 单色版：深色底用白色、浅色底用品牌深蓝（字形是背景色镂空）
@@ -282,9 +294,9 @@ def _render(jobs: list[dict]) -> int:
     return 0
 
 
-OUTPUTS = ("foliothread-logo.png", "foliothread-logo-dark.png",
-           "foliothread-logo-stacked.png", "foliothread-app-icon.png",
-           "foliothread-favicon.png")
+OUTPUTS = ("folith-logo.png", "folith-logo-zh.png", "folith-logo-dark.png",
+           "folith-logo-stacked.png", "folith-app-icon.png",
+           "folith-favicon.png")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -296,8 +308,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.check:
-        sources = [BRAND / "foliothread-mark.svg",
-                   BRAND / "foliothread-mark-mono.svg"]
+        sources = [BRAND / "folith-mark.svg",
+                   BRAND / "folith-mark-mono.svg"]
         newest = max(p.stat().st_mtime for p in sources if p.is_file())
         missing = [n for n in OUTPUTS if not (BRAND / n).is_file()]
         stale = [n for n in OUTPUTS

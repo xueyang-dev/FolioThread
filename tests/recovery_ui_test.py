@@ -93,11 +93,11 @@ def test_recovery_ui():
             time.sleep(0.02)
         at.run()
         assert not at.exception, f"恢复后的当前任务面板异常：{at.exception}"
-        assert any("<h2>概览</h2>" in s.value for s in at.markdown)
-        # 断点继续后该任务已完成（p2_done=True 且未启用报告）：概览应显示完成状态，
-        # 而**不应**再渲染运行面板里的引擎细节与「继续处理」。
+        assert any("<h2>翻译</h2>" in s.value for s in at.markdown)
+        # 断点继续后该任务已完成（p2_done=True 且未启用报告）：任务 Banner 应显示
+        # 完成状态，而**不应**再渲染运行区里的引擎细节与「继续处理」。
         # 这条断言是回归防线：缺失 enable_annotate 的旧任务曾被误判为
-        # idle_incomplete，导致已完成的任务仍显示运行面板与继续处理按钮。
+        # idle_incomplete，导致已完成的任务仍显示运行区与继续处理按钮。
         assert core._runtime_business_complete(core.load_job_state(job_id))
         assert core.build_job_runtime_view(job_id).get("runtime_status") == "completed"
         assert not any("最近活动" in s.value for s in at.markdown)

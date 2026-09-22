@@ -1,14 +1,14 @@
-# FolioThread：Agentic Native Translation Studio 开发蓝图
+# Folith / 译页：Agentic Localization Workspace 开发蓝图
 
-本文定义 FolioThread 的产品方向、整体架构和开发顺序。2026-09-14 更新：近期先完成 UI 全面打磨并正式发布；发布后转向 CAT 内核，首先完成 [DOCX Contract v1](docx-contract-v1.md) 的端到端闭环。
+本文定义 Folith 的产品方向、整体架构和开发顺序。2026-09-14 更新：近期先完成 UI 全面打磨并正式发布；发布后转向 CAT 内核，首先完成 [DOCX Contract v1](docx-contract-v1.md) 的端到端闭环。
 
 本文的进度以当前本地工作树为依据，包括尚未提交的实现；不等同于 GitHub main 或已发布版本。本次文档更新进行了相关代码静态核对，没有重新运行产品测试或真实 DOCX 保真验收。历史 Phase 文档保留为实现记录；后续开发优先级以本文 §7 为准。
 
 它不是一次重写计划，也不是把“Agent”包装成一个新的聊天窗口。它的目标是把现有的长文档翻译能力重新组织成一个更明确的产品：
 
-> FolioThread 是一个由 Agent 执行翻译工作、由人类控制语言质量和交付责任的 Translation Studio。
+> Folith 是一个由 Agent 执行本地化工作、由人类控制语言质量和交付责任的 Agentic Localization Workspace。
 
-FolioThread 的核心对象不再是“翻译实践报告”，而是一个可恢复、可审查、可交付的翻译工作室项目。
+Folith 的核心对象不再是“翻译实践报告”，而是一个可恢复、可审查、可交付的本地化工作台项目。
 
 ## 1. 产品收敛
 
@@ -21,7 +21,7 @@ FolioThread 的核心对象不再是“翻译实践报告”，而是一个可�
 - 需要本地运行、保留人工控制权的 AI 翻译使用者；
 - 需要处理 PDF / DOCX，并要求术语、风格和审校可追溯的人。
 
-MTI 学生可以继续使用 FolioThread，但这是一个具体用户群，不应继续决定产品的首页、信息架构和运行时边界。
+MTI 学生可以继续使用 Folith，但这是一个具体用户群，不应继续决定产品的首页、信息架构和运行时边界。
 
 ### 1.2 一句话价值
 
@@ -29,7 +29,7 @@ MTI 学生可以继续使用 FolioThread，但这是一个具体用户群，不�
 
 ### 1.3 产品不是什么
 
-FolioThread 不应成为：
+Folith 不应成为：
 
 - 通用聊天式写作工具；
 - 自动替用户做最终语言判断的黑箱翻译器；
@@ -39,7 +39,7 @@ FolioThread 不应成为：
 
 ## 2. 核心工作模型
 
-FolioThread 的主流程应从当前的“功能列表”收敛为一条 Studio Loop：
+Folith 的主流程应从当前的“功能列表”收敛为一条 Studio Loop：
 
 ```text
 Import
@@ -96,7 +96,7 @@ Deliver
 
 #### Translation Core：产品真值
 
-Translation Core 是 FolioThread 的唯一核心。它应拥有以下稳定概念：
+Translation Core 是 Folith 的唯一核心。它应拥有以下稳定概念：
 
 - `Document`：源文档版本、结构、可翻译单元及原文件定位；当前实现仍以段落为主，目标模型随 DOCX 闭环落地；
 - `Project`：跨任务的术语、风格和人工确认记忆；
@@ -141,7 +141,7 @@ Context Builder → Translator → Reviewer → Repair Planner → Delivery Buil
 
 ### 3.2 Project 与 Job 的边界
 
-这是 FolioThread 从“单次脚本”成为 Studio 的关键边界：
+这是 Folith 从“单次脚本”成为工作台的关键边界：
 
 ```text
 Project
@@ -196,7 +196,7 @@ Project
 
 ### 4.2 人类控制点
 
-FolioThread 应把人类控制点集中在四处：
+Folith 应把人类控制点集中在四处：
 
 1. **Memory gate**：术语、实体和风格规则是否进入项目记忆；
 2. **Translation gate**：候选译文是否成为当前译文；
@@ -210,7 +210,7 @@ FolioThread 应把人类控制点集中在四处：
 TransPraxis 的学术能力不应被粗暴删除，因为其中的 provenance、合规和渲染 QA 对某些用户有价值；但它们必须从核心产品降级为一个明确的下游扩展：
 
 ```text
-FolioThread Core
+Folith Core
   ├─ Translation Studio（默认）
   └─ Research / MTI Extension（可选）
        ├─ case provenance
@@ -246,7 +246,7 @@ FolioThread Core
 短期不做全量 import rename。先按职责收敛目录：
 
 ```text
-FolioThread/
+Folith/
 ├─ foliothread/                 # 未来公开 namespace；逐步迁移
 │  ├─ core/                     # 稳定的领域模型和状态契约
 │  ├─ orchestration/            # bounded Agent jobs
@@ -340,7 +340,7 @@ PPTX / XLSX / HTML/XML 按真实客户输入排序；XLIFF 可以成为后续互
 
 ## 8. 进度与质量指标
 
-FolioThread 的进度不再使用“完成了多少模块”。现有工作流基线包含三个端到端场景；新的 DOCX 契约需增加专门验收，不能用旧场景替代：
+Folith 的进度不再使用“完成了多少模块”。现有工作流基线包含三个端到端场景；新的 DOCX 契约需增加专门验收，不能用旧场景替代：
 
 | 场景 | 必须证明 |
 | --- | --- |
@@ -384,7 +384,7 @@ Agentic Native 的核心指标不是“自动化率越高越好”，而是：
 ## 10. 最终目标状态
 
 ```text
-FolioThread
+Folith
   └─ Translation Studio
       ├─ Project Memory
       ├─ Document Understanding
@@ -402,6 +402,6 @@ localize-anything
 
 最终用户应该只需要理解一个产品承诺：
 
-> FolioThread 帮你把长文档翻译完成，并让你始终知道哪些内容由 Agent 生成、哪些内容由人确认、哪些资产可以负责地交付。
+> Folith 帮你把长文档本地化完成，并让你始终知道哪些内容由 Agent 生成、哪些内容由人确认、哪些资产可以负责地交付。
 
-这比继续把“通用翻译”和“学术写作”维持成两个平衡的一等支柱更清晰，也比把 FolioThread 变成一个泛化的 Agent 平台更可执行。
+这比继续把“通用翻译”和“学术写作”维持成两个平衡的一等支柱更清晰，也比把 Folith 变成一个泛化的 Agent 平台更可执行。

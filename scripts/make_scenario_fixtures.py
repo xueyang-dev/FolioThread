@@ -1,4 +1,4 @@
-"""生成 FolioThread 三个端到端验收场景的源文档（内容确定性、可重复）。
+"""生成 Folith 三个端到端验收场景的源文档（内容确定性、可重复）。
 
 蓝图 `docs/foliothread-agentic-native-blueprint.md` §8 把发布进度定义为三个
 端到端场景，而不是模块数量：
@@ -182,7 +182,7 @@ def build_docx_scenario(
     document.add_heading("长文档验收场景：生态恢复的过程与机制", level=0)
     document.add_paragraph(
         "本文件由 scripts/make_scenario_fixtures.py 确定性生成，"
-        "用于 FolioThread 的端到端验收，不包含任何真实研究数据。"
+        "用于 Folith 的端到端验收，不包含任何真实研究数据。"
     )
     for index, (title_cn, title_en) in enumerate(headings):
         document.add_heading(f"{index + 1}. {title_cn} / {title_en}", level=1)
@@ -212,7 +212,7 @@ def build_docx_scenario(
 
 # ================= 场景二：100 页 PDF =================
 
-_RUNNING_HEADER = "FolioThread Scenario Fixture — Ecological Restoration"
+_RUNNING_HEADER = "Folith Scenario Fixture — Ecological Restoration"
 _PDF_BODY_X0 = 72.0          # 正文左边界
 _PDF_INDENT = 14.0           # 首行缩进：运行时的段落边界判据
 _PDF_LINE_WIDTH = 92         # 每行最大字符数

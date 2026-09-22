@@ -1,11 +1,14 @@
-"""FolioThread 核心逻辑层（与 Streamlit UI 解耦，便于测试）。
+"""Folith 核心逻辑层（与 Streamlit UI 解耦，便于测试）。
 
 职责：大模型路由、文档清洗、术语抽取、双语翻译、报告生成、任务进度持久化。
 """
 import hashlib
 import io
 import json
+import csv
+import inspect
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -19,6 +22,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
 from pathlib import Path
+from urllib.parse import urlparse
 
 import fitz  # PyMuPDF
 import httpx
@@ -39,12 +43,17 @@ from transpraxis import snapshots as _snapshots
 from transpraxis import entity_registry as _entity_registry
 from transpraxis import model_roles as _model_roles
 from transpraxis import pdf_ingestion as _pdf_ingestion
+from transpraxis import source_cleanup as _source_cleanup
+from transpraxis import segmentation as _segmentation
+from transpraxis import source_quality as _source_quality
 from transpraxis import translation_protocol as _translation_protocol
 from transpraxis import translation_target as _translation_target
 from transpraxis import finalization as _finalization
 from transpraxis import rendered_qa as _rendered_qa
 from transpraxis import project as _project
 from transpraxis import translation_memory as _tm_scope
+from transpraxis import usage as _usage
+from transpraxis.performance import PipelineProfiler
 from transpraxis.textual import has_textual_content, normalize_language
 
 # ================= 常量 =================
@@ -107,7 +116,12 @@ PROVIDERS = {
     },
     "OpenAI": {
         "kind": "openai",
-        "models": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],
+        # Keep the stable general models and expose current reasoning families
+        # so the conditional reasoning-effort control has a real target.
+        "models": [
+            "gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1",
+            "gpt-5.2", "gpt-5.1", "gpt-5", "gpt-5-mini", "o3", "o4-mini",
+        ],
         "capabilities": {
             "supports_json_schema": True,
             "supports_json_object": True,
@@ -180,13 +194,72 @@ def normalize_openai_base_url(base_url):
     base = (base_url or "").strip().rstrip("/")
     for suffix in ("/chat/completions", "/completions", "/responses", "/models"):
         if base.endswith(suffix):
-            return base[:-len(suffix)]
+            base = base[:-len(suffix)]
+            break
+    if not base:
+        return ""
+    parsed = urlparse(base)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
     return base
+
+
+def resolve_openai_base_url(provider, base_url=None):
+    """Resolve an OpenAI-compatible base URL without silently falling back.
+
+    A custom relay has no registry URL.  Falling through to the OpenAI SDK's
+    default in that case sends a relay credential to api.openai.com and turns
+    a configuration mistake into a misleading ``invalid_api_key`` response.
+    """
+    cfg = PROVIDERS.get(provider) or {}
+    explicit = base_url is not None
+    resolved = normalize_openai_base_url(
+        base_url if explicit else cfg.get("base_url"))
+    if cfg.get("custom_base_url") and explicit and not resolved:
+        raise ValueError("自定义中转站的 API 地址无效（需要 http(s)://…/v1）")
+    if cfg.get("custom_base_url") and not explicit and not resolved:
+        resolved = normalize_openai_base_url(getattr(_LLM_CTX, "base_url", None))
+    if cfg.get("custom_base_url") and not resolved:
+        raise ValueError("自定义中转站未配置有效的 API 地址（需要 http(s)://…/v1）")
+    return resolved
 
 
 def set_llm_base_url(base_url):
     """为当前线程设置 OpenAI 兼容中转站地址（空值清除）。"""
     _LLM_CTX.base_url = normalize_openai_base_url(base_url) or None
+    return _LLM_CTX.base_url
+
+
+_REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def reasoning_effort_options(provider, model):
+    """Return safe reasoning-effort values for a known reasoning model.
+
+    OpenAI-compatible relays do not expose a portable capability schema.  We
+    therefore only offer the control for recognizable reasoning model names;
+    unknown custom models remain in automatic mode so an unsupported request
+    parameter cannot break translation.
+    """
+    cfg = PROVIDERS.get(provider) or {}
+    if cfg.get("kind") not in {"openai", "openai_compat"}:
+        return ()
+    name = str(model or "").strip().lower()
+    if not name:
+        return ()
+    # OpenAI reasoning families and common compatible relay names.  The UI
+    # deliberately uses the portable low/medium/high subset.
+    prefixes = ("o1", "o3", "o4-mini", "gpt-5", "gpt-6", "deepseek-r1", "qwq")
+    if not name.startswith(prefixes):
+        return ()
+    return ("low", "medium", "high")
+
+
+def set_llm_reasoning_effort(value):
+    """Set or clear the per-thread Chat Completions reasoning effort."""
+    value = str(value or "").strip().lower()
+    _LLM_CTX.reasoning_effort = value if value in _REASONING_EFFORT_VALUES else None
+    return _LLM_CTX.reasoning_effort
 
 
 def _runtime_job_id():
@@ -262,70 +335,838 @@ _ABBREV_RE = re.compile(
     r"\b(?:Lt|Col|Gen|Maj|Capt|Sgt|Brig|Mr|Mrs|Ms|Dr|St|No|Vol|pp|"
     r"e\.g|i\.e|vs|etc|a\.m|p\.m|U\.S|A\.F|B\.C|A\.D)\.", re.IGNORECASE)
 
+OCR_WORKERS_DEFAULT = 2
+OCR_QUEUE_SIZE_DEFAULT = 4
+OCR_CONFIDENCE_THRESHOLD_DEFAULT = 88.0
+OCR_CHECKPOINT_VERSION = 1
+_OCR_PAGE_NUMBER_RE = re.compile(
+    r"^\s*(?:page\s+)?\d{1,4}(?:\s*(?:of|/)\s*\d{1,4})?\s*$",
+    re.IGNORECASE,
+)
+
 
 def extract_pdf_paragraphs(file_bytes):
     """Compatibility API backed by the layout-aware PDF ingestion module."""
     return _pdf_ingestion.extract_pdf_paragraphs(file_bytes)
 
 
-def _ocr_pdf_text(file_bytes, max_pages=3):
-    """扫描件 OCR：只渲染代表性页（前/中/后），交给 tesseract 识别。
+def _find_tesseract():
+    """Find Tesseract even when the app was launched from Finder/Explorer.
 
-    任何环节失败都返回空字符串（由调用方降级），绝不让 OCR 阻塞流程。
+    GUI launchers often receive a smaller PATH than an interactive shell.  The
+    explicit environment variable is useful for portable installs and takes
+    precedence over the usual PATH/Homebrew/Windows locations.
     """
-    import shutil
-    import subprocess
-    import tempfile
+    configured = os.environ.get("FOLIOTHREAD_TESSERACT_CMD", "").strip()
+    candidates = [configured, shutil.which("tesseract")]
+    if os.name == "nt":
+        candidates.extend([
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ])
+    else:
+        candidates.extend([
+            "/opt/homebrew/bin/tesseract",
+            "/usr/local/bin/tesseract",
+            "/usr/bin/tesseract",
+        ])
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return ""
 
-    if shutil.which("tesseract") is None:
-        return ""
+
+def _tesseract_languages(command):
+    """Return installed OCR languages, ignoring Tesseract control models."""
     try:
-        import fitz
+        proc = subprocess.run(
+            [command, "--list-langs"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=15,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must not block OCR
+        return []
+    if proc.returncode != 0:
+        return []
+    languages = []
+    for line in (proc.stdout or "").splitlines():
+        value = line.strip()
+        if value and re.fullmatch(r"[A-Za-z0-9_]+", value):
+            languages.append(value)
+    return languages
+
+
+def _select_tesseract_language(installed):
+    """Choose a useful installed language set without assuming chi_sim exists."""
+    installed = set(installed or [])
+    # The product handles Chinese and English documents most often.  Keep both
+    # when available, but do not make a missing chi_sim pack break English OCR.
+    for preferred in (
+        ("chi_sim", "eng"),
+        ("eng",),
+        ("chi_sim",),
+        ("jpn", "eng"),
+        ("kor", "eng"),
+        ("ara", "eng"),
+        ("rus", "eng"),
+        ("deu", "eng"),
+        ("fra", "eng"),
+        ("spa", "eng"),
+    ):
+        if set(preferred).issubset(installed):
+            return "+".join(preferred)
+    fallback = sorted(installed - {"osd", "snum"})
+    return fallback[0] if fallback else ""
+
+
+def _ocr_workers_default():
+    try:
+        configured = int(os.environ.get("FOLIOTHREAD_OCR_WORKERS", ""))
+    except ValueError:
+        configured = OCR_WORKERS_DEFAULT
+    return max(1, min(configured or OCR_WORKERS_DEFAULT, 8))
+
+
+def _ocr_queue_size_default(workers):
+    try:
+        configured = int(os.environ.get("FOLIOTHREAD_OCR_QUEUE_SIZE", ""))
+    except ValueError:
+        configured = OCR_QUEUE_SIZE_DEFAULT
+    return max(1, min(configured or workers * 2, 32))
+
+
+def _runtime_int_option(explicit, saved, env_name, default, *, minimum=1, maximum=32):
+    value = explicit
+    if value is None:
+        value = saved
+    if value is None:
+        value = os.environ.get(env_name, "")
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(minimum, min(value, maximum))
+
+
+def _runtime_float_option(explicit, saved, env_name, default, *, minimum=0.0, maximum=300.0):
+    value = explicit
+    if value is None:
+        value = saved
+    if value is None:
+        value = os.environ.get(env_name, "")
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = float(default)
+    return max(minimum, min(value, maximum))
+
+
+def _ocr_runtime_metadata(language, workers):
+    """Describe the provider actually executing OCR, not only a config value."""
+    configured_device = str(os.environ.get("FOLIOTHREAD_OCR_DEVICE", "auto") or "auto").lower()
+    metadata = {
+        "backend": "tesseract",
+        "model": "tesseract-lstm",
+        "device": "cpu",
+        "provider": "tesseract",
+        "execution_provider": "native_cpu",
+        "gpu_name": None,
+        "language": language,
+        "workers": workers,
+    }
+    warnings = []
+    if configured_device not in {"", "auto", "cpu"}:
+        warnings.append(
+            f"OCR 配置请求 device={configured_device}，但当前 Tesseract runtime 实际使用 CPU；"
+            "未发生 GPU 加速。"
+        )
+    return metadata, warnings
+
+
+def _ocr_join_lines(left, right):
+    left = re.sub(r"\s+", " ", str(left or "").strip())
+    right = re.sub(r"\s+", " ", str(right or "").strip())
+    if not left:
+        return right
+    if not right:
+        return left
+    if left.endswith(("-", "‐", "‑")) and right[:1].islower():
+        return left[:-1] + right
+    if (re.search(r"[\u3400-\u9fff]$", left)
+            or re.match(r"[\u3400-\u9fff]", right)):
+        return left + right
+    return f"{left} {right}"
+
+
+def _parse_tesseract_tsv(payload):
+    """Convert word-level TSV into paragraph-like blocks with real confidence."""
+    rows = {}
+    try:
+        reader = csv.DictReader(str(payload or "").splitlines(), delimiter="\t")
+        for row in reader:
+            text = str(row.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                key = (
+                    int(row.get("block_num") or 0),
+                    int(row.get("par_num") or 0),
+                    int(row.get("line_num") or 0),
+                )
+                confidence = float(row.get("conf") or -1)
+                left = float(row.get("left") or 0)
+                top = float(row.get("top") or 0)
+                width = float(row.get("width") or 0)
+                height = float(row.get("height") or 0)
+            except (TypeError, ValueError):
+                continue
+            rows.setdefault(key, []).append({
+                "text": text, "confidence": confidence,
+                "left": left, "top": top, "right": left + width,
+                "bottom": top + height,
+            })
+    except (TypeError, ValueError):
+        return []
+    grouped = {}
+    for (block_num, par_num, line_num), words in rows.items():
+        words.sort(key=lambda word: (word["left"], word["top"]))
+        valid = [word["confidence"] for word in words if word["confidence"] >= 0]
+        grouped.setdefault((block_num, par_num), []).append({
+            "line_num": line_num,
+            "text": _ocr_join_lines("", " ".join(word["text"] for word in words)),
+            "confidence": sum(valid) / len(valid) if valid else None,
+            "top": min(word["top"] for word in words),
+            "bottom": max(word["bottom"] for word in words),
+        })
+    blocks = []
+    for key, lines in grouped.items():
+        lines.sort(key=lambda line: line["line_num"])
+        text = ""
+        confidences = []
+        for line in lines:
+            text = _ocr_join_lines(text, line["text"])
+            if line["confidence"] is not None:
+                confidences.append(line["confidence"])
+        if not text:
+            continue
+        blocks.append({
+            "text": text,
+            "confidence": sum(confidences) / len(confidences) if confidences else None,
+            "low_confidence_ratio": (
+                sum(1 for value in confidences if value < OCR_CONFIDENCE_THRESHOLD_DEFAULT)
+                / len(confidences) if confidences else None
+            ),
+            "top": min(line["top"] for line in lines),
+            "bottom": max(line["bottom"] for line in lines),
+        })
+    return blocks
+
+
+def _ocr_page_with_tesseract(command, png_bytes, language):
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp.write(png_bytes)
+        tmp.flush()
+        tmp_path = tmp.name
+    try:
+        proc = subprocess.run(
+            [command, tmp_path, "stdout", "-l", language, "--psm", "3", "tsv"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or "").strip().splitlines()
+            return None, detail[-1][:180] if detail else "无输出"
+        blocks = _parse_tesseract_tsv(proc.stdout)
+        if not blocks:
+            return None, "未生成带置信度的 OCR 文本"
+        return blocks, None
+    except subprocess.TimeoutExpired:
+        return None, "超过 120 秒"
+    except Exception as exc:  # noqa: BLE001 - one page must not abort the book
+        return None, str(exc)[:180]
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _ocr_checkpoint_path(checkpoint_dir):
+    return Path(checkpoint_dir) / "ocr_checkpoint.json" if checkpoint_dir else None
+
+
+def _load_ocr_checkpoint(path, source_hash, indices, language):
+    if path is None or not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return {}
+    if not isinstance(value, dict) or value.get("version") != OCR_CHECKPOINT_VERSION:
+        return {}
+    if value.get("source_sha256") != source_hash or value.get("language") != language:
+        return {}
+    if value.get("indices") != list(indices):
+        return {}
+    pages = value.get("pages")
+    return pages if isinstance(pages, dict) else {}
+
+
+def _save_ocr_checkpoint(path, source_hash, indices, language, pages, status="running"):
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps({
+            "version": OCR_CHECKPOINT_VERSION,
+            "source_sha256": source_hash,
+            "indices": list(indices),
+            "language": language,
+            "pages": pages,
+            "status": status,
+            "updated_at": _utc_now_iso(),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        pass
+
+
+def _ocr_pdf_text_with_warnings(
+    file_bytes, max_pages=None, on_progress=None, *, workers=None, queue_size=None,
+    checkpoint_dir=None, cancel_check=None, profiler=None, return_details=False,
+):
+    """OCR a scanned PDF with Tesseract and return ``(text, warnings)``.
+
+    ``max_pages=3`` is used by the quick-profile preview.  ``None`` means all
+    pages and is used by the actual translation pipeline.  The function never
+    sends page images or OCR text anywhere; it only invokes the local
+    Tesseract executable.
+    """
+    command = _find_tesseract()
+    if not command:
+        result = ("", [
+            "未找到本机 Tesseract OCR。请安装 Tesseract，或设置 "
+            "FOLIOTHREAD_TESSERACT_CMD 指向 tesseract 可执行文件。"
+        ], {})
+        return result if return_details else result[:2]
+
+    warnings = []
+    installed = _tesseract_languages(command)
+    language = _select_tesseract_language(installed)
+    if not language:
+        result = ("", [
+            "Tesseract 未找到可用语言包（至少需要 eng 或 chi_sim），无法执行 OCR。"
+        ], {})
+        return result if return_details else result[:2]
+
+    workers = max(1, min(int(workers or _ocr_workers_default()), 8))
+    queue_size = max(1, min(int(queue_size or _ocr_queue_size_default(workers)), 32))
+    runtime_metadata, runtime_warnings = _ocr_runtime_metadata(language, workers)
+    warnings.extend(runtime_warnings)
+    source_hash = hashlib.sha256(file_bytes or b"").hexdigest()
+    checkpoint_path = _ocr_checkpoint_path(checkpoint_dir)
+
+    try:
         with fitz.open(stream=file_bytes, filetype="pdf") as doc:
             count = doc.page_count
             if count == 0:
-                return ""
-            indices = sorted({0, count // 2, count - 1})[:max_pages]
-            chunks = []
-            for idx in indices:
-                pix = doc[idx].get_pixmap(dpi=200)
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                    pix.save(tmp.name)
-                    tmp_path = tmp.name
+                result = ("", ["PDF 不包含任何页面，无法执行 OCR。"], {})
+                return result if return_details else result[:2]
+            if max_pages is None:
+                indices = list(range(count))
+            else:
+                indices = sorted({0, count // 2, count - 1})[:max_pages]
+            page_records = _load_ocr_checkpoint(
+                checkpoint_path, source_hash, indices, language)
+            pending_indices = [index for index in indices if str(index) not in page_records]
+            failed_pages = []
+            render_stage = profiler.start_stage(
+                "rasterize", concurrency=1, page_count=len(indices),
+                metadata={"dpi": 220, "queue_size": queue_size,
+                          "cached_pages": len(indices) - len(pending_indices)},
+            ) if profiler is not None else None
+            ocr_stage = profiler.start_stage(
+                "ocr", concurrency=workers, page_count=len(indices),
+                metadata={**runtime_metadata, "queue_size": queue_size,
+                          "cached_pages": len(indices) - len(pending_indices)},
+            ) if profiler is not None else None
+            page_lock = threading.RLock()
+            queue_lock = threading.RLock()
+            work_queue = queue.Queue(maxsize=queue_size)
+            stop_event = threading.Event()
+            worker_errors = []
+            completed_pages = len(indices) - len(pending_indices)
+
+            def check_cancel():
+                if cancel_check and cancel_check():
+                    raise RuntimeError("任务已请求取消")
+
+            def emit_page_progress():
+                if not on_progress:
+                    return
+                with queue_lock:
+                    current = completed_pages
                 try:
-                    proc = subprocess.run(
-                        ["tesseract", tmp_path, "-", "-l", "chi_sim+eng"],
-                        capture_output=True, timeout=120)
-                    text = proc.stdout.decode("utf-8", errors="ignore")
-                    if text.strip():
-                        chunks.append(text.strip())
-                except Exception:  # noqa: BLE001 - OCR 失败不阻断
+                    on_progress(
+                        f"【阶段一】扫描 PDF OCR（{current}/{len(indices)} 页；"
+                        f"workers={workers}；device={runtime_metadata['device']}）…"
+                    )
+                except Exception:  # noqa: BLE001 - UI progress is optional
                     pass
-                finally:
-                    Path(tmp_path).unlink(missing_ok=True)
-            return "\n".join(chunks)
+
+            def ocr_worker():
+                nonlocal completed_pages
+                while True:
+                    task = work_queue.get()
+                    try:
+                        if task is None:
+                            return
+                        idx, png_bytes, enqueued_at, page_width, page_height = task
+                        check_cancel()
+                        started = time.perf_counter()
+                        blocks, error = _ocr_page_with_tesseract(command, png_bytes, language)
+                        finished = time.perf_counter()
+                        if error:
+                            with page_lock:
+                                failed_pages.append((idx + 1, error))
+                        else:
+                            record = {
+                                "page_number": idx + 1,
+                                "page_width": page_width,
+                                "page_height": page_height,
+                                "blocks": blocks,
+                            }
+                            with page_lock:
+                                page_records[str(idx)] = record
+                                _save_ocr_checkpoint(
+                                    checkpoint_path, source_hash, indices, language,
+                                    page_records,
+                                )
+                            with queue_lock:
+                                completed_pages += 1
+                        if ocr_stage is not None:
+                            ocr_stage.item(
+                                f"page-{idx + 1}", started, finished_monotonic=finished,
+                                queue_wait_s=max(0.0, started - enqueued_at),
+                                status="completed" if not error else "failed",
+                                metadata={"kind": "page", "page_number": idx + 1},
+                            )
+                        emit_page_progress()
+                    except BaseException as exc:  # noqa: BLE001 - propagate cancellation
+                        worker_errors.append(exc)
+                        stop_event.set()
+                    finally:
+                        work_queue.task_done()
+
+            threads = [threading.Thread(target=ocr_worker, name=f"ocr-worker-{i}", daemon=True)
+                       for i in range(workers)]
+            cancelled = False
+            try:
+                for thread in threads:
+                    thread.start()
+                emit_page_progress()
+                for idx in pending_indices:
+                    check_cancel()
+                    if stop_event.is_set():
+                        break
+                    started = time.perf_counter()
+                    pix = doc[idx].get_pixmap(dpi=220, alpha=False)
+                    png_bytes = pix.tobytes("png")
+                    rendered_at = time.perf_counter()
+                    queued_at = rendered_at
+                    while True:
+                        try:
+                            page_width, page_height = float(doc[idx].rect.width), float(doc[idx].rect.height)
+                            work_queue.put(
+                                (idx, png_bytes, queued_at, page_width, page_height),
+                                timeout=0.2,
+                            )
+                            queued_at = time.perf_counter()
+                            break
+                        except queue.Full:
+                            check_cancel()
+                            if stop_event.is_set():
+                                break
+                    if render_stage is not None:
+                        render_stage.item(
+                            f"page-{idx + 1}", started,
+                            finished_monotonic=queued_at,
+                            queue_wait_s=max(0.0, queued_at - rendered_at),
+                            metadata={"kind": "page", "page_number": idx + 1},
+                        )
+                    if stop_event.is_set():
+                        break
+                if worker_errors:
+                    raise worker_errors[0]
+            except BaseException:
+                cancelled = True
+                stop_event.set()
+                raise
+            finally:
+                stop_event.set() if worker_errors else None
+                for _ in threads:
+                    while True:
+                        try:
+                            work_queue.put(None, timeout=0.2)
+                            break
+                        except queue.Full:
+                            if not any(thread.is_alive() for thread in threads):
+                                break
+                for thread in threads:
+                    thread.join(timeout=10)
+                if render_stage is not None:
+                    render_stage.finish(status="cancelled" if cancelled else "completed")
+                if ocr_stage is not None:
+                    ocr_stage.finish(status="cancelled" if cancelled else "completed")
+                _save_ocr_checkpoint(
+                    checkpoint_path, source_hash, indices, language, page_records,
+                    status="cancelled" if cancelled else "completed",
+                )
+
+            if failed_pages:
+                sample = "；".join(f"第 {page} 页：{detail}" for page, detail in failed_pages[:3])
+                more = f"（另有 {len(failed_pages) - 3} 页失败）" if len(failed_pages) > 3 else ""
+                warnings.append(f"OCR 部分页面失败：{sample}{more}")
+            paragraph_confidences = []
+            chunks = []
+            repeated = {}
+            all_blocks = []
+            for idx in indices:
+                record = page_records.get(str(idx)) or {}
+                height = float(record.get("page_height") or 0)
+                for block in record.get("blocks") or []:
+                    text = re.sub(r"\s+", " ", str(block.get("text") or "").strip())
+                    if not text:
+                        continue
+                    normalized = re.sub(r"\d+", "#", text).casefold()
+                    repeated[normalized] = repeated.get(normalized, 0) + 1
+                    all_blocks.append((idx, height, block, text, normalized))
+            repeat_threshold = max(2, int((len(indices) * 0.2) + 0.999)) if len(indices) > 1 else 99
+            by_page = {}
+            for idx, height, block, text, normalized in all_blocks:
+                top = float(block.get("top") or 0)
+                bottom = float(block.get("bottom") or 0)
+                is_edge = top < height * 0.12 or bottom > height * 0.88
+                if _OCR_PAGE_NUMBER_RE.fullmatch(text) and is_edge:
+                    continue
+                if repeated.get(normalized, 0) >= repeat_threshold and is_edge:
+                    continue
+                by_page.setdefault(idx, []).append((text, block.get("confidence")))
+            for idx in indices:
+                page_chunks = by_page.get(idx) or []
+                if not page_chunks:
+                    continue
+                chunks.append("\n\n".join(text for text, _ in page_chunks))
+                paragraph_confidences.extend(conf for _, conf in page_chunks)
+            valid_confidences = [float(value) for value in paragraph_confidences
+                                 if value is not None]
+            details = {
+                **runtime_metadata,
+                "page_count": len(indices),
+                "completed_pages": sum(1 for index in indices if str(index) in page_records),
+                "page_order": [index + 1 for index in indices
+                               if str(index) in page_records],
+                "failed_pages": len(failed_pages),
+                "checkpoint_file": str(checkpoint_path) if checkpoint_path else "",
+                "paragraph_confidences": paragraph_confidences,
+                "mean_confidence": (
+                    sum(valid_confidences) / len(valid_confidences)
+                    if valid_confidences else None
+                ),
+                "confidence_threshold": OCR_CONFIDENCE_THRESHOLD_DEFAULT,
+            }
+            text = "\n\n".join(chunks)
+            if not text:
+                warnings.append("OCR 未识别到有效文本。")
+            result = (text, warnings, details)
+            return result if return_details else result[:2]
+    except Exception as exc:  # noqa: BLE001 - caller can show a recoverable warning
+        if "任务已请求取消" in str(exc):
+            raise
+        result = ("", [f"OCR 处理 PDF 失败：{str(exc)[:240]}"], {})
+        return result if return_details else result[:2]
+
+
+def _ocr_pdf_text(file_bytes, max_pages=3):
+    """Compatibility wrapper used by the quick-profile path."""
+    text, _warnings = _ocr_pdf_text_with_warnings(file_bytes, max_pages=max_pages)
+    return text
+
+
+def _ocr_text_to_paragraphs(text):
+    """Turn Tesseract page/block output into translation-ready paragraphs."""
+    paragraphs = []
+    for block in re.split(r"\n\s*\n", str(text or "")):
+        lines = [clean_xml_chars(line.strip())
+                 for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        merged = lines[0]
+        for line in lines[1:]:
+            if merged.endswith("-") and line[:1].islower():
+                merged = merged[:-1] + line
+            elif re.search(r"[\u3400-\u9fff]$", merged) or \
+                    re.match(r"[\u3400-\u9fff]", line):
+                merged += line
+            else:
+                merged += " " + line
+        if len(merged) > 1 and has_textual_content(merged):
+            paragraphs.append(merged)
+    return paragraphs
+
+
+EXTRACTION_REPORT_VERSION = 1
+_W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+_M_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+
+
+def _docx_part_texts(document, needle):
+    """读取 word/<needle> 部件里的全部文本（脚注/尾注/批注不在正文 XML 里）。"""
+    try:
+        package = getattr(document.part, "package", None)
+        if package is None:
+            return []
+        blob = None
+        for part in package.parts:
+            if needle in str(getattr(part, "partname", "")):
+                blob = part.blob
+                break
+        if not blob:
+            return []
+        from lxml import etree
+        root = etree.fromstring(bytes(blob))
+    except Exception:  # noqa: BLE001 - report is best-effort, never blocks import
+        return []
+    return [str(node.text or "").strip() for node in root.iter(f"{_W_NS}t")
+            if str(node.text or "").strip()]
+
+
+def _docx_unsupported_parts(document):
+    """Inspect a DOCX for content a paragraph-only extractor cannot translate.
+
+    The point is not to support these structures yet: it is to make sure the
+    user is never told "文档已导入" while tables, running heads or footnotes were
+    silently dropped.  Counting is deliberately structural (no text heuristics).
+    """
+    parts = []
+
+    def add(kind, label, count, detail, sample=""):
+        if count <= 0:
+            return
+        parts.append({"kind": kind, "label": label, "count": int(count),
+                      "detail": detail, "sample": str(sample or "")[:160]})
+
+    try:
+        body = document.element.body
+        tables = list(getattr(document, "tables", []) or [])
+        table_cells = sum(len(row.cells) for table in tables for row in table.rows)
+        table_sample = next(
+            (str(cell.text).strip() for table in tables for row in table.rows
+             for cell in row.cells if str(cell.text).strip()), "")
+        add("table", "表格内容", len(tables),
+            f"{len(tables)} 个表格、约 {table_cells} 个单元格；表格文字不进入翻译",
+            table_sample)
+
+        headers = footers = 0
+        header_sample = footer_sample = ""
+        for section in getattr(document, "sections", []) or []:
+            for paragraph in getattr(section.header, "paragraphs", []) or []:
+                text = str(paragraph.text or "").strip()
+                if text:
+                    headers += 1
+                    header_sample = header_sample or text
+            for paragraph in getattr(section.footer, "paragraphs", []) or []:
+                text = str(paragraph.text or "").strip()
+                if text:
+                    footers += 1
+                    footer_sample = footer_sample or text
+        add("header", "页眉", headers,
+            f"页眉有 {headers} 段文字（重复页眉是扫描件最常见的问题来源）",
+            header_sample)
+        add("footer", "页脚", footers,
+            f"页脚有 {footers} 段文字（通常含页码）", footer_sample)
+
+        boxes = body.findall(f".//{_W_NS}txbxContent")
+        box_sample = next(
+            (" ".join(str(node.text or "") for node in box.iter(f"{_W_NS}t")).strip()
+             for box in boxes
+             if " ".join(str(node.text or "") for node in box.iter(f"{_W_NS}t")).strip()),
+            "")
+        add("textbox", "文本框", len(boxes),
+            f"{len(boxes)} 个文本框；文本框文字不在正文段落里", box_sample)
+
+        images = body.findall(f".//{_A_NS}blip")
+        add("image", "图片", len(images),
+            f"{len(images)} 张内嵌图片按原样保留在源文件里，但图片内的文字不参与翻译")
+
+        equations = body.findall(f".//{_M_NS}oMath")
+        add("equation", "公式", len(equations),
+            f"{len(equations)} 处公式不参与翻译")
+
+        footnotes = _docx_part_texts(document, "footnotes.xml")
+        add("footnote", "脚注", len(footnotes),
+            f"{len(footnotes)} 条脚注不参与翻译", footnotes[0] if footnotes else "")
+        endnotes = _docx_part_texts(document, "endnotes.xml")
+        add("endnote", "尾注", len(endnotes),
+            f"{len(endnotes)} 条尾注不参与翻译", endnotes[0] if endnotes else "")
+        comments = _docx_part_texts(document, "comments.xml")
+        add("comment", "批注", len(comments),
+            f"{len(comments)} 条批注不参与翻译", comments[0] if comments else "")
     except Exception:  # noqa: BLE001
-        return ""
+        return parts
+    return parts
 
 
-def extract_document_paragraphs(filename, file_bytes):
-    """上传后的轻量预提取：PDF 走确定性解析，扫描件尝试 OCR 代表页；
-    DOCX 走 python-docx。返回 (paragraphs, warnings)。"""
+def _pdf_extraction_facts(file_bytes):
+    """Page/image facts for the import report (never raises)."""
+    facts = {"pages": None, "images": 0, "text_pages": 0, "empty_pages": 0}
+    try:
+        with fitz.open(stream=file_bytes, filetype="pdf") as document:
+            facts["pages"] = document.page_count
+            for page in document:
+                if str(page.get_text() or "").strip():
+                    facts["text_pages"] += 1
+                else:
+                    facts["empty_pages"] += 1
+                try:
+                    facts["images"] += len(page.get_images(full=True))
+                except Exception:  # noqa: BLE001
+                    continue
+    except Exception:  # noqa: BLE001
+        return facts
+    return facts
+
+
+def _build_extraction_report(filename, paragraphs, *, ocr_used=False,
+                             unsupported=None, facts=None, warnings=None):
+    values = [str(item or "") for item in paragraphs or []]
+    unsupported = [item for item in unsupported or [] if item.get("count")]
+    notes = []
+    ext = Path(str(filename or "")).suffix.lower() or "未知格式"
+    if ocr_used:
+        notes.append("本文档没有文本层，正文由本地 OCR 生成；OCR 会引入错字与假断行。")
+    if unsupported:
+        notes.append("未纳入翻译的内容已在下方逐项列出；它们保留在源文件里，"
+                     "不会出现在译文文档中。")
+    notes.append("导出是**重建的译文文档**，不是原文件的格式保真输出："
+                 "排版、表格、图片与样式不还原。")
+    return {
+        "version": EXTRACTION_REPORT_VERSION,
+        "format": ext.lstrip("."),
+        "filename": str(filename or ""),
+        "status": "partial" if unsupported else "complete",
+        "extracted": {
+            "paragraphs": len(values),
+            "characters": sum(len(item) for item in values),
+            "pages": (facts or {}).get("pages"),
+            "text_pages": (facts or {}).get("text_pages"),
+            "empty_pages": (facts or {}).get("empty_pages"),
+            "images": (facts or {}).get("images", 0),
+            "ocr_used": bool(ocr_used),
+        },
+        "unsupported": unsupported,
+        "unsupported_total": sum(int(item.get("count") or 0) for item in unsupported),
+        "notes": notes,
+        "warnings": [str(item) for item in warnings or []],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def extract_document_paragraphs_with_report(filename, file_bytes, *,
+                                            ocr_max_pages=3, on_progress=None,
+                                            profiler=None, checkpoint_dir=None,
+                                            ocr_workers=None, ocr_queue_size=None,
+                                            cancel_check=None):
+    """Extract paragraphs together with an import-scope report.
+
+    Returns ``(paragraphs, warnings, report)``.  The report is what makes the
+    import honest: it states how much text was read, which parts of the
+    document were *not* included in translation, and that the export is a
+    regenerated translation document rather than a format-faithful round trip.
+    """
     warnings = []
     paragraphs = []
+    unsupported = []
+    facts = {}
+    ocr_used = False
     name = (filename or "").lower()
     try:
         if name.endswith(".pdf"):
+            classify_stage = profiler.start_stage(
+                "pdf_classify", concurrency=1, metadata={"backend": "PyMuPDF"}
+            ) if profiler is not None else None
+            facts = _pdf_extraction_facts(file_bytes)
+            if classify_stage is not None:
+                classify_stage.record["item_count"] = int(facts.get("pages") or 0)
+                classify_stage.record["page_count"] = int(facts.get("pages") or 0)
+                classify_stage.finish(
+                    status="completed", text_pages=int(facts.get("text_pages") or 0),
+                    empty_pages=int(facts.get("empty_pages") or 0),
+                )
+            layout_stage = profiler.start_stage(
+                "layout_recovery", concurrency=1,
+                metadata={"backend": "PyMuPDF", "page_count": facts.get("pages")},
+            ) if profiler is not None else None
             paragraphs = [clean_xml_chars(p) for p in extract_pdf_paragraphs(file_bytes)]
+            if layout_stage is not None:
+                layout_stage.record["item_count"] = len(paragraphs)
+                layout_stage.record["page_count"] = int(facts.get("pages") or 0)
+                layout_stage.finish(status="completed")
+            ocr_details = {}
             if not paragraphs:
-                warnings.append("PDF 无文本层，正在尝试 OCR 前/中/后代表页…")
-                ocr_text = _ocr_pdf_text(file_bytes)
-                if ocr_text:
-                    paragraphs = [clean_xml_chars(p.strip())
-                                  for p in re.split(r"\n+", ocr_text)
-                                  if p.strip() and len(p.strip()) > 1]
+                scope = "全文" if ocr_max_pages is None else "前/中/后代表页"
+                warnings.append(f"PDF 无文本层，正在自动 OCR {scope}…")
+                ocr_fn = _ocr_pdf_text_with_warnings
+                ocr_kwargs = {
+                    "max_pages": ocr_max_pages,
+                    "on_progress": on_progress,
+                }
+                supports_kwargs = False
+                try:
+                    parameters = inspect.signature(ocr_fn).parameters
+                    supports_kwargs = any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters.values()
+                    )
+                    optional_ocr_kwargs = {
+                        "workers": ocr_workers,
+                        "queue_size": ocr_queue_size,
+                        "checkpoint_dir": checkpoint_dir,
+                        "cancel_check": cancel_check,
+                        "profiler": profiler,
+                        "return_details": True,
+                    }
+                    for key, value in optional_ocr_kwargs.items():
+                        if supports_kwargs or key in parameters:
+                            ocr_kwargs[key] = value
+                except (TypeError, ValueError):
+                    optional_ocr_kwargs = {}
+                ocr_result = ocr_fn(file_bytes, **ocr_kwargs)
+                if isinstance(ocr_result, tuple) and len(ocr_result) >= 3:
+                    ocr_text, ocr_warnings, ocr_details = ocr_result[:3]
                 else:
-                    warnings.append("OCR 不可用或失败，无法自动画像；可手动选择风格")
+                    ocr_text, ocr_warnings = ocr_result
+                warnings.extend(ocr_warnings)
+                paragraphs = _ocr_text_to_paragraphs(ocr_text)
+                ocr_used = True
+                if not paragraphs:
+                    warnings.append("OCR 未生成可用段落；请安装语言包或手动选择风格")
+            images = int(facts.get("images") or 0)
+            if images:
+                unsupported.append({
+                    "kind": "image", "label": "图片", "count": images,
+                    "detail": f"{images} 张图片里的文字不在文本层内，不参与翻译",
+                    "sample": ""})
+            empty_pages = int(facts.get("empty_pages") or 0)
+            if empty_pages and not ocr_used:
+                unsupported.append({
+                    "kind": "page", "label": "无文本层页面",
+                    "count": empty_pages,
+                    "detail": f"{empty_pages} 页没有文本层（可能是扫描图），"
+                              "其内容未进入翻译",
+                    "sample": ""})
+                warnings.append(
+                    f"{empty_pages} 页没有文本层；如需翻译请重新导入并允许 OCR。")
         elif name.endswith(".docx"):
             doc_word = Document(io.BytesIO(file_bytes))
             for p in doc_word.paragraphs:
@@ -333,15 +1174,199 @@ def extract_document_paragraphs(filename, file_bytes):
                     t = sub_p.strip()
                     if len(t) > 1 and not _ORNAMENT_RE.match(t):
                         paragraphs.append(t)
+            unsupported = _docx_unsupported_parts(doc_word)
         else:
             warnings.append("不支持的文档格式，无法自动画像")
     except Exception as exc:  # noqa: BLE001
+        if "任务已请求取消" in str(exc):
+            raise
         warnings.append(f"预提取失败：{exc}")
+    report = _build_extraction_report(
+        filename, paragraphs, ocr_used=ocr_used, unsupported=unsupported,
+        facts=facts, warnings=warnings)
+    if ocr_used:
+        report["ocr"] = dict(ocr_details or {})
+        report["ocr"]["paragraph_count"] = len(paragraphs)
+        report["ocr"]["paragraph_confidences"] = list(
+            report["ocr"].get("paragraph_confidences") or []
+        )
+    return paragraphs, warnings, report
+
+
+def extract_document_paragraphs(filename, file_bytes, *, ocr_max_pages=3,
+                                 on_progress=None):
+    """Backward-compatible wrapper: ``(paragraphs, warnings)``.
+
+    New callers should use :func:`extract_document_paragraphs_with_report` so
+    the import scope can be shown to the user.
+    """
+    paragraphs, warnings, _report = extract_document_paragraphs_with_report(
+        filename, file_bytes, ocr_max_pages=ocr_max_pages, on_progress=on_progress)
     return paragraphs, warnings
 
 
+
+def cleanup_source_paragraphs(paragraphs, provider, api_key, model, *,
+                              call_llm_fn=None, on_progress=None,
+                              max_batch_chars=None, max_batch_items=None,
+                              parallelism=None, confidence_by_index=None,
+                              confidence_threshold=None, checkpoint_dir=None,
+                              cancel_check=None, max_retries=None,
+                              retry_backoff_seconds=None,
+                              request_interval_seconds=None, profiler=None):
+    """Repair OCR characters/line breaks while preserving indexed source items.
+
+    This compatibility wrapper keeps the cleanup contract in the core API so
+    callers and tests do not need to know the internal module layout.
+    """
+    cleanup_call = call_llm_fn
+    if cleanup_call is None:
+        # ``source_cleanup`` executes provider calls in worker threads.  The
+        # normal LLM router keeps base_url/reasoning/runtime job id in
+        # thread-local context, so copy the caller's context explicitly; a
+        # worker must not silently fall back to the provider's default URL.
+        inherited_base_url = getattr(_LLM_CTX, "base_url", None)
+        inherited_reasoning = getattr(_LLM_CTX, "reasoning_effort", None)
+        inherited_job_id = getattr(_RUNTIME_CTX, "job_id", None)
+
+        def cleanup_call(provider_name, api_key_value, model_name,
+                         system_prompt, user_prompt, **kwargs):
+            if inherited_job_id:
+                _RUNTIME_CTX.job_id = inherited_job_id
+            inherited_kwargs = {}
+            if inherited_base_url:
+                inherited_kwargs["base_url"] = inherited_base_url
+            if inherited_reasoning:
+                inherited_kwargs["reasoning_effort"] = inherited_reasoning
+            return call_llm(
+                provider_name, api_key_value, model_name, system_prompt,
+                user_prompt, **inherited_kwargs, **kwargs)
+
+    return _source_cleanup.cleanup_source_paragraphs(
+        paragraphs, provider, api_key, model,
+        call_llm=cleanup_call or call_llm,
+        on_progress=on_progress,
+        max_batch_chars=max_batch_chars or _source_cleanup.MAX_BATCH_CHARS,
+        max_batch_items=max_batch_items or _source_cleanup.MAX_BATCH_ITEMS,
+        parallelism=parallelism or _source_cleanup.DEFAULT_PARALLELISM,
+        confidence_by_index=confidence_by_index,
+        confidence_threshold=(confidence_threshold
+                              if confidence_threshold is not None
+                              else _source_cleanup.DEFAULT_CONFIDENCE_THRESHOLD),
+        checkpoint_dir=checkpoint_dir,
+        cancel_check=cancel_check,
+        max_retries=(max_retries if max_retries is not None
+                     else _source_cleanup.DEFAULT_MAX_RETRIES),
+        retry_backoff_seconds=(retry_backoff_seconds
+                               if retry_backoff_seconds is not None
+                               else _source_cleanup.DEFAULT_RETRY_BACKOFF_SECONDS),
+        request_interval_seconds=request_interval_seconds or 0.0,
+        profiler=profiler,
+    )
+
+
+def _source_segmentation_mode(state=None, explicit=None):
+    """Resolve sentence/paragraph mode without changing an existing task."""
+    saved = {}
+    if isinstance(state, dict):
+        saved = state.get("segmentation") or {}
+    filename = str((state or {}).get("filename") or "").lower()
+    # The optimization target is the scanned-PDF CAT workflow.  Keep legacy
+    # DOCX/text imports paragraph-based unless the caller explicitly opts into
+    # sentence mode, so an existing non-PDF project does not silently change
+    # its segment count and downstream review workload.
+    default_mode = ("sentence" if filename.endswith(".pdf") else "paragraph")
+    return _segmentation.resolve_mode(
+        explicit,
+        saved.get("mode") if isinstance(saved, dict) else None,
+        os.environ.get("FOLIOTHREAD_SEGMENTATION_MODE"),
+        default=default_mode,
+    )
+
+
+def segment_source_paragraphs(paragraphs, *, state=None, mode=None,
+                              source_lang=None):
+    """Convert cleaned paragraphs into ordered CAT translation units.
+
+    ``source_paragraphs`` is kept by the caller for audit/export.  The return
+    value is the translation-facing sequence plus a compact paragraph mapping.
+    """
+    resolved_mode = _source_segmentation_mode(state, mode)
+    language = source_lang
+    if language is None and isinstance(state, dict):
+        language = state.get("source_lang")
+    return _segmentation.segment_paragraphs(
+        paragraphs, mode=resolved_mode, source_lang=language)
+
+
+def _apply_source_segmentation(state, cleaned_paragraphs, *, mode=None):
+    """Persist paragraph structure and replace only the translation units."""
+    source_paragraphs = [str(item or "").strip() for item in cleaned_paragraphs]
+    segments, metadata = segment_source_paragraphs(
+        source_paragraphs, state=state, mode=mode)
+    state["source_paragraphs"] = list(source_paragraphs)
+    state["segmentation"] = metadata
+    return segments, metadata
+
+
+def audit_source_quality(paragraphs):
+    """Deterministically quarantine OCR fragments before translation."""
+    return _source_quality.audit_source_segments(paragraphs)
+
+
+def _source_quality_gate_enabled(state):
+    """Apply the OCR admission gate to PDF source extraction only."""
+    return str((state or {}).get("filename") or "").lower().endswith(".pdf")
+
+
+def _audit_source_quality_for_state(state):
+    paragraphs = (state or {}).get("paras") or []
+    if not _source_quality_gate_enabled(state):
+        return {
+            "version": _source_quality.VERSION,
+            "status": "disabled",
+            "checked_count": len(paragraphs),
+            "flagged_count": 0,
+            "flags": [],
+            "clusters": [],
+        }
+    return audit_source_quality(paragraphs)
+
+
+def _source_quality_finding(flag):
+    """Build the persisted blocking finding for one quarantined source item."""
+    segment_index = int(flag.get("segment_index"))
+    reasons = "；".join(str(reason) for reason in flag.get("reasons") or [])
+    source_text = str(flag.get("text") or "")
+    return {
+        "segment_index": segment_index,
+        "segment_id": segment_index,
+        "type": "source_quality_gate",
+        "severity": "blocking",
+        "category": "source_quality",
+        "summary": "原文片段未通过翻译准入门",
+        "source_span": source_text,
+        "target_span": source_text,
+        "explanation": (
+            "该段是短小、未闭合或含异常空格连字符的 OCR 片段，"
+            "仅凭当前文本无法证明它是可翻译的正文。"
+        ),
+        "recommendation": (
+            "回看 PDF 原页，确认应合并、删除还是保留；确认前系统只保留源文，"
+            "不让模型猜译，也不会把它写入翻译记忆。"
+        ),
+        "confidence": None,
+        "detector": "Source quality gate",
+        "diagnostic_version": _source_quality.VERSION,
+        "reason": f"源文质量门拦截：{reasons or '疑似 OCR 碎片'}",
+        "detected_text": source_text,
+        "requires_human_confirmation": True,
+    }
+
+
 def call_llm(provider, api_key, model, system_prompt, user_prompt,
-             temperature=0.1, base_url=None, response_format=None):
+             temperature=0.1, base_url=None, response_format=None,
+             reasoning_effort=None):
     """底层大模型统一路由（超时 150 秒，模型可配置）。
 
     支持官方接口与 OpenAI /chat/completions 兼容中转站：
@@ -384,9 +1409,14 @@ def call_llm(provider, api_key, model, system_prompt, user_prompt,
 
     # OpenAI 官方与所有 OpenAI 兼容接口共用 SDK 路由
     kwargs = {"api_key": api_key, "timeout": (15.0, 180.0), "max_retries": 1}
-    resolved_base = normalize_openai_base_url(base_url or cfg.get("base_url"))
-    if cfg.get("custom_base_url") and not resolved_base:
-        resolved_base = getattr(_LLM_CTX, "base_url", None)
+    resolved_base = resolve_openai_base_url(provider, base_url)
+    resolved_reasoning = (reasoning_effort if reasoning_effort is not None
+                          else getattr(_LLM_CTX, "reasoning_effort", None))
+    if resolved_reasoning and resolved_reasoning not in reasoning_effort_options(
+            provider, model):
+        # The thread setting belongs to the translator role.  A separate
+        # reviewer or an unknown relay model must not inherit it accidentally.
+        resolved_reasoning = None
     if resolved_base:
         kwargs["base_url"] = resolved_base
     http_client = None
@@ -400,8 +1430,18 @@ def call_llm(provider, api_key, model, system_prompt, user_prompt,
             "model": model,
             "messages": [{"role": "system", "content": system_prompt},
                          {"role": "user", "content": user_prompt}],
-            "temperature": temperature,
         }
+        # Reasoning models may reject sampling controls such as temperature;
+        # when the user explicitly selects reasoning, omit it for official
+        # recognized reasoning families and let the model's policy take over.
+        if resolved_reasoning:
+            request["reasoning_effort"] = resolved_reasoning
+            if not str(model or "").lower().startswith(
+                    ("o1", "o3", "o4-mini", "gpt-5", "gpt-6",
+                     "deepseek-r1", "qwq")):
+                request["temperature"] = temperature
+        else:
+            request["temperature"] = temperature
         if response_format and cfg.get("capabilities", {}).get(
                 "supports_response_format"):
             request["response_format"] = response_format
@@ -419,6 +1459,171 @@ def call_llm(provider, api_key, model, system_prompt, user_prompt,
             http_client.close()
 
 
+def _provider_error_payload(error):
+    """Extract safe, non-secret fields from SDK/http responses.
+
+    OpenAI-compatible relays do not all use the same exception shape: the
+    OpenAI SDK exposes ``status_code``/``body`` while httpx exposes a response
+    object.  Keep this extraction deliberately small and never return the raw
+    exception text to the UI (it may contain request details or credentials).
+    """
+    response = error if isinstance(error, httpx.Response) else getattr(
+        error, "response", None)
+    status_code = getattr(error, "status_code", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+
+    payloads = []
+    body = getattr(error, "body", None)
+    if body is not None:
+        payloads.append(body)
+    if response is not None:
+        try:
+            payloads.append(response.json())
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+    code = ""
+    message = ""
+
+    def visit(payload):
+        nonlocal code, message
+        if isinstance(payload, str):
+            stripped = payload.strip()
+            if stripped.startswith(("{", "[")):
+                try:
+                    visit(json.loads(stripped))
+                except (TypeError, ValueError):
+                    pass
+            return
+        if not isinstance(payload, dict):
+            return
+        if not code:
+            for key in ("code", "error_code", "type"):
+                value = payload.get(key)
+                if isinstance(value, (str, int)) and str(value).strip():
+                    code = str(value).strip()
+                    break
+        if not message:
+            value = payload.get("message") or payload.get("detail")
+            if isinstance(value, str) and value.strip():
+                message = value.strip()
+        for key in ("error", "detail"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                visit(nested)
+
+    for payload in payloads:
+        visit(payload)
+    error_text = str(error or "")
+    if status_code is None:
+        match = re.search(r"\b(401|403|408|409|429|5\d{2})\b", error_text)
+        if match:
+            status_code = int(match.group(1))
+    return {
+        "http_status": status_code,
+        "code": code,
+        "message": message,
+        "text": error_text,
+    }
+
+
+def provider_error_status(error):
+    """Return a stable, user-facing status for a provider failure.
+
+    The UI can use the ``status`` value for state styling and ``message`` for
+    the copy.  Matching provider codes/messages takes precedence over HTTP
+    status because relays commonly use HTTP 403 for both insufficient balance
+    and other permission failures.
+    """
+    info = _provider_error_payload(error)
+    http_status = info["http_status"]
+    code = info["code"].replace("-", "_").upper()
+    searchable = " ".join((info["text"], info["code"], info["message"])).lower()
+    status_suffix = f"（HTTP {http_status}）" if http_status else ""
+
+    if (code in {"INSUFFICIENT_BALANCE", "BALANCE_INSUFFICIENT"}
+            or "insufficient_balance" in searchable
+            or "insufficient balance" in searchable
+            or "余额不足" in searchable
+            or "balance is too low" in searchable):
+        return {
+            "status": "insufficient_balance",
+            "label": "余额不足",
+            "message": "余额不足，请充值或更换 API Key。",
+            "http_status": http_status,
+            "provider_code": info["code"],
+        }
+
+    if (http_status == 401 or code in {"INVALID_API_KEY", "UNAUTHORIZED"}
+            or "invalid_api_key" in searchable
+            or "incorrect api key" in searchable
+            or "unauthorized" in searchable):
+        return {
+            "status": "invalid_api_key",
+            "label": "API Key 无效",
+            "message": f"API Key 无效或已过期{status_suffix}，请检查密钥和服务商。",
+            "http_status": http_status,
+            "provider_code": info["code"],
+        }
+
+    if (http_status == 429 or code in {"RATE_LIMITED", "TOO_MANY_REQUESTS"}
+            or "rate limit" in searchable or "too many requests" in searchable):
+        return {
+            "status": "rate_limited",
+            "label": "请求受限",
+            "message": f"请求过于频繁或已达到服务商限额{status_suffix}，请稍后重试。",
+            "http_status": http_status,
+            "provider_code": info["code"],
+        }
+
+    if http_status == 403:
+        return {
+            "status": "forbidden",
+            "label": "访问被拒绝",
+            "message": "服务商拒绝了请求（HTTP 403），请检查 API 权限、余额或接口地址。",
+            "http_status": http_status,
+            "provider_code": info["code"],
+        }
+
+    if isinstance(error, httpx.RequestError):
+        return {
+            "status": "network_error",
+            "label": "无法连接服务商",
+            "message": "无法连接服务商，请检查 API 地址和网络。",
+            "http_status": http_status,
+            "provider_code": info["code"],
+        }
+
+    if http_status is not None and http_status >= 500:
+        return {
+            "status": "provider_unavailable",
+            "label": "服务商暂时不可用",
+            "message": f"服务商暂时不可用{status_suffix}，请稍后重试。",
+            "http_status": http_status,
+            "provider_code": info["code"],
+        }
+
+    return {
+        "status": "unknown",
+        "label": "API 请求失败",
+        "message": f"API 请求失败{status_suffix}，请检查服务商配置后重试。",
+        "http_status": http_status,
+        "provider_code": info["code"],
+    }
+
+
+def provider_error_message(error, action="请求失败"):
+    """Format a provider failure without leaking raw SDK/relay details."""
+    status = provider_error_status(error)
+    message = status["message"]
+    return f"{action}：{message}" if action else message
+
+
 def test_provider(provider, api_key, model, base_url=None):
     """连通性测试：发送一个最小请求，返回 (ok, message)。"""
     t0 = time.time()
@@ -427,7 +1632,7 @@ def test_provider(provider, api_key, model, base_url=None):
                        "你是连接测试助手。", "请只回复两个字：OK",
                        temperature=0.0, base_url=base_url)
     except Exception as exc:
-        return False, f"请求失败：{exc}"[:320]
+        return False, provider_error_message(exc)
     elapsed = time.time() - t0
     if not (out or "").strip():
         return False, "返回内容为空（请检查 API Key / 模型名 / 余额）"
@@ -441,7 +1646,10 @@ def fetch_provider_models(provider, api_key, base_url=None):
         return False, [], "当前服务商不支持 OpenAI 兼容模型目录"
     if not (api_key or "").strip():
         return False, [], "请先填写 API Key"
-    resolved_base = normalize_openai_base_url(base_url or cfg.get("base_url"))
+    try:
+        resolved_base = resolve_openai_base_url(provider, base_url)
+    except ValueError as exc:
+        return False, [], str(exc)
     if not resolved_base:
         return False, [], "请先填写 API 地址"
     try:
@@ -454,9 +1662,11 @@ def fetch_provider_models(provider, api_key, base_url=None):
         response.raise_for_status()
         payload = response.json()
     except httpx.HTTPStatusError as exc:
-        return False, [], f"获取模型失败：HTTP {exc.response.status_code}"
-    except (httpx.HTTPError, ValueError) as exc:
-        return False, [], f"获取模型失败：{str(exc)[:240]}"
+        return False, [], provider_error_message(exc, "获取模型失败")
+    except httpx.HTTPError as exc:
+        return False, [], provider_error_message(exc, "获取模型失败")
+    except ValueError:
+        return False, [], "获取模型失败：服务商返回了无法解析的响应。"
 
     rows = payload.get("data") if isinstance(payload, dict) else payload
     if not rows and isinstance(payload, dict):
@@ -2361,7 +3571,8 @@ def annotate_stage(state, job_id, glossary, provider, api_key, model, target_lan
 def translate_stage(state, job_id, glossary, provider, api_key, model, target_lang,
                     style_rules, enable_review, use_tm=True, document_profile=None,
                     on_status=None, on_caption=None, translator_config=None,
-                    reviewer_config=None, batch_size=None, max_batch_chars=None):
+                    reviewer_config=None, batch_size=None, max_batch_chars=None,
+                    auxiliary_config=None, knowledge_feedback_interval=None):
     """阶段二：语义批次翻译 + 确定性检查/修复 + 独立审校 + 翻译记忆。
 
     对齐 localize-anything 经验：
@@ -2388,8 +3599,19 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
     reviewer_config = _model_roles.normalize_role_config(
         reviewer_config, fallback_provider=provider, fallback_model=model,
         fallback_api_key=api_key)
-    translator_call = _model_roles.make_role_call(call_llm, translator_config)
-    reviewer_call = _model_roles.make_role_call(call_llm, reviewer_config)
+    auxiliary_config = _model_roles.normalize_role_config(
+        auxiliary_config, fallback_provider=provider, fallback_model=model,
+        fallback_api_key=api_key)
+    usage_ledger = state.setdefault("llm_usage", _usage.empty_usage())
+    translator_call = _model_roles.make_role_call(
+        _usage.tracked_call(call_llm, usage_ledger, role="translation"),
+        translator_config)
+    reviewer_call = _model_roles.make_role_call(
+        _usage.tracked_call(call_llm, usage_ledger, role="review"),
+        reviewer_config)
+    auxiliary_call = _model_roles.make_role_call(
+        _usage.tracked_call(call_llm, usage_ledger, role="auxiliary"),
+        auxiliary_config)
     _tm_project = tm_project_id(state)
     # 目标语言是 TM 作用域的一部分：没有它就不建立任何命中路径（fail closed）。
     _tm_lang = str(target_lang or "").strip() or str(state.get("target_lang") or "").strip()
@@ -2411,6 +3633,16 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
             save_job_state(job_id, state)
     paras = state["paras"]
     pairs = state["pairs"]
+    # Source cleanup repairs text, but a repair pass cannot prove that every
+    # OCR item is a real paragraph.  Quarantine short/structurally suspicious
+    # items before they can become model translation requests.
+    source_quality_gate = _audit_source_quality_for_state(state)
+    state["source_quality_gate"] = source_quality_gate
+    blocked_source_indexes = {
+        int(item["segment_index"]): item
+        for item in source_quality_gate.get("flags") or []
+        if isinstance(item, dict) and isinstance(item.get("segment_index"), int)
+    }
     truncated_indexes = []
 
     def _commit_translation_batch(batch_pairs, offset):
@@ -2449,6 +3681,23 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
         semantic_units=state.get("semantic_units")
         or state.get("section_digests") or None)
     state["batch_plan"]["batch_count"] = len(batches)
+    # Knowledge extraction is a continuity aid, not a second translation pass.
+    # In strict/review mode it remains per-batch; in ordinary mode it observes
+    # every batch until continuity exists, then observes at a bounded interval.
+    if knowledge_feedback_interval is None:
+        feedback_interval = 1 if (enable_review or state.get("quality_mode")) else 2
+    else:
+        try:
+            feedback_interval = max(1, int(knowledge_feedback_interval))
+        except (TypeError, ValueError):
+            feedback_interval = 1
+    state["knowledge_feedback_policy"] = {
+        "interval": feedback_interval,
+        "force_every_batch": bool(enable_review or state.get("quality_mode")),
+        "batch_count": len(batches),
+        "observed_batches": [],
+        "skipped_batches": [],
+    }
     registry = _entity_registry.EntityRegistry(state.get("entity_registry") or [])
 
     # 断点：从第一个未完成批次继续；若中间批次不完整则截断重译
@@ -2470,6 +3719,17 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
         "blocking": 0, "actionable": 0, "informational": 0, "review_failed": 0,
     })
     findings_all = state.setdefault("findings", [])
+    existing_source_gate_indexes = {
+        int(item.get("segment_index"))
+        for item in findings_all
+        if isinstance(item, dict)
+        and item.get("type") == "source_quality_gate"
+        and isinstance(item.get("segment_index"), int)
+    }
+    for segment_index, flag in blocked_source_indexes.items():
+        if segment_index in existing_source_gate_indexes:
+            continue
+        findings_all.append(_source_quality_finding(flag))
     from transpraxis.terminology import (
         detect_glossary_conflicts as _detect_conflicts,
         glossary_block as _glossary_block,
@@ -2492,16 +3752,50 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
         if on_caption:
             on_caption(f"🌍 正在翻译第 {offset + 1}-{offset + len(batch)} 段（共 {len(paras)} 段）...")
 
-        ctx_prev = paras[max(0, offset - 2):offset]
-        ctx_next = paras[min(len(paras), offset + len(batch)):min(len(paras), offset + len(batch) + 2)]
-        previous_target = _context.select_target_context(pairs, offset, limit=2)
+        ctx_prev = [
+            para for index, para in enumerate(paras[max(0, offset - 2):offset],
+                                             start=max(0, offset - 2))
+            if index not in blocked_source_indexes
+        ]
+        ctx_next = [
+            para for index, para in enumerate(
+                paras[min(len(paras), offset + len(batch)):
+                      min(len(paras), offset + len(batch) + 2)],
+                start=min(len(paras), offset + len(batch)))
+            if index not in blocked_source_indexes
+        ]
+        previous_target = [
+            item for item in _context.select_target_context(
+                pairs, offset, limit=max(2, offset))
+            if item.get("segment_index") not in blocked_source_indexes
+        ][-2:]
         section_digest = _context.digest_for_segment(section_digests, offset)
 
         # 1) 翻译记忆精确命中直接复用
         batch_pairs = [None] * len(batch)
         to_translate = []  # (index, clean_source)
+        blocked_local_indexes = set()
         for i, para in enumerate(batch):
             clean_src = para.replace('\n', ' ')
+            source_index = offset + i
+            source_flag = blocked_source_indexes.get(source_index)
+            if source_flag is not None:
+                # Quarantine the source item.  Keeping the source text visible
+                # is safer than inventing a translation or silently dropping
+                # content; the blocking finding below requires a human PDF
+                # check before delivery.
+                blocked_local_indexes.add(i)
+                batch_pairs[i] = {
+                    "source": clean_src, "target": clean_src,
+                    "initial_target": clean_src,
+                    "accepted_target": clean_src,
+                    "target_provenance": "source_review_required",
+                    "reviewed": False,
+                    "review_status": "source_review_required",
+                    "from_tm": False,
+                    "source_quality": dict(source_flag),
+                }
+                continue
             hit, tm_match = tm_lookup(tm, clean_src, tm_norm_index,
                                       target_lang=_tm_lang)
             if hit:
@@ -2548,6 +3842,9 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
             current_batch=texts,
             style_rules=style_rules,
             entity_hints=entity_hints,
+            # Keep the fixed context below roughly three source batches.  The
+            # current batch itself is never clipped by this budget.
+            context_budget_chars=max(5200, min(12000, effective_max_chars * 3)),
         )
         review_context = _runtime_review_context(
             state, offset, len(batch), glossary_text, style_rules, target_lang)
@@ -2625,12 +3922,19 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
         _checkpoint.append_event(job_dir(job_id), {
             "batch": bi, "offset": offset, "phase": "generation_done",
         })
-        findings = check_translation_batch(
-            batch_sources, batch_targets, glossary, target_lang,
-            section_profile=section_profile)
+        findings = [
+            finding for finding in check_translation_batch(
+                batch_sources, batch_targets, glossary, target_lang,
+                section_profile=section_profile)
+            if finding.get("segment_index") not in blocked_local_indexes
+        ]
 
         # 3) 确定性问题自动修复（一轮）
-        fixable = [f for f in findings if f["severity"] in ("blocking", "actionable")]
+        fixable = [
+            f for f in findings
+            if f["severity"] in ("blocking", "actionable")
+            and f.get("segment_index") not in blocked_local_indexes
+        ]
         if fixable and len(fixable) <= 8:
             if on_caption:
                 on_caption(f"🔧 发现 {len(fixable)} 个确定性问题，正在自动修复...")
@@ -2645,6 +3949,8 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                     formal_targets = list(batch_targets)
                     shadow_targets = list(formal_targets)
                     for j, p in enumerate(batch_pairs):
+                        if j in blocked_local_indexes:
+                            continue
                         if not p["from_tm"] and repaired[j] and repaired[j].strip():
                             candidate = clean_xml_chars(repaired[j]).replace('\n', ' ')
                             # 修复结果本身截断时，不接受更差的译文
@@ -2706,9 +4012,12 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                         if not p["from_tm"]:
                             p["target"] = promoted[j]
                 batch_targets = [p["target"] for p in batch_pairs]
-                findings = check_translation_batch(
-                    batch_sources, batch_targets, glossary, target_lang,
-                    section_profile=section_profile)
+                findings = [
+                    finding for finding in check_translation_batch(
+                        batch_sources, batch_targets, glossary, target_lang,
+                        section_profile=section_profile)
+                    if finding.get("segment_index") not in blocked_local_indexes
+                ]
             except Exception as exc:
                 state.setdefault("repair_overlays", []).append({
                     "batch": bi, "offset": offset, "source": "deterministic",
@@ -2769,6 +4078,7 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                         continue
                     record = _review_finding_record(rf, review_event_id)
                     if sev == "actionable" and rf.get("suggested_target") \
+                            and idx not in blocked_local_indexes \
                             and not batch_pairs[idx]["from_tm"]:
                         suggested = clean_xml_chars(rf["suggested_target"]).replace('\n', ' ').strip()
                         if suggested:
@@ -2857,9 +4167,12 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
             })
 
         # 审校可能修改过译文：对最终译文整体复验一次确定性检查
-        findings = check_translation_batch(
-            batch_sources, [p["target"] for p in batch_pairs], glossary, target_lang,
-            section_profile=section_profile)
+        findings = [
+            finding for finding in check_translation_batch(
+                batch_sources, [p["target"] for p in batch_pairs], glossary,
+                target_lang, section_profile=section_profile)
+            if finding.get("segment_index") not in blocked_local_indexes
+        ]
 
         # 批内冲突检测（跨段同术语多译法）——在 TM 入库前执行
         for cf in _detect_conflicts(batch_pairs, glossary, sections=sections):
@@ -2879,7 +4192,7 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
                                "detector": f.get("detector") or "Deterministic QA"})
                 findings_all.append(record)
 
-        # 5) 批后知识反馈：只进入 candidate queue，不改变 frozen glossary。
+        # 5) 批后知识反馈：只进入 candidate queue，不改变 frozen glossary.
         accepted_for_knowledge = []
         if enable_review and review_succeeded:
             for j, _pair in enumerate(batch_pairs):
@@ -2906,20 +4219,30 @@ def translate_stage(state, job_id, glossary, provider, api_key, model, target_la
             if (not pair.get("from_tm") and not local_findings
                     and offset + j not in review_bad_segments):
                 accepted_for_knowledge.append(j)
-        if accepted_for_knowledge:
+        knowledge_due = _knowledge.feedback_due(
+            bi, len(batches),
+            interval=feedback_interval,
+            existing_candidates=state.get("knowledge_candidates") or [],
+            force_every_batch=bool(enable_review or state.get("quality_mode")),
+        )
+        if knowledge_due and accepted_for_knowledge:
+            state["knowledge_feedback_policy"]["observed_batches"].append(bi)
             knowledge_segment_ids = [offset + j for j in accepted_for_knowledge]
             knowledge_candidates, knowledge_events, knowledge_warning = \
                 _knowledge.observe_batch(
                     [batch_sources[j] for j in accepted_for_knowledge],
                     [batch_pairs[j]["target"] for j in accepted_for_knowledge],
                     paras, pairs,
-                    glossary, offset, provider, api_key, model,
+                    glossary, offset, auxiliary_config["provider"],
+                    auxiliary_config["api_key"], auxiliary_config["model"],
                     existing_candidates=state.get("knowledge_candidates") or [],
-                    call_llm=translator_call, segment_ids=knowledge_segment_ids,
+                    call_llm=auxiliary_call, segment_ids=knowledge_segment_ids,
                     observation_provenance=(
                         "reviewed" if review_succeeded else "generated_continuity"
                     ))
         else:
+            if not knowledge_due:
+                state["knowledge_feedback_policy"]["skipped_batches"].append(bi)
             # Review failure or any finding leaves no trustworthy observation.
             knowledge_candidates, knowledge_events, knowledge_warning = \
                 state.get("knowledge_candidates") or [], [], None
@@ -3461,29 +4784,38 @@ def provider_config_path():
     return OUTPUT_DIR / "provider_config.json"
 
 
-def save_provider_config(provider, model, api_key, base_url=None, reviewer=None):
+def save_provider_config(provider, model, api_key, base_url=None, reviewer=None,
+                         reasoning_effort=None):
     """把 AI 引擎配置落盘（本地单机工具，0600 权限），重启后自动加载。"""
     _ensure_output_dir()
+    normalized_base = normalize_openai_base_url(base_url) if base_url else ""
+    normalized_reasoning = (str(reasoning_effort or "").strip().lower()
+                            if str(reasoning_effort or "").strip().lower()
+                            in _REASONING_EFFORT_VALUES else "")
     cfg = {
         "provider": provider or "",
         "model": model or "",
         "api_key": api_key or "",
-        "base_url": base_url or "",
+        "base_url": normalized_base,
+        "reasoning_effort": normalized_reasoning,
     }
     if isinstance(reviewer, dict) and reviewer.get("provider") and reviewer.get("model"):
         cfg["reviewer"] = {
             "provider": reviewer.get("provider", ""),
             "model": reviewer.get("model", ""),
             "api_key": reviewer.get("api_key", ""),
-            "base_url": reviewer.get("base_url", ""),
+            "base_url": normalize_openai_base_url(reviewer.get("base_url"))
+            if reviewer.get("base_url") else "",
         }
     path = provider_config_path()
-    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
-                    encoding="utf-8")
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
     try:
-        path.chmod(0o600)
+        temp_path.chmod(0o600)
     except OSError:
         pass
+    temp_path.replace(path)
     return path
 
 
@@ -3500,15 +4832,21 @@ def load_provider_config():
             "provider": str(data.get("provider", "")),
             "model": str(data.get("model", "") or ""),
             "api_key": str(data.get("api_key", "") or ""),
-            "base_url": str(data.get("base_url", "") or ""),
+            "base_url": normalize_openai_base_url(data.get("base_url"))
+            if data.get("base_url") else "",
+            "reasoning_effort": str(data.get("reasoning_effort", "") or "")
+            .strip().lower(),
         }
+        if result["reasoning_effort"] not in _REASONING_EFFORT_VALUES:
+            result["reasoning_effort"] = ""
         reviewer = data.get("reviewer")
         if isinstance(reviewer, dict) and reviewer.get("provider"):
             result["reviewer"] = {
                 "provider": str(reviewer.get("provider", "")),
                 "model": str(reviewer.get("model", "") or ""),
                 "api_key": str(reviewer.get("api_key", "") or ""),
-                "base_url": str(reviewer.get("base_url", "") or ""),
+                "base_url": normalize_openai_base_url(reviewer.get("base_url"))
+                if reviewer.get("base_url") else "",
             }
         return result
     except Exception:  # noqa: BLE001 - 配置文件损坏时按未保存处理
@@ -3598,6 +4936,7 @@ def _runtime_defaults():
         "operation": "",
         "operation_id": "",
         "operation_label": "",
+        "stage_progress": {},
         "section_id": None,
         "phase": "",
         "phase_label": "",
@@ -3721,8 +5060,13 @@ def update_runtime_state(job_id, *, event=None, progress=False, heartbeat=False,
     now = _utc_now_iso()
     with _RUNTIME_LOCK:
         current = load_runtime_state(job_id)
+        # ``None`` is normally omitted so optional status fields do not erase
+        # an existing value accidentally.  ``error`` is different: callers
+        # pass ``error=None`` when a retry or a successful checkpoint clears a
+        # stale failure from an earlier attempt.  Keep that explicit clear
+        # while retaining the omission behavior for other optional fields.
         current.update({key: value for key, value in changes.items()
-                        if value is not None})
+                        if value is not None or key == "error"})
         if heartbeat:
             current["last_heartbeat_at"] = now
             worker = dict(current.get("worker") or {})
@@ -3878,13 +5222,22 @@ def get_job_runtime_status(job_id, state=None):
                                            runtime, state, stalled=True))
             return _runtime_mark_lost(job_id, "interrupted",
                                    _lost_worker_message(runtime, state))
-        if not registered and pid == os.getpid() \
-                and status in {"queued", "starting"} \
-                and transition_age is not None and transition_age <= RUNTIME_STALL_SECONDS:
-            return runtime
         if not registered and pid == os.getpid():
+            # Streamlit can re-execute the app module while a worker thread
+            # from the same process is still handling a long model request.
+            # A module reload recreates the in-memory registry, but the durable
+            # lease and heartbeat still prove that this process owns the run.
+            # Do not turn that live request into a false "interrupted" state.
+            fresh_heartbeat = heartbeat and (
+                now - heartbeat).total_seconds() <= RUNTIME_STALL_SECONDS
+            lease_valid = not lease or lease >= now
+            if fresh_heartbeat and lease_valid:
+                return runtime
+            if status in {"queued", "starting"} \
+                    and transition_age is not None and transition_age <= RUNTIME_STALL_SECONDS:
+                return runtime
             return _runtime_mark_lost(job_id, "interrupted",
-                                   _lost_worker_message(runtime, state))
+                                      _lost_worker_message(runtime, state))
         return runtime
     if status == "idle":
         inferred = "completed" if _runtime_business_complete(state) else "idle_incomplete"
@@ -3988,6 +5341,7 @@ def build_job_runtime_view(job_id, state=None):
         "progress": progress,
         "progress_completed": completed,
         "progress_total": total,
+        "stage_progress": runtime.get("stage_progress") or {},
         "available_actions": actions.get(status, []),
         "primary_action": primary_action,
         "show_no_worker_warning": status in {
@@ -4029,10 +5383,75 @@ def _write_runtime_technical_log(job_id, exc):
 def _runtime_stage_info(label):
     """Extract the human-facing stage contract from existing status labels."""
     text = str(label or "").strip()
+
+    def nested_progress(value):
+        """Parse durable item progress without inventing an ETA."""
+        batch_match = re.search(r"批次\s*(\d+)\s*/\s*(\d+)", value)
+        page_match = re.search(r"(\d+)\s*/\s*(\d+)\s*页", value)
+        sentence_match = re.search(r"(\d+)\s*/\s*(\d+)\s*句", value)
+        match = batch_match or page_match or sentence_match
+        if not match:
+            return {}
+        unit = "批次" if batch_match else ("页" if page_match else "句")
+        completed, total = int(match.group(1)), int(match.group(2))
+        progress = {
+            "unit": unit,
+            "completed": max(0, completed),
+            "total": max(0, total),
+            "in_flight": [],
+        }
+        active_match = re.search(r"处理中\s+((?:#\d+\s*)+)", value)
+        if active_match:
+            progress["in_flight"] = [
+                int(item[1:]) for item in active_match.group(1).split()
+                if item.startswith("#") and item[1:].isdigit()
+            ]
+        return progress
+
+    def operation_without_progress(value):
+        operation = re.sub(r"^.*?】\s*", "", value).strip(" .…") or value
+        operation = re.sub(
+            r"\s*[（(](?=[^）)]*(?:批次|页|句)[^）)]*[）)])[^）)]*[）)]?", "",
+            operation,
+        )
+        # The expression above deliberately handles the normal full-width
+        # parenthesis form; keep a small fallback for labels using ASCII
+        # parentheses so an individual provider cannot pollute the headline.
+        operation = re.sub(r"\s*\([^()]*?(?:批次|页|句)[^()]*\)", "", operation)
+        return operation.strip(" .…") or value
+
+    stage_progress = nested_progress(text)
+    operation_label = operation_without_progress(text)
+    if "扫描 PDF OCR" in text or "OCR" in text and "页" in text:
+        return {
+            "stage": "document_processing",
+            "stage_id": "ocr",
+            "operation": "ocr",
+            "operation_id": "ocr",
+            "operation_label": operation_label,
+            "stage_progress": stage_progress,
+        }
+    if "LLM 原文纠错" in text or "原文纠错与断行" in text:
+        return {
+            "stage": "document_processing",
+            "stage_id": "llm_cleanup",
+            "operation": "llm_cleanup",
+            "operation_id": "llm_cleanup",
+            "operation_label": operation_label,
+            "stage_progress": stage_progress,
+        }
+    if "按句构建" in text or "翻译单元" in text:
+        return {
+            "stage": "document_processing",
+            "stage_id": "segment_build",
+            "operation": "segment_build",
+            "operation_id": "segment_build",
+            "operation_label": operation_label,
+            "stage_progress": stage_progress,
+        }
     match = re.search(r"学术写作\s+(\d+)\s*/\s*(\d+)", text)
     if match:
         index, total = int(match.group(1)), int(match.group(2))
-        operation_label = re.sub(r"^.*?】\s*", "", text).strip(" .…") or text
         section_match = re.search(r"第\s*([\w.-]+)\s*节", text)
         stage_id = "academic_writing"
         for needle, candidate in (
@@ -4053,8 +5472,8 @@ def _runtime_stage_info(label):
             "operation_id": "section_rewrite" if section_match else stage_id,
             "operation_label": operation_label,
             "section_id": section_match.group(1) if section_match else None,
+            "stage_progress": stage_progress,
         }
-    operation_label = re.sub(r"^.*?】\s*", "", text).strip(" .…") or text
     if "文档" in text or "排版" in text:
         stage = "document_processing"
     elif "术语" in text:
@@ -4073,6 +5492,7 @@ def _runtime_stage_info(label):
         "operation": stage,
         "operation_id": stage,
         "operation_label": operation_label,
+        "stage_progress": stage_progress,
     }
 
 
@@ -4135,6 +5555,7 @@ def _academic_resume_context(state, runtime=None):
         "operation": operation,
         "operation_id": operation,
         "operation_label": label,
+        "stage_progress": {},
         "section_id": section_id or "",
     }
 
@@ -4162,6 +5583,7 @@ def _runtime_status_callback(job_id, state, label):
         "operation": operation,
         "operation_id": stage_info.get("operation_id") or operation,
         "operation_label": stage_info.get("operation_label"),
+        "stage_progress": stage_info.get("stage_progress") or {},
         "section_id": stage_info.get("section_id") or "",
         "operation_started_at": operation_started_at,
         "overall_progress": _runtime_overall_progress(stage_info, state),
@@ -4195,6 +5617,7 @@ def _run_job_worker(job_id, filename, file_bytes, pipeline_kwargs, base_url=None
                                  args=(job_id, stop_event), daemon=True)
     _RUNTIME_CTX.job_id = job_id
     set_llm_base_url(base_url)
+    set_llm_reasoning_effort((pipeline_kwargs or {}).get("reasoning_effort"))
     heartbeat.start()
     # 主动留痕：进程被直接杀掉时没有机会写日志，所以"有启动、没有释放"本身就是
     # 最有价值的证据（本次排查正是靠它区分"被关闭"与"抛异常"）。
@@ -4259,9 +5682,14 @@ def _run_job_worker(job_id, filename, file_bytes, pipeline_kwargs, base_url=None
         if not cancelled:
             _write_runtime_technical_log(job_id, exc)
         current = load_runtime_state(job_id)
+        provider_status = provider_error_status(exc)
+        user_error_message = (
+            provider_error_message(exc, "任务执行失败")
+            if provider_status["status"] != "unknown"
+            else str(exc)[:500] or "任务执行失败")
         error = None if cancelled else {
             "type": type(exc).__name__,
-            "message": str(exc)[:500] or "任务执行失败",
+            "message": user_error_message,
             "stage": current.get("stage_id") or current.get("stage"),
             "operation": current.get("operation_id") or current.get("operation"),
             "timestamp": _utc_now_iso(),
@@ -4272,7 +5700,7 @@ def _run_job_worker(job_id, filename, file_bytes, pipeline_kwargs, base_url=None
             phase="cancelled" if cancelled else "failed",
             phase_label="已取消" if cancelled else "步骤失败",
             error=error,
-            event="任务已取消" if cancelled else f"步骤失败：{str(exc)[:180]}",
+            event="任务已取消" if cancelled else f"步骤失败：{user_error_message[:180]}",
             event_name="job_cancelled" if cancelled else "job_failed",
             event_visibility="user",
             event_category="lifecycle" if cancelled else "error",
@@ -4326,6 +5754,7 @@ def start_job_worker(job_id, filename, file_bytes, pipeline_kwargs, base_url=Non
                 "pipeline": "document_pipeline", "stage": "pipeline",
                 "stage_id": "pipeline", "operation": "pipeline",
                 "operation_id": "pipeline", "operation_label": "准备任务",
+                "stage_progress": {},
                 "section_id": "", "stage_index": None, "stage_total": None,
             }
         update_runtime_state(
@@ -4372,6 +5801,7 @@ def resume_job(job_id, filename, pipeline_kwargs, base_url=None,
             "pipeline": "document_pipeline", "stage": "pipeline",
             "stage_id": "pipeline", "operation": "pipeline",
             "operation_id": "pipeline", "operation_label": "继续处理",
+            "stage_progress": {},
             "section_id": "", "stage_index": None, "stage_total": None,
         }
         if state.get("p2_done") and pipeline_kwargs.get("enable_report"):
@@ -4549,6 +5979,13 @@ def _invalidate_translation_reviews(
     state, indexes, reason, *, review_event_ids=None,
 ):
     """Revoke review/TM trust while preserving review and decision history."""
+    # A whole-book consistency pass is a view over the current translation.
+    # Any dependency invalidation makes that pass stale, even when the changed
+    # segment did not have a current review event to revoke.
+    state["targeted_final_review"] = {
+        "status": "not_run", "segment_ids": [],
+        "reviewed_segment_ids": [], "failed_segment_ids": [],
+    }
     indexes = sorted({int(index) for index in indexes
                       if isinstance(index, int) or str(index).lstrip("-").isdigit()})
     changed = _translation_evidence.mark_runtime_review_stale(
@@ -5211,10 +6648,298 @@ def save_job_state(job_id, state):
     tmp.replace(d / "state.json")
 
 
+# ================= 未保存译文草稿的持久化 =================
+# 草稿**不是**文档状态的一部分：它不进 state.json、不改 reviewed/review_status、
+# 不进入交付资产。它只回答一个问题——"用户敲进去但还没点保存的内容"，在会话被
+# 重建（刷新、关标签页、进程重启）之后还在不在。此前它只活在 st.session_state 里，
+# 刷新即丢；会话会重置这件事我们改不了，但"草稿只存在会话里"是可以改的。
+TRANSLATION_DRAFTS_VERSION = 1
+TRANSLATION_DRAFTS_FILE = "translation_drafts.json"
+
+
+def translation_drafts_path(job_id):
+    return job_dir(job_id) / TRANSLATION_DRAFTS_FILE
+
+
+def load_translation_drafts(job_id):
+    """读回未保存草稿，返回 `{segment_id: {"text", "baseline", "updated_at"}}`。
+
+    读不到、格式不对、文件损坏一律返回空字典：草稿是"尽力而为"的兜底，
+    它的读取失败绝不能让工作台打不开。
+    """
+    path = translation_drafts_path(job_id)
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - 草稿损坏按"没有草稿"处理
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    items = raw.get("drafts")
+    if not isinstance(items, list):
+        return {}
+    drafts = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        segment_id = str(item.get("segment_id") or "")
+        if not segment_id:
+            continue
+        drafts[segment_id] = {
+            "segment_id": segment_id,
+            "text": str(item.get("text") or ""),
+            "baseline": str(item.get("baseline") or ""),
+            "updated_at": str(item.get("updated_at") or ""),
+        }
+    return drafts
+
+
+def save_translation_drafts(job_id, drafts):
+    """原子写入草稿文件。没有草稿时**删除文件**，不留空壳。"""
+    d = job_dir(job_id)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / TRANSLATION_DRAFTS_FILE
+    items = []
+    for segment_id, record in (drafts or {}).items():
+        if not isinstance(record, dict):
+            continue
+        items.append({
+            "segment_id": str(segment_id),
+            "text": str(record.get("text") or ""),
+            "baseline": str(record.get("baseline") or ""),
+            "updated_at": str(record.get("updated_at")
+                              or datetime.now(timezone.utc).isoformat()),
+        })
+    if not items:
+        path.unlink(missing_ok=True)
+        return
+    items.sort(key=lambda item: item["segment_id"])
+    payload = {
+        "version": TRANSLATION_DRAFTS_VERSION,
+        "job_id": str(job_id),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "drafts": items,
+    }
+    tmp = d / (TRANSLATION_DRAFTS_FILE + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def clear_translation_drafts(job_id):
+    """丢弃本任务全部未保存草稿（文件层面）。"""
+    translation_drafts_path(job_id).unlink(missing_ok=True)
+
+
 def _recount_reviewed_segments(state):
     """Keep the segment review count in sync with the canonical pair records."""
     state.setdefault("review_stats", {})["reviewed_segments"] = sum(
         bool(pair.get("reviewed")) for pair in state.get("pairs") or [])
+
+
+# ================= 段落身份 / 排除 / 结构快照 =================
+# `pairs` 与 `paras` 是贯穿流水线的位置契约：审校发现、检查点、交付资产全部按
+# index 引用同一条记录。拆分、合并、插入、删除会改变**每一个后续 index 的含义**，
+# 而界面需要"同一段在结构操作之后仍然是同一段"（编辑框、选中态、Agent 候选都不
+# 能跟着旧索引漂移）。`segment_uid` 只为界面身份服务，数据契约保持按索引不变。
+SEGMENT_UID_FIELD = "segment_uid"
+_UID_SEQ_FIELD = "segment_uid_seq"
+
+SEGMENT_STRUCTURE_OPERATION_LABELS = {
+    "source_edit": "修改原文",
+    "split": "拆分段落",
+    "merge": "合并段落",
+    "insert": "插入空段",
+    "delete": "删除空段",
+    "exclude": "排除段落",
+    "include": "恢复段落",
+}
+
+
+def segment_uid(pair):
+    """一段的稳定身份；没有时返回空串（调用方负责退化到索引）。"""
+    return str((pair or {}).get(SEGMENT_UID_FIELD) or "")
+
+
+def is_excluded(pair):
+    """这一段是否被用户显式排除在翻译与交付之外。"""
+    return bool((pair or {}).get("excluded"))
+
+
+def active_pair_indexes(state):
+    """参与翻译、审校与交付的段落索引（排除项不属于任何一项）。"""
+    return [index for index, pair in enumerate((state or {}).get("pairs") or [])
+            if isinstance(pair, dict) and not is_excluded(pair)]
+
+
+def next_segment_uid(state, job_id=""):
+    """分配一个新的稳定身份。单调递增，撤销不回退（已用过的身份不再复用）。"""
+    seq = int(state.get(_UID_SEQ_FIELD) or 0)
+    state[_UID_SEQ_FIELD] = seq + 1
+    return f"seg-{job_id}-u{seq:06d}" if job_id else f"u{seq:06d}"
+
+
+def assign_missing_segment_uids(state, *, job_id=""):
+    """给缺少稳定身份的段落补齐身份，返回新分配的数量。
+
+    旧任务（v0.4 之前）没有这个字段，补齐动作发生在**第一次结构编辑或人工保存**
+    上，因此普通渲染不会因为"读了一次状态"就改写磁盘。
+
+    初始身份刻意沿用导出资产既有的格式 `seg-<job_id>-<index>`：升级瞬间不会发生
+    身份漂移，浏览器里已经存在的选中态、编辑框与未保存草稿都继续有效。结构操作
+    产生的新段落用 `seg-<job_id>-u<n>`，与索引格式不可能碰撞，且永不复用。
+    """
+    pairs = (state or {}).get("pairs")
+    if not isinstance(pairs, list):
+        return 0
+    seq = int(state.get(_UID_SEQ_FIELD) or 0)
+    seen = set()
+    assigned = 0
+    for index, pair in enumerate(pairs):
+        if not isinstance(pair, dict):
+            continue
+        uid = segment_uid(pair)
+        if uid and uid not in seen:
+            seen.add(uid)
+            continue
+        if job_id:
+            pair[SEGMENT_UID_FIELD] = f"seg-{job_id}-{index:04d}"
+        else:
+            pair[SEGMENT_UID_FIELD] = f"u{seq:06d}"
+            seq += 1
+        seen.add(pair[SEGMENT_UID_FIELD])
+        assigned += 1
+    state[_UID_SEQ_FIELD] = max(seq, len(pairs), len(seen))
+    return assigned
+
+
+def excluded_segment_records(state):
+    """被排除段落的清单——导出、交付说明与「恢复」入口的唯一来源。
+
+    排除采用"移出 pairs/paras + 在此留档"的模型：只要不在工作列表里，它就自然
+    不进入翻译、不计入待完成数量、不参与审校门禁、不进导出；而原文与当时的译文
+    在这里完整保留，所以恢复是精确还原而不是重新猜。
+    """
+    records = []
+    for position, item in enumerate((state or {}).get("excluded_segments") or []):
+        if not isinstance(item, dict):
+            continue
+        records.append({
+            "excluded_id": str(item.get("excluded_id") or f"x{position:06d}"),
+            "segment_index": item.get("index"),
+            "source": str(item.get("source") or ""),
+            "target": str(item.get("target") or ""),
+            "reason": str(item.get("reason") or ""),
+            "excluded_at": str(item.get("excluded_at") or ""),
+            "excluded_by": str(item.get("excluded_by") or ""),
+            "restorable": bool(item.get("pair") is not None
+                               or str(item.get("source") or "").strip()),
+        })
+    # 兼容极早期状态：pair 上直接带 excluded 标记。
+    for index, pair in enumerate((state or {}).get("pairs") or []):
+        if not isinstance(pair, dict) or not is_excluded(pair):
+            continue
+        records.append({
+            "excluded_id": segment_uid(pair) or f"index-{index}",
+            "segment_index": index,
+            "source": str(pair.get("source") or ""),
+            "target": str(pair.get("target") or ""),
+            "reason": str(pair.get("excluded_reason") or ""),
+            "excluded_at": str(pair.get("excluded_at") or ""),
+            "excluded_by": str(pair.get("excluded_by") or ""),
+            "restorable": False,
+        })
+    return records
+
+
+def excluded_segments_summary(state):
+    """排除范围的只读摘要（交付页/导入报告共用，避免各处自己数一遍）。"""
+    records = excluded_segment_records(state)
+    working = len((state or {}).get("pairs") or []) \
+        or len((state or {}).get("paras") or [])
+    return {
+        "count": len(records),
+        "working_segments": working,
+        "total_segments": working + len(records),
+        "records": records,
+    }
+
+
+def excluded_segments_manifest(state):
+    """交付包里如实说明"哪些内容没有进入译文文档"。"""
+    records = excluded_segment_records(state)
+    return {
+        "version": 1,
+        "rule": "被排除段落不进入译文的生成式输出，也不占用待完成与审校配额；"
+                "原文与排除时的译文在此完整保留，可在工作台恢复。",
+        "count": len(records),
+        "records": records,
+    }
+
+
+def _excluded_segments_md(manifest):
+    lines = [
+        "# 已排除段落清单",
+        "",
+        f"- 排除数量：{manifest.get('count', 0)}",
+        f"- 规则：{manifest.get('rule', '')}",
+        "",
+        "| 原位置 | 排除原因 | 原文 |",
+        "| --- | --- | --- |",
+    ]
+    for record in manifest.get("records") or []:
+        index = record.get("segment_index")
+        position = f"第 {int(index) + 1} 段" if isinstance(index, int) else "—"
+        source = " ".join(str(record.get("source") or "").split())
+        if len(source) > 160:
+            source = source[:159] + "…"
+        reason = str(record.get("reason") or "未填写")
+        lines.append(f"| {position} | {reason} | {source or '（空）'} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _segment_source_list(state):
+    """当前的段落原文序列（有译文时以 pairs 为准，否则用 paras）。
+
+    排除/恢复需要用原文做锚点：索引会随结构操作漂移，原文文本不会。
+    """
+    pairs = (state or {}).get("pairs") or []
+    if pairs:
+        return [str((pair or {}).get("source") or "") for pair in pairs]
+    return [str(item or "") for item in (state or {}).get("paras") or []]
+
+
+def _exclusion_restore_index(state, record):
+    """被排除段落应当插回的位置：优先后锚点，其次前锚点，最后退回原索引。"""
+    sources = _segment_source_list(state)
+    after = str((record or {}).get("after_source") or "")
+    before = str((record or {}).get("before_source") or "")
+    if after:
+        for position, text in enumerate(sources):
+            if text == after:
+                return position
+    if before:
+        for position, text in enumerate(sources):
+            if text == before:
+                return position + 1
+    return max(0, min(int((record or {}).get("index") or 0), len(sources)))
+
+
+def can_undo_translation_segment_structure(state):
+    """最近一次结构操作是否可撤销（供界面决定是否显示入口）。"""
+    history = [record for record in (state or {}).get("segment_structure_history") or []
+               if isinstance(record, dict)]
+    if not history:
+        return {"available": False, "label": "", "operation": "", "index": None}
+    record = history[-1]
+    operation = str(record.get("operation") or "")
+    return {
+        "available": isinstance(record.get("restore_pairs"), list),
+        "label": SEGMENT_STRUCTURE_OPERATION_LABELS.get(operation, "段落结构已更新"),
+        "operation": operation,
+        "index": record.get("index"),
+    }
 
 
 def translation_terms_for_pair(state, pair):
@@ -5266,7 +6991,8 @@ def translation_visible_indexes(state, search="", status_filter="全部",
             continue
         if filter_terms and not translation_terms_for_pair(state, pair):
             continue
-        if filter_edited and not pair.get("human_edited"):
+        if filter_edited and not (pair.get("human_edited") or
+                                  pair.get("source_human_edited")):
             continue
         if filter_tm and not pair.get("from_tm"):
             continue
@@ -5292,6 +7018,9 @@ def save_translation_edit(job_id, index, target, actor="user"):
     if not (0 <= index < len(pairs)):
         raise IndexError(f"段落索引超出范围：{index}")
     pair = pairs[index]
+    if is_excluded(pair):
+        raise ValueError("该段落已被排除，不会进入翻译与交付；请先恢复本段再编辑译文。")
+    assign_missing_segment_uids(state, job_id=job_id)
     new_target = str(target or "").strip()
     if not pair.get("human_edited"):
         pair["_translation_edit_restore"] = {
@@ -5383,6 +7112,465 @@ def restore_translation_edit(job_id, index, actor="user"):
     _mark_translation_truth_changed(
         job_id, state, [index], "恢复前版本也改变了 CURRENT_TRANSLATION；相关下游需要重建",
         actor=actor, action="translation_restore")
+    save_job_state(job_id, state)
+    return state
+
+
+def mutate_translation_segments(
+    job_id, index, operation, *, source_text=None, source_a=None,
+    source_b=None, target_a=None, target_b=None, exclude_reason=None,
+    excluded_id=None, actor="user",
+):
+    """Apply a user initiated CAT segment-structure edit.
+
+    ``pairs`` and ``paras`` are a positional contract throughout the pipeline:
+    review findings, checkpoints and delivery assets all refer to the same
+    segment index.  This is therefore deliberately one state-layer operation
+    instead of a UI-only splice.  Structural edits are rejected while a worker
+    is active, stale every existing review dependency, and persist a compact
+    history record for auditability (including a content snapshot, so
+    :func:`undo_translation_segment_structure` can restore the previous text).
+
+    Supported operations:
+
+    ``source_edit``
+        Correct the source text in place while retaining the current target.
+    ``split``
+        Replace one segment with two explicitly supplied source/target pairs.
+    ``merge``
+        Join the selected segment with the following segment using a newline.
+    ``insert``
+        Add an empty manual segment immediately after ``index``.
+    ``delete``
+        Remove an empty manual segment.  Existing content cannot be deleted by
+        this path, which prevents an accidental paragraph loss.
+    ``exclude``
+        Take a segment out of translation, review and delivery without touching
+        its text.  The source text is always retained, so ``include`` restores
+        it exactly.  This is the general entry point for OCR junk, page numbers
+        and repeated running heads that no character-level repair can fix.
+    ``include``
+        Undo an exclusion.
+
+    The returned value is the persisted state, matching the existing edit APIs.
+    """
+    state = load_job_state(job_id)
+    if state is None:
+        raise ValueError(f"找不到任务 {job_id}")
+
+    runtime = get_job_runtime_status(job_id, state)
+    runtime_status = str(runtime.get("status") or "")
+    if runtime_status in RUNTIME_ACTIVE_STATUSES:
+        raise RuntimeError("任务正在运行，段落结构编辑将在任务完成或暂停后可用。")
+
+    operation = str(operation or "").strip().lower()
+    aliases = {
+        "source": "source_edit", "edit_source": "source_edit",
+        "split_segment": "split", "merge_segment": "merge",
+        "insert_segment": "insert", "delete_segment": "delete",
+        "exclude_segment": "exclude", "include_segment": "include",
+        "restore_segment": "include",
+    }
+    operation = aliases.get(operation, operation)
+    if operation not in {"source_edit", "split", "merge", "insert", "delete",
+                         "exclude", "include"}:
+        raise ValueError(f"不支持的段落结构操作：{operation or '—'}")
+
+    # 结构操作是界面身份最容易漂移的地方：先给所有段落补齐稳定身份，再动列表。
+    assign_missing_segment_uids(state, job_id=job_id)
+
+    pairs = list(state.get("pairs") or [])
+    paras = list(state.get("paras") or [])
+    if pairs and len(paras) != len(pairs):
+        # A completed translation must never be silently repaired here: a
+        # mismatch means another invariant has already been violated and the
+        # user needs the existing delivery gate to surface it.
+        raise ValueError("当前任务的源文与双语段落数量不一致，无法安全编辑段落结构。")
+    if not pairs and not paras:
+        raise ValueError("当前任务还没有可编辑的段落。")
+    if not pairs and operation not in {"exclude", "include"}:
+        raise ValueError("当前任务还没有可编辑的译文段落。")
+    if not all(isinstance(pair, dict) for pair in pairs):
+        raise ValueError("当前任务包含无效的段落记录，无法安全编辑。")
+
+    # 「恢复」的目标不在 pairs/paras 里（它正是被移出去的那一段），所以它的位置
+    # 由原文锚点反推，而不是当作索引来校验。
+    include_record = None
+    if operation == "include":
+        wanted = str(excluded_id or "")
+        include_record = next(
+            (item for item in state.get("excluded_segments") or []
+             if isinstance(item, dict)
+             and str(item.get("excluded_id") or "") == wanted), None)
+        if include_record is None:
+            raise ValueError("找不到要恢复的已排除段落。")
+        index = _exclusion_restore_index(state, include_record)
+
+    limit = len(pairs) if pairs else len(paras)
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise ValueError("段落索引无效。")
+    if operation == "include":
+        if not 0 <= index <= limit:
+            raise IndexError(f"段落索引超出范围：{index}")
+    elif not 0 <= index < limit:
+        raise IndexError(f"段落索引超出范围：{index}")
+
+    # 操作前的内容快照：撤销需要的是**原文本身**，只记"操作名 + 位置"恢复不了
+    # 被拆分/合并掉的内容。capture 是操作前被替换的切片；undo 描述撤销时要用
+    # 多少次替换回去（insert 是插入、delete 是删除，形状与 capture 不同）。
+    _SHAPES = {
+        "source_edit": (index, 1, 1),
+        "split": (index, 1, 2),
+        "merge": (index, 2, 1),
+        "insert": (index + 1, 0, 1),
+        "delete": (index, 1, 0),
+        # 排除把段落移出 pairs/paras；撤销要把同一条记录放回原位。
+        "exclude": (index, 1, 0),
+        # 恢复把已排除段落插回；撤销要再把它移出去，并还原排除记录。
+        "include": (index, 0, 1),
+    }
+    undo_index, capture_span, undo_span = _SHAPES[operation]
+
+    def normalized(value):
+        return str(value or "").replace("\r\n", "\n").strip()
+
+    def reset_trust(pair, source, target, *, initial_target=None,
+                    source_edited=False, manual_segment=False):
+        """Copy a pair while revoking trust tied to the old segmentation."""
+        result = dict(pair or {})
+        result["source"] = normalized(source)
+        result["target"] = normalized(target)
+        if initial_target is not None:
+            result["initial_target"] = normalized(initial_target)
+        else:
+            result["initial_target"] = normalized(
+                result.get("initial_target") or result.get("target"))
+        result["reviewed"] = False
+        result["review_status"] = "not_reviewed"
+        result["from_tm"] = False
+        result["target_provenance"] = "human_edit"
+        result.pop("_translation_edit_restore", None)
+        if source_edited:
+            result["source_human_edited"] = True
+            result["source_provenance"] = "human_edit"
+        if manual_segment:
+            result["manual_segment"] = True
+            result["segment_origin"] = "manual"
+        return result
+
+    old_indexes = list(range(len(pairs)))
+    # 撤销要恢复的是**内容**：只记"操作名 + 位置"恢复不了被拆分/合并掉的原句。
+    # 快照只存操作前被替换的那一小段（0–2 条记录），50 条历史也不会影响体积。
+    _restore_pairs = ([json.loads(json.dumps(item))
+                       for item in pairs[undo_index:undo_index + capture_span]]
+                      if capture_span else [])
+    _restore_paras = ([str(item or "")
+                       for item in paras[undo_index:undo_index + capture_span]]
+                      if capture_span else [])
+    reason_by_operation = {
+        "source_edit": "人工修订了源文段落，原有译文审校需要重新确认",
+        "split": "人工拆分了段落，原有译文审校需要重新确认",
+        "merge": "人工合并了段落，原有译文审校需要重新确认",
+        "insert": "人工插入了段落，原有译文审校需要重新确认",
+        "delete": "人工删除了空段落，原有译文审校需要重新确认",
+        "exclude": "人工排除了段落，交付范围发生变化，原有审校需要重新确认",
+        "include": "人工恢复了被排除的段落，交付范围发生变化，原有审校需要重新确认",
+    }
+    reason = reason_by_operation[operation]
+
+    # Stale the old ordinal dependencies before changing the list.  The normal
+    # truth mutation below uses the new indexes; this pre-pass also covers a
+    # deleted tail segment whose old index no longer exists afterward.  A source
+    # text correction keeps list positions stable, so it only touches the
+    # edited segment; every other operation changes the ordinal mapping.
+    #
+    # `exclude` / `include` 也属于"改变序号含义"的一类：移出或插回一段会让**它
+    # 之后每一段**的索引都位移一位，而审校发现、检查点与交付资产全部按索引引用
+    # 同一条记录。只把 `index` 判过期，会让后面那些段的旧发现静默指到别的段落上
+    # ——这正是"结构操作后问题定位对不上"的根因。
+    pre_stale_indexes = [index] if operation == "source_edit" else old_indexes
+    _translation_evidence.mark_runtime_review_stale(
+        state, pre_stale_indexes, reason, dependency_change=True)
+
+    # 排除/恢复对导出清单的增量；撤销时按这两份增量反向操作。
+    excluded_ids_added = []
+    excluded_records_restored = []
+
+    if operation == "source_edit":
+        new_source = normalized(source_text)
+        if not new_source:
+            raise ValueError("原文不能为空；如需留白，请插入空段。")
+        current = pairs[index]
+        updated_pair = reset_trust(
+            current, new_source, current.get("target") or "",
+            initial_target=current.get("initial_target"), source_edited=True)
+        pairs[index] = updated_pair
+        paras[index] = new_source
+        affected_hint = [index]
+    elif operation == "split":
+        left_source, right_source = normalized(source_a), normalized(source_b)
+        if not left_source or not right_source:
+            raise ValueError("拆分后的两段原文都不能为空。")
+        current = pairs[index]
+        left_target, right_target = normalized(target_a), normalized(target_b)
+        original_ids = list(current.get("glossary_entry_ids") or [])
+        left = reset_trust(
+            current, left_source, left_target, initial_target=left_target,
+            source_edited=True)
+        right = reset_trust(
+            current, right_source, right_target, initial_target=right_target,
+            source_edited=True)
+        # 拆出来的两段是**新**工作单元：必须拿到新身份，否则右半段会继承原段
+        # 的身份，界面上的编辑框/选中态就会认错段落。
+        left[SEGMENT_UID_FIELD] = next_segment_uid(state, job_id)
+        right[SEGMENT_UID_FIELD] = next_segment_uid(state, job_id)
+        if original_ids:
+            left["glossary_entry_ids"] = list(original_ids)
+            right["glossary_entry_ids"] = list(original_ids)
+        pairs[index:index + 1] = [left, right]
+        paras[index:index + 1] = [left_source, right_source]
+        affected_hint = [index, index + 1]
+    elif operation == "merge":
+        if index + 1 >= len(pairs):
+            raise ValueError("最后一段没有下一段可合并。")
+        current, following = pairs[index], pairs[index + 1]
+        merged_source = "\n".join(
+            item for item in (normalized(current.get("source")),
+                              normalized(following.get("source"))) if item)
+        merged_target = "\n".join(
+            item for item in (normalized(current.get("target")),
+                              normalized(following.get("target"))) if item)
+        merged_initial = "\n".join(
+            item for item in (normalized(current.get("initial_target")),
+                              normalized(following.get("initial_target"))) if item)
+        merged = reset_trust(
+            current, merged_source, merged_target,
+            initial_target=merged_initial, source_edited=True)
+        # 合并保留左段的身份（用户是在左段上发起操作的），右段身份随之消失。
+        merged[SEGMENT_UID_FIELD] = segment_uid(current) or next_segment_uid(state, job_id)
+        merged_ids = list(dict.fromkeys(
+            list(current.get("glossary_entry_ids") or []) +
+            list(following.get("glossary_entry_ids") or [])))
+        if merged_ids:
+            merged["glossary_entry_ids"] = merged_ids
+        merged["merged_segment_count"] = int(
+            current.get("merged_segment_count") or 1) + int(
+                following.get("merged_segment_count") or 1)
+        pairs[index:index + 2] = [merged]
+        paras[index:index + 2] = [merged_source]
+        affected_hint = [index]
+    elif operation == "insert":
+        inserted = reset_trust(
+            {}, "", "", initial_target="", manual_segment=True)
+        inserted[SEGMENT_UID_FIELD] = next_segment_uid(state, job_id)
+        pairs.insert(index + 1, inserted)
+        paras.insert(index + 1, "")
+        affected_hint = [index + 1]
+    elif operation == "exclude":
+        # 「排除」把这一段整体移出 pairs/paras：不进入翻译、不计入待完成数量、
+        # 不参与审校门禁、不进导出。原文（连同当时的译文）完整存进
+        # `state["excluded_segments"]`，因此恢复是精确的、不是重新猜。
+        sources = _segment_source_list(state)
+        source_value = str(paras[index] or "")
+        target_value = str(pairs[index].get("target") or "") if pairs else ""
+        if not normalized(source_value) and not normalized(target_value):
+            raise ValueError("该段落没有内容，无需排除；如需清理空段请使用「删除空段」。")
+        excluded_id_value = f"x{int(state.get('exclusion_seq') or 0):06d}"
+        state["exclusion_seq"] = int(state.get("exclusion_seq") or 0) + 1
+        excluded_record = {
+            "excluded_id": excluded_id_value,
+            "index": index,
+            "source": source_value,
+            "target": target_value,
+            "pair": json.loads(json.dumps(pairs[index])) if pairs else None,
+            "in_pairs": bool(pairs),
+            "before_source": sources[index - 1] if index > 0 else "",
+            "after_source": sources[index + 1] if index + 1 < len(sources) else "",
+            "reason": str(exclude_reason or "").strip(),
+            "excluded_at": _finalization.now_iso(),
+            "excluded_by": str(actor or "user"),
+        }
+        state["excluded_segments"] = list(
+            state.get("excluded_segments") or []) + [excluded_record]
+        excluded_ids_added = [excluded_id_value]
+        if pairs:
+            pairs.pop(index)
+        paras.pop(index)
+        affected_hint = [max(0, min(index, len(pairs) - 1))] if pairs else []
+    elif operation == "include":
+        excluded_record = dict(include_record)
+        state["excluded_segments"] = [
+            item for item in state.get("excluded_segments") or []
+            if not (isinstance(item, dict)
+                    and str(item.get("excluded_id") or "")
+                    == str(excluded_record.get("excluded_id") or ""))
+        ]
+        # 排除发生在翻译之前时没有 pair 记录，此时只需要把原文插回 paras。
+        restored_pair = excluded_record.get("pair")
+        if pairs and isinstance(restored_pair, dict):
+            # 内容原样回来，但**不**连带把旧的"已审校"标记也一起点亮：它的审校
+            # 依赖在排除那一刻已经被判过期，重新显示"已审校"会是假绿（撤销路径
+            # 出于同样的理由在 `undo_translation_segment_structure` 里清标记）。
+            restored_pair = json.loads(json.dumps(restored_pair))
+            restored_pair["reviewed"] = False
+            restored_pair["review_status"] = "not_reviewed"
+            restored_pair.pop("accepted_target", None)
+            restored_pair.pop("human_accepted", None)
+            restored_pair.pop("accepted_by_human", None)
+            pairs.insert(index, restored_pair)
+        paras.insert(index, str(excluded_record.get("source") or ""))
+        affected_hint = [index]
+        excluded_records_restored = [excluded_record]
+    else:  # delete
+        candidate = pairs[index]
+        if not candidate.get("manual_segment"):
+            raise ValueError("只能删除手动插入且仍为空的段落；"
+                             "导入内容请使用「排除本段」。")
+        if normalized(candidate.get("source")) or normalized(candidate.get("target")):
+            raise ValueError("该段落已有内容，请先清空原文和译文后再删除。")
+        pairs.pop(index)
+        paras.pop(index)
+        affected_hint = [max(0, min(index, len(pairs) - 1))] if pairs else []
+
+    state["pairs"] = pairs
+    state["paras"] = paras
+    # Splitting, merging, inserting or deleting changes the meaning of every
+    # following ordinal.  Revoke their trust together so no old review badge or
+    # TM reuse survives under a different source/target pairing.  A plain
+    # source correction only resets the pair already rebuilt above, and an
+    # exclusion changes the delivery scope without touching other segments.
+    if operation not in {"source_edit", "exclude", "include"}:
+        for pair in pairs:
+            pair["reviewed"] = False
+            pair["review_status"] = "not_reviewed"
+            pair["from_tm"] = False
+            for key in ("accepted_target", "human_accepted", "accepted_by_human"):
+                pair.pop(key, None)
+    state["annotations"] = {}
+    state["annotations_done"] = False
+    state["annotations_done_offset"] = 0
+    state["segment_structure_version"] = int(
+        state.get("segment_structure_version") or 0) + 1
+    history = list(state.get("segment_structure_history") or [])
+    history.append({
+        "operation": operation,
+        "index": index,
+        "affected_indexes": affected_hint,
+        "timestamp": _finalization.now_iso(),
+        "actor": actor,
+        # 撤销要恢复的是**内容**：只记"操作名 + 位置"恢复不了被拆分/合并掉的原句。
+        # 快照只存操作前被替换的那一小段（0–2 条记录），50 条历史也不影响体积。
+        "undo_index": undo_index,
+        "undo_span": undo_span,
+        "restore_pairs": _restore_pairs,
+        "restore_paras": _restore_paras,
+        "excluded_ids_added": list(excluded_ids_added),
+        "excluded_records_restored": [
+            json.loads(json.dumps(item)) for item in excluded_records_restored],
+    })
+    state["segment_structure_history"] = history[-50:]
+
+    # 结构操作会成片清掉 `reviewed`（或把它留给恢复的那一段），计数必须跟着重算，
+    # 否则报告模板里的 "已审校段落" 与段落本身脱节。
+    _recount_reviewed_segments(state)
+
+    all_new_indexes = list(range(len(pairs)))
+    # source_edit 原地改字，影响面就是那一段；其余操作改的是序号映射，整张表都要
+    # 按新索引重新对账（排除/恢复也一样）。
+    trust_indexes = (list(affected_hint) or [index]
+                     if operation == "source_edit"
+                     else all_new_indexes)
+    _mark_translation_truth_changed(
+        job_id, state, trust_indexes, reason, actor=actor,
+        action=f"segment_{operation}")
+    _recheck_delivery_invariants_for_segments(
+        state, all_new_indexes, actor=actor)
+    save_job_state(job_id, state)
+    return state
+
+
+def undo_translation_segment_structure(job_id, *, actor="user"):
+    """撤销最近一次段落结构操作，恢复到操作前的原文/译文。
+
+    只撤销**一步**：历史记录被弹出并留档到 `segment_structure_undo_log`，因此
+    连续点两次撤销不会"撤销掉撤销"。被恢复的段落会失去审校通过标记——它们的
+    内容虽然是操作前的原文，但下游依赖已经在操作时被判定为过期，重新点亮
+    "已审校"会是假绿。
+    """
+    state = load_job_state(job_id)
+    if state is None:
+        raise ValueError(f"找不到任务 {job_id}")
+
+    runtime = get_job_runtime_status(job_id, state)
+    if str(runtime.get("status") or "") in RUNTIME_ACTIVE_STATUSES:
+        raise RuntimeError("任务正在运行，段落结构编辑将在任务完成或暂停后可用。")
+
+    history = [record for record in state.get("segment_structure_history") or []
+               if isinstance(record, dict)]
+    if not history:
+        raise ValueError("没有可撤销的段落结构操作。")
+    record = history[-1]
+    restore_pairs = record.get("restore_pairs")
+    if not isinstance(restore_pairs, list):
+        raise ValueError("最近一次结构操作没有保存内容快照，无法撤销。")
+
+    pairs = list(state.get("pairs") or [])
+    paras = list(state.get("paras") or [])
+    if len(paras) < len(pairs):
+        raise ValueError("当前任务的源文与双语段落数量不一致，无法安全撤销。")
+
+    undo_index = int(record.get("undo_index", record.get("index") or 0) or 0)
+    undo_span = int(record.get("undo_span") or 0)
+    undo_index = max(0, min(undo_index, max(len(pairs), len(paras))))
+    pairs_end = max(undo_index, min(len(pairs), undo_index + undo_span))
+    paras_end = max(undo_index, min(len(paras), undo_index + undo_span))
+
+    restored = [dict(item) for item in restore_pairs if isinstance(item, dict)]
+    for pair in restored:
+        pair["reviewed"] = False
+        pair["review_status"] = "not_reviewed"
+    restored_paras = [str(item or "") for item in record.get("restore_paras") or []]
+    if len(restored_paras) != len(restored):
+        restored_paras = [str(pair.get("source") or "") for pair in restored]
+
+    # 排除发生在翻译之前时 pairs 本来就是空的，撤销只动 paras。
+    if pairs:
+        pairs[undo_index:pairs_end] = restored
+    paras[undo_index:paras_end] = restored_paras
+
+    # 排除/恢复对清单的增量按反方向还原，保证撤销之后"已排除清单"和段落列表一致。
+    added_ids = {str(item) for item in record.get("excluded_ids_added") or []}
+    if added_ids:
+        state["excluded_segments"] = [
+            item for item in state.get("excluded_segments") or []
+            if not (isinstance(item, dict)
+                    and str(item.get("excluded_id") or "") in added_ids)]
+    put_back = [dict(item) for item in record.get("excluded_records_restored") or []
+                if isinstance(item, dict)]
+    if put_back:
+        state["excluded_segments"] = list(
+            state.get("excluded_segments") or []) + put_back
+    state["pairs"] = pairs
+    state["paras"] = paras
+    state["annotations"] = {}
+    state["annotations_done"] = False
+    state["annotations_done_offset"] = 0
+    state["segment_structure_version"] = int(
+        state.get("segment_structure_version") or 0) + 1
+    state["segment_structure_history"] = history[:-1]
+    undo_log = list(state.get("segment_structure_undo_log") or [])
+    undo_log.append({**record, "undone_at": _finalization.now_iso(),
+                     "undone_by": actor})
+    state["segment_structure_undo_log"] = undo_log[-20:]
+    # 恢复的段落失去了 `reviewed`，计数必须跟着降下来。
+    _recount_reviewed_segments(state)
+
+    all_indexes = list(range(len(pairs)))
+    _mark_translation_truth_changed(
+        job_id, state, all_indexes,
+        "撤销了最近一次段落结构操作；恢复的译文需要重新审校",
+        actor=actor, action="segment_undo")
+    _recheck_delivery_invariants_for_segments(state, all_indexes, actor=actor)
     save_job_state(job_id, state)
     return state
 
@@ -5706,8 +7894,18 @@ def validate_delivery_translation_state(state):
     """Run the final, state-level translation gate before any delivery asset."""
     state = state if isinstance(state, dict) else {}
     pairs = state.get("pairs") or []
+    source_quality_gate = _audit_source_quality_for_state(state)
+    source_quality_findings = [
+        _source_quality_finding(flag)
+        for flag in source_quality_gate.get("flags") or []
+        if isinstance(flag, dict) and isinstance(flag.get("segment_index"), int)
+    ]
     report = validate_translation_pairs(
         pairs, state.get("glossary") or [], state.get("target_lang") or "简体中文")
+    report["source_quality_gate"] = source_quality_gate
+    report["source_quality_findings"] = source_quality_findings
+    report["blocking_findings"] = list(report.get("blocking_findings") or [])
+    report["blocking_findings"].extend(source_quality_findings)
     issues = list(report.get("issues") or [])
     if state.get("p2_done") and len(pairs) != len(state.get("paras") or []):
         issues.append({
@@ -5730,6 +7928,7 @@ def validate_delivery_translation_state(state):
 
 def _record_delivery_validation_findings(state, report):
     """Persist only new invariant/entity findings for the review queue."""
+    state["source_quality_gate"] = dict(report.get("source_quality_gate") or {})
     state["delivery_validation"] = {
         "status": report.get("status"),
         "blocking": bool(report.get("blocking")),
@@ -5751,6 +7950,10 @@ def _record_delivery_validation_findings(state, report):
         if isinstance(item, dict) and not item.get("resolved")
     }
     findings = _translation_target.target_invariant_findings(report)
+    findings.extend(
+        dict(item) for item in report.get("source_quality_findings") or []
+        if isinstance(item, dict)
+    )
     for item in report.get("entity_findings") or []:
         findings.append({
             **item,
@@ -5837,6 +8040,11 @@ def _delivery_asset_bundle(job_id, state, target_lang, provider, model):
         bundle = {}
         pairs = state.get("pairs") or []
         glossary = state.get("glossary") or []
+        if state.get("source_cleanup_done"):
+            bundle["source_cleanup.json"] = (
+                json.dumps(state.get("source_cleanup") or {},
+                           ensure_ascii=False, indent=2) + "\n"
+            ).encode("utf-8")
         if state.get("p2_done") and pairs:
             if config["deliver_plain_docx"]:
                 bundle["translation.docx"] = _bytes(translations_to_word(pairs))
@@ -5864,6 +8072,15 @@ def _delivery_asset_bundle(job_id, state, target_lang, provider, model):
                         state, job_id).encode("utf-8")
             if config["deliver_review_report"]:
                 bundle["review_report.md"] = findings_report_md(state).encode("utf-8")
+        # 被排除的内容不进译文文档，但必须在交付包里留下痕迹：否则"我排除了
+        # 12 段"会变成一次静默删除，用户在交付物上再也看不到它。
+        excluded_manifest = excluded_segments_manifest(state)
+        if excluded_manifest["count"]:
+            bundle["excluded_segments.md"] = _excluded_segments_md(
+                excluded_manifest).encode("utf-8")
+            bundle["excluded_segments.json"] = (
+                json.dumps(excluded_manifest, ensure_ascii=False, indent=2)
+                + "\n").encode("utf-8")
         if config["deliver_cases"]:
             selected_cases = load_academic_artifact(job_id, "selected_cases")
             if selected_cases:
@@ -5892,7 +8109,15 @@ def _delivery_asset_bundle(job_id, state, target_lang, provider, model):
     # Existing jobs without a saved selection retain their historical bundle.
     bundle = {}
     if state.get("p1_done") and state.get("paras"):
-        bundle["stage1_cleaned.docx"] = _bytes(paragraphs_to_word(state["paras"]))
+        # ``paras`` is the sentence-sized CAT contract; the stage-1 source
+        # artifact should retain the recovered paragraph layout when available.
+        cleaned_source = state.get("source_paragraphs") or state.get("paras")
+        bundle["stage1_cleaned.docx"] = _bytes(paragraphs_to_word(cleaned_source))
+    if state.get("source_cleanup_done"):
+        bundle["source_cleanup.json"] = (
+            json.dumps(state.get("source_cleanup") or {},
+                       ensure_ascii=False, indent=2) + "\n"
+        ).encode("utf-8")
     if state.get("auto_terms"):
         bundle["auto_terms.xlsx"] = _bytes(dict_to_excel(state["auto_terms"]))
     if state.get("p2_done") and state.get("pairs"):
@@ -5905,6 +8130,15 @@ def _delivery_asset_bundle(job_id, state, target_lang, provider, model):
     bundle.update(_assets.export_all(
         snapshot_state, job_id, target_lang, provider, model,
         source_filename=filename, source_bin=source))
+    # 旧任务没有保存过 delivery_config，但排除段仍然必须在交付包中
+    # 留下可追溯清单；否则历史任务会把排除误表现成静默删除。
+    excluded_manifest = excluded_segments_manifest(state)
+    if excluded_manifest["count"]:
+        bundle["excluded_segments.md"] = _excluded_segments_md(
+            excluded_manifest).encode("utf-8")
+        bundle["excluded_segments.json"] = (
+            json.dumps(excluded_manifest, ensure_ascii=False, indent=2)
+            + "\n").encode("utf-8")
     if state.get("p2_done"):
         bundle["segment_evidence.jsonl"] = _report_evidence.export_segment_evidence_jsonl(
             state, job_id).encode("utf-8")
@@ -5926,6 +8160,277 @@ def build_delivery_assets(job_id, state=None, target_lang="", provider="", model
         job_id, state, target_lang or state.get("target_lang") or "",
         provider or state.get("provider") or "",
         model or state.get("model") or "")
+
+
+def _reset_source_dependent_state(state):
+    """Invalidate artifacts derived from source paragraphs after cleanup."""
+    state.update({
+        "profile_done": False,
+        "document_profile": None,
+        "profile_warnings": [],
+        "semantic_units": [],
+        "section_digests": [],
+        "document_synopsis": None,
+        "understanding_done": False,
+        "understanding_warnings": [],
+        "context_packet_log": [],
+        "llm_usage": _usage.empty_usage(),
+        "knowledge_feedback_policy": {},
+        "targeted_final_review": {
+            "status": "not_run", "segment_ids": [],
+            "reviewed_segment_ids": [], "failed_segment_ids": [],
+        },
+        "knowledge_candidates": [],
+        "translation_continuity": [],
+        "knowledge_events": [],
+        "confirmed_style_rules": [],
+        "knowledge_feedback_failures": 0,
+        "entity_registry": [],
+        "translation_failures": [],
+        "review_evidence": [],
+        "repair_overlays": [],
+        "auto_term_entries": [],
+        "auto_terms": {},
+        "glossary": [],
+        "glossary_draft": [],
+        "glossary_frozen": None,
+        "glossary_versions": [],
+        "glossary_injection_log": [],
+        "pairs": [],
+        "findings": [],
+        "has_blocking": False,
+        "review_stats": {
+            "reviewed_segments": 0, "batches_reviewed": 0,
+            "blocking": 0, "actionable": 0,
+            "informational": 0, "review_failed": 0,
+        },
+        "p2_done": False,
+        "p3_done": False,
+        "p3_md": "",
+        "p3_sections": [],
+        "annotations": {},
+        "annotations_done": False,
+        "annotations_done_offset": 0,
+        "batch_plan": {},
+        "delivery_status": "draft",
+        "delivery_approved_by_human": False,
+        "delivery_approval": None,
+        "delivery_validation": {},
+        "delivery_snapshots": [],
+        "latest_delivery_snapshot_version": None,
+        "exported_assets": [],
+        "translation_truth": {
+            "authority": "CURRENT_TRANSLATION",
+            "version": 0,
+            "last_changed_at": None,
+            "last_change": None,
+        },
+        "source_quality_gate": {},
+    })
+
+
+def rescan_pdf_source(job_id, *, filename=None, provider, api_key, model,
+                      base_url=None, on_status=None, max_batch_chars=None,
+                      max_batch_items=None, parallelism=None, ocr_workers=None,
+                      ocr_queue_size=None, confidence_threshold=None,
+                      max_retries=None, request_interval_seconds=None,
+                      segmentation_mode=None,
+                      _allow_active=False):
+    """Re-extract and LLM-clean a saved PDF without running later stages.
+
+    This is the explicit "重新从 PDF 扫一遍" operation.  It deliberately
+    invalidates every artifact derived from the previous source text, including
+    partial translation pairs, so the next resume cannot pair old translations
+    with newly merged or corrected source paragraphs.
+    """
+    if not str(job_id or "").strip():
+        raise ValueError("缺少任务 ID")
+    if not _allow_active and (is_job_worker_alive(job_id) or job_is_active(job_id)):
+        raise RuntimeError("任务正在运行，无法重新扫描原文")
+    state = load_job_state(job_id)
+    if state is None:
+        raise ValueError(f"找不到任务 {job_id}")
+    resolved_filename = str(filename or state.get("filename") or "")
+    if not resolved_filename.lower().endswith(".pdf"):
+        raise ValueError("原文重新扫描只支持 PDF 任务")
+    source = load_source(job_id)
+    if source is None:
+        raise ValueError("任务没有已保存的 PDF 源文件，请重新上传后再试")
+
+    previous_pairs = len(state.get("pairs") or [])
+    previous_paragraphs = len(state.get("paras") or [])
+    old_base_url = getattr(_LLM_CTX, "base_url", None)
+    effective_cleanup_base_url = base_url if base_url is not None else old_base_url
+    saved_config = state.get("pipeline_config") or {}
+    effective_parallelism = _runtime_int_option(
+        parallelism, saved_config.get("source_cleanup_concurrency"),
+        "FOLIOTHREAD_LLM_CLEANUP_CONCURRENCY",
+        _source_cleanup.DEFAULT_PARALLELISM, maximum=16)
+    effective_ocr_workers = _runtime_int_option(
+        ocr_workers, saved_config.get("ocr_workers"), "FOLIOTHREAD_OCR_WORKERS",
+        OCR_WORKERS_DEFAULT, maximum=8)
+    effective_ocr_queue_size = _runtime_int_option(
+        ocr_queue_size, saved_config.get("ocr_queue_size"),
+        "FOLIOTHREAD_OCR_QUEUE_SIZE", effective_ocr_workers * 2, maximum=32)
+    effective_confidence_threshold = _runtime_float_option(
+        confidence_threshold, saved_config.get("source_cleanup_confidence_threshold"),
+        "FOLIOTHREAD_OCR_CONFIDENCE_THRESHOLD",
+        OCR_CONFIDENCE_THRESHOLD_DEFAULT, maximum=100.0)
+    effective_max_retries = _runtime_int_option(
+        max_retries, saved_config.get("source_cleanup_max_retries"),
+        "FOLIOTHREAD_LLM_CLEANUP_MAX_RETRIES",
+        _source_cleanup.DEFAULT_MAX_RETRIES, minimum=0, maximum=6)
+    effective_request_interval = _runtime_float_option(
+        request_interval_seconds, saved_config.get("source_cleanup_request_interval"),
+        "FOLIOTHREAD_LLM_CLEANUP_REQUEST_INTERVAL", 0.0, maximum=60.0)
+    profiler = PipelineProfiler(
+        job_dir(job_id) / "performance.json", run_id=uuid.uuid4().hex
+    )
+
+    def report(label):
+        if on_status:
+            on_status(label)
+        # A direct invocation has no worker thread, so mirror the same durable
+        # progress surface that the normal worker provides.
+        _runtime_status_callback(job_id, state, label)
+
+    update_runtime_state(
+        job_id, status="running", phase="source_cleanup",
+        stage="document_processing", stage_id="document_processing",
+        operation="source_cleanup", operation_id="source_cleanup",
+        operation_label="重新扫描 PDF 原文", phase_label="正在扫描并纠错原文",
+        cancel_requested=False, error=None, progress=True,
+        event="开始重新扫描 PDF 原文", event_name="source_rescan_started",
+        event_visibility="user", event_category="progress")
+    set_llm_base_url(effective_cleanup_base_url)
+    try:
+        report("【阶段一】重新从 PDF 提取原文…")
+        raw_paragraphs, extraction_warnings, extraction_report = \
+            extract_document_paragraphs_with_report(
+                resolved_filename, source, ocr_max_pages=None, on_progress=report,
+                profiler=profiler, checkpoint_dir=job_dir(job_id),
+                ocr_workers=effective_ocr_workers,
+                ocr_queue_size=effective_ocr_queue_size,
+                cancel_check=lambda: _runtime_cancel_requested(job_id))
+        if not raw_paragraphs:
+            detail = extraction_warnings[-1] if extraction_warnings else "未知提取错误"
+            raise ValueError(f"未提取到有效文本：{detail}")
+
+        report("【阶段一】使用最新纠错功能整理 OCR 错字与断行…")
+        inherited_job_id = getattr(_RUNTIME_CTX, "job_id", None)
+        inherited_reasoning = getattr(_LLM_CTX, "reasoning_effort", None)
+
+        def cleanup_call(provider_name, api_key_value, model_name,
+                         system_prompt, user_prompt, **kwargs):
+            if inherited_job_id:
+                _RUNTIME_CTX.job_id = inherited_job_id
+            inherited_kwargs = {}
+            if effective_cleanup_base_url:
+                inherited_kwargs["base_url"] = effective_cleanup_base_url
+            if inherited_reasoning:
+                inherited_kwargs["reasoning_effort"] = inherited_reasoning
+            return call_llm(
+                provider_name, api_key_value, model_name, system_prompt,
+                user_prompt, **inherited_kwargs, **kwargs)
+        cleaned, cleanup_meta, cleanup_warnings = cleanup_source_paragraphs(
+            raw_paragraphs, provider, api_key, model, call_llm_fn=cleanup_call,
+            on_progress=report, max_batch_chars=max_batch_chars,
+            max_batch_items=max_batch_items, parallelism=effective_parallelism,
+            confidence_by_index=((extraction_report.get("ocr") or {}).get(
+                "paragraph_confidences") if isinstance(extraction_report, dict) else None),
+            confidence_threshold=effective_confidence_threshold,
+            checkpoint_dir=job_dir(job_id),
+            cancel_check=lambda: _runtime_cancel_requested(job_id),
+            max_retries=effective_max_retries,
+            request_interval_seconds=effective_request_interval,
+            profiler=profiler)
+        cleanup_meta = dict(cleanup_meta or {})
+        segments, segmentation_meta = _apply_source_segmentation(
+            state, cleaned, mode=segmentation_mode)
+        cleanup_meta.update({
+            "forced_rescan": True,
+            "previous_pair_count": previous_pairs,
+            "previous_paragraph_count": previous_paragraphs,
+            "extraction_warning_count": len(extraction_warnings),
+            "parallelism": effective_parallelism,
+            "confidence_threshold": effective_confidence_threshold,
+            "ocr_workers": effective_ocr_workers,
+            "ocr_queue_size": effective_ocr_queue_size,
+            "max_batch_chars": max_batch_chars,
+            "max_batch_items": max_batch_items,
+            "paragraph_count": len(cleaned),
+            "segment_count": len(segments),
+        })
+
+        warnings = state.setdefault("warnings", [])
+        for warning in extraction_warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+            _append_runtime_technical_log(job_id, f"document extraction: {warning}")
+        for warning in cleanup_warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+            _append_runtime_technical_log(job_id, f"source cleanup: {warning}")
+
+        _reset_source_dependent_state(state)
+        state.update({
+            "filename": resolved_filename,
+            "source_paras": list(raw_paragraphs),
+            "paras": list(segments),
+            "source_cleanup": cleanup_meta,
+            "source_cleanup_done": True,
+            "segmentation": segmentation_meta,
+            "extraction_report": extraction_report,
+            "source_quality_gate": audit_source_quality(segments),
+            "p1_done": True,
+            "source_page_count": 0,
+        })
+        try:
+            with fitz.open(stream=source, filetype="pdf") as source_pdf:
+                state["source_page_count"] = source_pdf.page_count
+        except Exception as exc:  # noqa: BLE001 - extraction already succeeded
+            _append_runtime_technical_log(job_id, f"source page count: {exc}")
+        pipeline_config = state.get("pipeline_config")
+        if isinstance(pipeline_config, dict):
+            pipeline_config["enable_source_cleanup"] = True
+        save_source(job_id, source)
+        state["performance"] = profiler.persist()
+        save_job_state(job_id, state)
+        update_runtime_state(
+            job_id, status="idle_incomplete", phase="idle_incomplete",
+            phase_label="原文纠错已完成，等待继续翻译", operation="source_cleanup",
+            operation_id="source_cleanup", operation_label="原文纠错已完成",
+            error=None, progress=True, heartbeat=True,
+            event=(f"原文重新扫描完成：{len(raw_paragraphs)} 项提取为 "
+                   f"{len(cleaned)} 段、{len(segments)} 个翻译单元，修复 "
+                   f"{len(cleanup_meta.get('changed_segments') or [])} 项"),
+            event_name="source_rescan_completed", event_visibility="user",
+            event_category="progress",
+            worker={"owner_pid": None, "worker_id": None,
+                    "lease_expires_at": None})
+        return state
+    except BaseException as exc:
+        _write_runtime_technical_log(job_id, exc)
+        provider_status = provider_error_status(exc)
+        user_error_message = (
+            provider_error_message(exc, "原文重新扫描失败")
+            if provider_status["status"] != "unknown"
+            else str(exc)[:500] or "原文重新扫描失败")
+        update_runtime_state(
+            job_id, status="failed", phase="failed", phase_label="原文重新扫描失败",
+            error={"type": type(exc).__name__, "message": user_error_message,
+                   "stage": "document_processing", "operation": "source_cleanup",
+                   "timestamp": _utc_now_iso(),
+                   "technical_log": RUNTIME_TECHNICAL_LOG},
+            event=f"原文重新扫描失败：{user_error_message[:180]}",
+            event_name="source_rescan_failed", event_visibility="user",
+            event_category="error", progress=True, heartbeat=True,
+            worker={"owner_pid": None, "worker_id": None,
+                    "lease_expires_at": None})
+        raise
+    finally:
+        profiler.persist()
+        set_llm_base_url(old_base_url)
 
 
 def create_delivery_snapshot(job_id, state, target_lang="", provider="", model=""):
@@ -6485,7 +8990,7 @@ def review_knowledge_candidate(job_id, candidate_id, decision, actor="user"):
                 "note": "由人工从翻译流知识候选提升为项目术语",
                 "evidence": [{
                     "evidence_type": "user",
-                    "source_name": "FolioThread 知识候选",
+                    "source_name": "译页知识候选",
                     "note": f"来自第 {(context['first_observed_segment'] + 1) if context['first_observed_segment'] is not None else '?'} 段的人工确认",
                     "quote": context["source_context"],
                     "url": "",
@@ -6670,6 +9175,11 @@ def set_entity_translation(job_id, source_form, target, *, entity_type="other_pr
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "actor": actor,
     })
+    if state.get("p2_done"):
+        state["targeted_final_review"] = {
+            "status": "not_run", "segment_ids": [],
+            "reviewed_segment_ids": [], "failed_segment_ids": [],
+        }
     if (state.get("delivery_status") in ("approved", "final")
             or state.get("delivery_approved_by_human")):
         _invalidate_final_delivery_state(state)
@@ -6789,11 +9299,58 @@ def decide_translation_review_finding(
     return state, updated, record
 
 
+def _targeted_final_review_ids(state, limit=8):
+    """Select a small, stable set of segments for the whole-book recheck.
+
+    Batch review already covers ordinary semantic issues.  The final pass is
+    reserved for risks that only become visible after all pairs are present:
+    entity drift, locked-term conflicts, and low-authority knowledge conflicts.
+    Resolved findings are deliberately excluded so a human decision is not
+    reopened by a later resume.
+    """
+    pairs = state.get("pairs") or []
+    if not pairs:
+        return []
+    severity_rank = {"blocking": 0, "actionable": 1, "informational": 2}
+    selected = {}
+    for finding in state.get("findings") or []:
+        if not isinstance(finding, dict) or finding.get("resolved"):
+            continue
+        finding_type = str(finding.get("type") or "").strip().lower()
+        category = str(finding.get("category") or "").strip().lower()
+        is_global_consistency_risk = (
+            finding_type in {"knowledge_conflict", "entity_conflict"}
+            or (finding_type == "glossary" and finding.get("conflict"))
+            or (finding.get("conflict") and category == "terminology_consistency")
+        )
+        if not is_global_consistency_risk:
+            continue
+        raw_index = finding.get("segment_id", finding.get("segment_index"))
+        try:
+            segment_id = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(raw_index, bool) or not 0 <= segment_id < len(pairs):
+            continue
+        score = severity_rank.get(str(finding.get("severity") or ""), 3)
+        previous = selected.get(segment_id)
+        if previous is None or score < previous:
+            selected[segment_id] = score
+    bounded_limit = max(0, int(limit or 0))
+    return [segment_id for segment_id, _score in sorted(
+        selected.items(), key=lambda item: (item[1], item[0]))[:bounded_limit]]
+
+
 def review_translation_segments(
     job_id, indexes, provider, api_key, model, target_lang, *, style_rules="",
-    call_llm_fn=None, base_url=None,
+    call_llm_fn=None, base_url=None, review_focus="", focus_findings=None,
 ):
-    """Run the existing independent reviewer on current persisted segments."""
+    """Run the existing independent reviewer on current persisted segments.
+
+    ``review_focus`` and ``focus_findings`` are optional context for the
+    post-translation whole-book pass.  They do not change the normal manual
+    refresh path and keep the global conflict visible to the reviewer.
+    """
     from transpraxis import delivery as _delivery
     from transpraxis.terminology import (
         glossary_block as _glossary_block,
@@ -6834,6 +9391,21 @@ def review_translation_segments(
             section_profile=section_profile), segment_id)
         review_context = _runtime_review_context(
             state, segment_id, 1, glossary_text, style_rules, target_lang)
+        if review_focus:
+            risk_items = [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "segment_id", "type", "category", "severity", "reason",
+                        "source", "preferred_target", "observed_target",
+                        "observed_targets",
+                    ) if item.get(key) is not None
+                } for item in (focus_findings or [])
+                if isinstance(item, dict)
+                and item.get("segment_id", item.get("segment_index")) == segment_id
+            ][:4]
+            review_context["review_focus"] = str(review_focus)
+            review_context["whole_book_consistency_risks"] = risk_items
         packet = _translation_evidence.build_runtime_review_packet(
             state, [pair], [segment_id], glossary,
             deterministic_checks=deterministic, review_context=review_context)
@@ -6855,12 +9427,18 @@ def review_translation_segments(
         state.setdefault("findings", []).extend(records)
         _translation_evidence.register_runtime_review_event(
             state, trace, records, event_id, [segment_id])
+        focus_risk_present = bool(review_focus and any(
+            isinstance(item, dict)
+            and item.get("segment_id", item.get("segment_index")) == segment_id
+            and not item.get("resolved")
+            for item in (focus_findings or [])))
         if failed:
             failed_ids.append(segment_id)
             pair["reviewed"] = False
             pair["review_status"] = "review_failed"
-        elif not any(item.get("severity") in {"blocking", "actionable"}
-                     for item in [*deterministic, *records]):
+        elif not focus_risk_present and not any(
+                item.get("severity") in {"blocking", "actionable"}
+                for item in [*deterministic, *records]):
             reviewed.append(segment_id)
             pair["reviewed"] = True
             pair["review_status"] = "reviewed_clean"
@@ -6875,6 +9453,7 @@ def review_translation_segments(
         _checkpoint.append_event(job_dir(job_id), {
             "phase": "semantic_review_done", "segment_ids": [segment_id],
             "refresh": True, "failed": failed,
+            **({"review_focus": str(review_focus)} if review_focus else {}),
         })
     if tm_changed:
         save_tm(tm, tm_project_id(state))
@@ -6893,6 +9472,107 @@ def review_translation_segments(
         "reviewed_segment_ids": reviewed,
         "failed_segment_ids": failed_ids,
     }
+
+
+def _run_targeted_final_review(
+    job_id, state, reviewer_config, target_lang, style_rules, *,
+    enable_review=True, on_status=None,
+):
+    """Run the bounded whole-book consistency pass once per translation.
+
+    The existing segment reviewer is reused so evidence, review events and
+    delivery gates remain on one path.  The usage ledger lives on the caller's
+    state object; the review helper reloads state from disk, so it is merged
+    back explicitly after the call to avoid losing the newly recorded usage.
+    """
+    record = state.get("targeted_final_review") or {}
+    if record.get("status") in {"completed", "skipped"}:
+        return state
+    if not enable_review:
+        state["targeted_final_review"] = {
+            "status": "skipped", "reason": "review_disabled",
+            "segment_ids": [], "reviewed_segment_ids": [],
+            "failed_segment_ids": [],
+        }
+        save_job_state(job_id, state)
+        return state
+    segment_ids = _targeted_final_review_ids(state)
+    if not segment_ids:
+        state["targeted_final_review"] = {
+            "status": "skipped", "reason": "no_cross_book_risk",
+            "segment_ids": [], "reviewed_segment_ids": [],
+            "failed_segment_ids": [],
+        }
+        save_job_state(job_id, state)
+        return state
+    if on_status:
+        on_status(f"【阶段二终检】全书一致性定向复核（{len(segment_ids)} 段）...")
+    focus_findings = []
+    selected = set(segment_ids)
+    for finding in state.get("findings") or []:
+        if not isinstance(finding, dict) or finding.get("resolved"):
+            continue
+        raw_index = finding.get("segment_id", finding.get("segment_index"))
+        try:
+            segment_id = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(raw_index, bool) or segment_id not in selected:
+            continue
+        item = {
+            key: finding.get(key)
+            for key in (
+                "segment_id", "type", "category", "severity", "reason",
+                "source", "preferred_target", "observed_target", "observed_targets",
+            ) if finding.get(key) is not None
+        }
+        item["segment_id"] = segment_id
+        focus_findings.append(item)
+    state.setdefault("llm_usage", _usage.empty_usage())
+    final_review_call = _model_roles.make_role_call(
+        _usage.tracked_call(
+            call_llm, state["llm_usage"], role="targeted_final_review"),
+        reviewer_config)
+    try:
+        reviewed_state, result = review_translation_segments(
+            job_id, segment_ids, reviewer_config["provider"],
+            reviewer_config["api_key"], reviewer_config["model"], target_lang,
+            style_rules=style_rules, call_llm_fn=final_review_call,
+            base_url=reviewer_config.get("base_url"),
+            review_focus="whole_book_consistency",
+            focus_findings=focus_findings,
+        )
+        # review_translation_segments reloads and saves its own state.  Carry
+        # over the in-memory ledger mutated by the tracked call wrapper.
+        reviewed_state["llm_usage"] = state["llm_usage"]
+        reviewed_ids = list(result.get("reviewed_segment_ids") or [])
+        failed_ids = list(result.get("failed_segment_ids") or [])
+        final_status = "failed" if failed_ids else "completed"
+        reviewed_state["targeted_final_review"] = {
+            "status": final_status,
+            "segment_ids": list(segment_ids),
+            "reviewed_segment_ids": reviewed_ids,
+            "failed_segment_ids": failed_ids,
+        }
+        if failed_ids:
+            warning = f"全书一致性定向复核有 {len(failed_ids)} 段未完成"
+            warnings = reviewed_state.setdefault("warnings", [])
+            if warning not in warnings:
+                warnings.append(warning)
+        save_job_state(job_id, reviewed_state)
+        return reviewed_state
+    except Exception as exc:
+        state["targeted_final_review"] = {
+            "status": "failed", "segment_ids": list(segment_ids),
+            "reviewed_segment_ids": [], "failed_segment_ids": list(segment_ids),
+            "error": str(exc)[:240],
+        }
+        warning = f"全书一致性定向复核失败：{str(exc)[:200]}"
+        warnings = state.setdefault("warnings", [])
+        if warning not in warnings:
+            warnings.append(warning)
+        save_job_state(job_id, state)
+        return state
 
 
 def mark_findings_resolved(job_id, finding_ids, action, note="", actor="user"):
@@ -7179,18 +9859,104 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
                      enable_understanding=None, reviewer_provider=None,
                      reviewer_api_key=None, reviewer_model=None,
                      reviewer_base_url=None, translator_base_url=None,
+                     auxiliary_provider=None, auxiliary_api_key=None,
+                     auxiliary_model=None, auxiliary_base_url=None,
+                     knowledge_feedback_interval=None,
+                     enable_source_cleanup=None,
+                     reasoning_effort=None, source_cleanup_concurrency=None,
+                     ocr_workers=None, ocr_queue_size=None,
+                     source_cleanup_confidence_threshold=None,
+                     source_cleanup_max_retries=None,
+                     source_cleanup_request_interval=None,
+                     segmentation_mode=None,
                      on_status=None, on_caption=None):
     """执行单个文档的完整流程；每个里程碑实时落盘，刷新/重启后均可继续。
 
     strict_terminology_governance=True：翻译前建立文档画像，并要求自动候选
     术语完成审核/冻结。导入的锁定术语视为已固定，不会阻塞翻译。
     ``mode`` 仅保留给旧调用方；quality 映射到严格术语治理，quick 映射到关闭。
+    ``auxiliary_*`` 可把画像、摘要、术语抽取与连续性观察路由到较低成本模型；
+    不提供时沿用正文模型。``knowledge_feedback_interval`` 仅控制普通模式的
+    批后连续性观察频率，严格审校模式仍逐批观察。
     """
     _ensure_output_dir()
+    if translator_base_url is not None:
+        set_llm_base_url(translator_base_url)
+    set_llm_reasoning_effort(reasoning_effort)
     base = new_job_state(filename)
     state = load_job_state(job_id) or base
     state = {**base, **state}  # 兼容旧版本状态缺字段
     state = _state_migration.migrate_state(state)
+    effective_segmentation_mode = _source_segmentation_mode(
+        state, segmentation_mode)
+    previous_performance = state.get("performance")
+    saved_runtime_config = state.get("pipeline_config") or {}
+    effective_cleanup_concurrency = _runtime_int_option(
+        source_cleanup_concurrency,
+        saved_runtime_config.get("source_cleanup_concurrency"),
+        "FOLIOTHREAD_LLM_CLEANUP_CONCURRENCY",
+        _source_cleanup.DEFAULT_PARALLELISM, maximum=16)
+    effective_ocr_workers = _runtime_int_option(
+        ocr_workers, saved_runtime_config.get("ocr_workers"),
+        "FOLIOTHREAD_OCR_WORKERS", OCR_WORKERS_DEFAULT, maximum=8)
+    effective_ocr_queue_size = _runtime_int_option(
+        ocr_queue_size, saved_runtime_config.get("ocr_queue_size"),
+        "FOLIOTHREAD_OCR_QUEUE_SIZE", effective_ocr_workers * 2, maximum=32)
+    effective_cleanup_confidence_threshold = _runtime_float_option(
+        source_cleanup_confidence_threshold,
+        saved_runtime_config.get("source_cleanup_confidence_threshold"),
+        "FOLIOTHREAD_OCR_CONFIDENCE_THRESHOLD",
+        OCR_CONFIDENCE_THRESHOLD_DEFAULT, maximum=100.0)
+    effective_cleanup_max_retries = _runtime_int_option(
+        source_cleanup_max_retries,
+        saved_runtime_config.get("source_cleanup_max_retries"),
+        "FOLIOTHREAD_LLM_CLEANUP_MAX_RETRIES",
+        _source_cleanup.DEFAULT_MAX_RETRIES, minimum=0, maximum=6)
+    effective_cleanup_request_interval = _runtime_float_option(
+        source_cleanup_request_interval,
+        saved_runtime_config.get("source_cleanup_request_interval"),
+        "FOLIOTHREAD_LLM_CLEANUP_REQUEST_INTERVAL", 0.0, maximum=60.0)
+    profiler = PipelineProfiler(
+        job_dir(job_id) / "performance.json", run_id=uuid.uuid4().hex
+    )
+
+    def persist_performance():
+        # Resuming a task after ingestion must not replace a useful prior
+        # timing artifact with an empty run merely because later translation
+        # stages do not touch the PDF profiler.
+        if (isinstance(previous_performance, dict)
+                and previous_performance.get("stages")
+                and not profiler.snapshot().get("stages")):
+            return previous_performance
+        return profiler.persist()
+
+    # An explicit UI-triggered source rescan is a checkpoint-only operation:
+    # it must not fall through into profiling, terminology, or translation in
+    # the same worker turn.  The request is persisted before the worker starts
+    # so a browser refresh cannot lose the intent.
+    if state.get("source_rescan_requested"):
+        options = state.pop("source_rescan_options", {})
+        state.pop("source_rescan_requested", None)
+        save_job_state(job_id, state)
+        return rescan_pdf_source(
+            job_id, filename=filename, provider=provider, api_key=api_key,
+            model=model, base_url=translator_base_url, on_status=on_status,
+            max_batch_chars=(options.get("max_batch_chars")
+                             if isinstance(options, dict) else None),
+            max_batch_items=(options.get("max_batch_items")
+                             if isinstance(options, dict) else None),
+            parallelism=(options.get("parallelism", effective_cleanup_concurrency)
+                         if isinstance(options, dict) else effective_cleanup_concurrency),
+            ocr_workers=(options.get("ocr_workers") if isinstance(options, dict) else None),
+            ocr_queue_size=(options.get("ocr_queue_size") if isinstance(options, dict) else None),
+            confidence_threshold=(options.get("confidence_threshold")
+                                  if isinstance(options, dict) else None),
+            max_retries=(options.get("max_retries") if isinstance(options, dict) else None),
+            request_interval_seconds=(options.get("request_interval_seconds")
+                                      if isinstance(options, dict) else None),
+            segmentation_mode=(options.get("segmentation_mode", segmentation_mode)
+                               if isinstance(options, dict) else segmentation_mode),
+            _allow_active=True)
 
     # ---- 项目记忆注入（蓝图 §3.2 的跨任务复用）----
     # 必须在 state/pipeline_config 定型之前完成，否则 state["style_rules"] 与
@@ -7221,6 +9987,9 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
         if state.get("p2_done") else bool(enable_review)
     saved_understanding = (state.get("pipeline_config") or {}).get(
         "enable_understanding")
+    saved_source_cleanup = (state.get("pipeline_config") or {}).get(
+        "enable_source_cleanup")
+    is_pdf_for_config = str(filename or state.get("filename") or "").lower().endswith(".pdf")
     if mode is not None:
         strict_terminology_governance = mode == "quality"
     translator_config = _model_roles.normalize_role_config(
@@ -7232,6 +10001,16 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
             "model": reviewer_model,
             "api_key": reviewer_api_key,
             "base_url": reviewer_base_url,
+        },
+        fallback_provider=provider, fallback_model=model,
+        fallback_api_key=api_key)
+    saved_auxiliary = state.get("auxiliary_config") or {}
+    auxiliary_config = _model_roles.normalize_role_config(
+        {
+            "provider": auxiliary_provider or saved_auxiliary.get("provider"),
+            "model": auxiliary_model or saved_auxiliary.get("model"),
+            "api_key": auxiliary_api_key,
+            "base_url": auxiliary_base_url or saved_auxiliary.get("base_url"),
         },
         fallback_provider=provider, fallback_model=model,
         fallback_api_key=api_key)
@@ -7250,10 +10029,33 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
         "batch_size": int(batch_size or BATCH_SIZE),
         "max_batch_chars": int(max_batch_chars or TRANSLATION_MAX_BATCH_CHARS),
         "enable_understanding": enable_understanding,
+        "reasoning_effort": (str(reasoning_effort or "").strip().lower()
+                              if str(reasoning_effort or "").strip().lower()
+                              in _REASONING_EFFORT_VALUES else ""),
         "translator": _model_roles.public_role_config(translator_config),
         "reviewer": _model_roles.public_role_config(reviewer_config),
     }
+    # Auxiliary work (profile, synopsis, glossary observation) can use a
+    # cheaper model without changing the authoritative translator/reviewer.
+    # Keep this outside the historical pipeline_config shape unless explicitly
+    # configured, so old task snapshots remain byte-for-byte compatible.
+    auxiliary_explicit = any(
+        value is not None and str(value).strip()
+        for value in (auxiliary_provider, auxiliary_model, auxiliary_base_url)
+    )
+    if auxiliary_explicit or saved_auxiliary:
+        state["auxiliary_config"] = _model_roles.public_role_config(auxiliary_config)
+    if knowledge_feedback_interval is not None:
+        try:
+            normalized_feedback_interval = max(1, int(knowledge_feedback_interval))
+        except (TypeError, ValueError):
+            normalized_feedback_interval = 1
+        pipeline_config["knowledge_feedback_interval"] = normalized_feedback_interval
     state["pipeline_config"] = pipeline_config
+    state.setdefault("llm_usage", _usage.empty_usage())
+    auxiliary_call = _model_roles.make_role_call(
+        _usage.tracked_call(call_llm, state["llm_usage"], role="auxiliary"),
+        auxiliary_config)
     state.update(
         target_lang=target_lang, auto_term_enabled=bool(auto_term),
         report_enabled=bool(enable_report), theory=translation_theory,
@@ -7293,9 +10095,36 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
         else:
             # New tasks: Quick skips it; Standard and Academic keep it enabled.
             enable_understanding = mode != "quick"
+    if enable_source_cleanup is None:
+        if isinstance(saved_source_cleanup, bool):
+            enable_source_cleanup = saved_source_cleanup
+        else:
+            enable_source_cleanup = str(filename or "").lower().endswith(".pdf")
     pipeline_config["enable_understanding"] = bool(enable_understanding)
+    # Source cleanup is automatically enabled for PDF jobs.  Persist the key
+    # only for PDF tasks (or an explicit opt-in) so legacy DOCX pipeline
+    # configurations retain their stable shape.
+    if is_pdf_for_config or enable_source_cleanup:
+        pipeline_config["enable_source_cleanup"] = bool(enable_source_cleanup)
+        pipeline_config.update({
+            "source_cleanup_concurrency": effective_cleanup_concurrency,
+            "ocr_workers": effective_ocr_workers,
+            "ocr_queue_size": effective_ocr_queue_size,
+            "source_cleanup_confidence_threshold": effective_cleanup_confidence_threshold,
+            "source_cleanup_max_retries": effective_cleanup_max_retries,
+            "source_cleanup_request_interval": effective_cleanup_request_interval,
+        })
+    else:
+        pipeline_config.pop("enable_source_cleanup", None)
     state["pipeline_config"] = pipeline_config
     state["quality_mode"] = bool(strict_terminology_governance)
+    # Persist the selected mode before extraction starts.  If the worker is
+    # cancelled while rasterizing/OCRing, the resumed call keeps the same CAT
+    # contract even when the process environment or UI defaults changed.
+    if (not state.get("p1_done")
+            or (not state.get("source_cleanup_done")
+                and not (state.get("segmentation") or {}).get("mode"))):
+        state.setdefault("segmentation", {})["mode"] = effective_segmentation_mode
     warnings = state.setdefault("warnings", [])
 
     if enable_report:
@@ -7311,10 +10140,73 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
     if stale_segs:
         save_job_state(job_id, state)
 
+    # Legacy PDF tasks created before the source-cleanup checkpoint may already
+    # have partial translation pairs.  Re-run the source stage once before
+    # continuing, then invalidate every artifact derived from the old text so
+    # translations cannot be silently paired with corrected source segments.
+    is_pdf = str(filename or state.get("filename") or "").lower().endswith(".pdf")
+    if (state.get("p1_done") and not state.get("source_cleanup_done")
+            and is_pdf and enable_source_cleanup and not state.get("p2_done")):
+        legacy_source = list(state.get("source_paras") or state.get("paras") or [])
+        legacy_segments = list(state.get("paras") or [])
+        if legacy_source:
+            if on_status:
+                on_status("【阶段一】恢复 LLM 原文纠错与断行整理…")
+            cleaned, cleanup_meta, cleanup_warnings = cleanup_source_paragraphs(
+                legacy_source, provider, api_key, model,
+                on_progress=on_status,
+                parallelism=effective_cleanup_concurrency,
+                confidence_threshold=effective_cleanup_confidence_threshold,
+                checkpoint_dir=job_dir(job_id),
+                cancel_check=lambda: _runtime_cancel_requested(job_id),
+                max_retries=effective_cleanup_max_retries,
+                request_interval_seconds=effective_cleanup_request_interval,
+                profiler=profiler)
+            segments, segmentation_meta = _apply_source_segmentation(
+                state, cleaned, mode=effective_segmentation_mode)
+            state["source_paras"] = legacy_source
+            state["paras"] = segments
+            state["segmentation"] = segmentation_meta
+            state["source_cleanup"] = cleanup_meta
+            state["source_cleanup_done"] = True
+            state["source_quality_gate"] = audit_source_quality(segments)
+            cleanup_meta.update({
+                "paragraph_count": len(cleaned),
+                "segment_count": len(segments),
+            })
+            for warning in cleanup_warnings:
+                if warning not in warnings:
+                    warnings.append(warning)
+                _append_runtime_technical_log(job_id, f"source cleanup: {warning}")
+            # A sentence split changes the positional source/pair contract even
+            # when the OCR cleanup text itself is byte-for-byte unchanged.
+            if cleaned != legacy_source or segments != legacy_segments:
+                cleanup_meta["previous_pair_count"] = len(state.get("pairs") or [])
+                _reset_source_dependent_state(state)
+                state["paras"] = segments
+                state["source_paras"] = legacy_source
+                state["source_paragraphs"] = list(cleaned)
+                state["segmentation"] = segmentation_meta
+                state["source_cleanup"] = cleanup_meta
+                state["source_cleanup_done"] = True
+                state["source_quality_gate"] = audit_source_quality(segments)
+            state["p1_done"] = True
+            save_job_state(job_id, state)
+
+    # Whole-book consistency review is a post-translation checkpoint.  Run it
+    # before the completed-task fast path as well, so older jobs that already
+    # have p2_done can receive the upgrade once without repeating it later.
+    if state.get("p2_done"):
+        state = _run_targeted_final_review(
+            job_id, state, reviewer_config, target_lang, style_rules,
+            enable_review=enable_review, on_status=on_status)
+
     # 全部完成 -> 直接返回
     if state["p1_done"] and state["p2_done"] and (not enable_report or state["p3_done"]) \
             and (not enable_annotate or state.get("annotations_done")):
         state["stage"] = _state_migration.derive_stage(state)
+        state["performance"] = persist_performance()
+        save_job_state(job_id, state)
         return state
 
     # ---------------- 阶段一：排版清洗 ----------------
@@ -7326,25 +10218,100 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
         if file_bytes is None:
             raise ValueError("缺少源文件，请重新上传后再继续")
 
-        paragraphs = []
-        if filename.lower().endswith(".pdf"):
-            paragraphs = [clean_xml_chars(p) for p in extract_pdf_paragraphs(file_bytes)]
-        elif filename.lower().endswith(".docx"):
-            doc_word = Document(io.BytesIO(file_bytes))
-            for p in doc_word.paragraphs:
-                for sub_p in re.split(r'\n+', clean_xml_chars(p.text)):
-                    t = sub_p.strip()
-                    if len(t) > 1 and not _ORNAMENT_RE.match(t):
-                        paragraphs.append(t)
+        # One extraction path for every format: the same call that produces the
+        # paragraphs also produces the import-scope report, so a DOCX table can
+        # never be dropped silently just because the pipeline took a shortcut.
+        paragraphs, extraction_warnings, extraction_report = \
+            extract_document_paragraphs_with_report(
+                filename, file_bytes, ocr_max_pages=None, on_progress=on_status,
+                profiler=profiler, checkpoint_dir=job_dir(job_id),
+                ocr_workers=effective_ocr_workers,
+                ocr_queue_size=effective_ocr_queue_size,
+                cancel_check=lambda: _runtime_cancel_requested(job_id))
 
+        raw_paragraphs = list(paragraphs)
+        # Persist the extraction boundary before remote cleanup starts.  If the
+        # process is cancelled while waiting for a model, OCR pages and cleanup
+        # batches can resume from their own checkpoints without losing the raw
+        # source audit trail.
+        state["source_paras"] = raw_paragraphs
+        state["extraction_report"] = extraction_report
+        save_job_state(job_id, state)
+        cleanup_meta = {
+            "status": "skipped",
+            "input_count": len(raw_paragraphs),
+            "output_count": len(raw_paragraphs),
+        }
+        cleanup_warnings = []
+        if filename.lower().endswith(".pdf") and enable_source_cleanup and paragraphs:
+            if on_status:
+                on_status("【阶段一】LLM 原文纠错与断行整理…")
+            paragraphs, cleanup_meta, cleanup_warnings = cleanup_source_paragraphs(
+                raw_paragraphs, provider, api_key, model,
+                on_progress=on_status,
+                parallelism=effective_cleanup_concurrency,
+                confidence_by_index=((extraction_report.get("ocr") or {}).get(
+                    "paragraph_confidences") if isinstance(extraction_report, dict) else None),
+                confidence_threshold=effective_cleanup_confidence_threshold,
+                checkpoint_dir=job_dir(job_id),
+                cancel_check=lambda: _runtime_cancel_requested(job_id),
+                max_retries=effective_cleanup_max_retries,
+                request_interval_seconds=effective_cleanup_request_interval,
+                profiler=profiler)
+        elif profiler is not None:
+            profiler.skipped("deterministic_cleanup", metadata={"reason": "source_cleanup_disabled"})
+            profiler.skipped("llm_cleanup", metadata={"reason": "source_cleanup_disabled"})
+
+        for warning in extraction_warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+            _append_runtime_technical_log(job_id, f"document extraction: {warning}")
+        for warning in cleanup_warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+            _append_runtime_technical_log(job_id, f"source cleanup: {warning}")
         if not paragraphs:
-            raise ValueError("未提取到有效文本（若为扫描版 PDF，请先做 OCR 生成文本层）")
-        state["paras"] = paragraphs
+            save_job_state(job_id, state)
+            detail = extraction_warnings[-1] if extraction_warnings else "未知提取错误"
+            raise ValueError(f"未提取到有效文本：{detail}")
+        cleaned_paragraphs = list(paragraphs)
+        segments, segmentation_meta = _apply_source_segmentation(
+            state, cleaned_paragraphs, mode=effective_segmentation_mode)
+        state["source_cleanup"] = cleanup_meta
+        state["source_cleanup_done"] = True
+        state["source_cleanup"].update({
+            "paragraph_count": len(cleaned_paragraphs),
+            "segment_count": len(segments),
+        })
+        if on_status:
+            on_status(f"【阶段一】按句构建翻译单元（0/{len(segments)} 句）…")
+        segment_stage = profiler.start_stage(
+            "segment_build", concurrency=1, item_count=len(segments),
+            metadata={
+                "source": "cleaned_paragraphs",
+                "mode": segmentation_meta.get("mode"),
+                "paragraph_count": len(cleaned_paragraphs),
+            }
+        ) if profiler is not None else None
+        state["paras"] = segments
+        state["source_quality_gate"] = _audit_source_quality_for_state(state)
+        if segment_stage is not None:
+            for index in range(len(segments)):
+                segment_stage.item(index, segment_stage.started_monotonic,
+                                   metadata={"kind": "segment"})
+            segment_stage.finish(status="completed")
+        if on_status:
+            on_status(f"【阶段一】按句构建翻译单元（{len(segments)}/{len(segments)} 句）…")
         if filename.lower().endswith(".pdf"):
             with fitz.open(stream=file_bytes, filetype="pdf") as source_pdf:
                 state["source_page_count"] = source_pdf.page_count
         state["p1_done"] = True
         save_source(job_id, file_bytes)  # 留存源文件，刷新后无需重新上传
+        for required_stage in ("pdf_classify", "layout_recovery", "rasterize", "ocr",
+                               "deterministic_cleanup", "llm_cleanup", "segment_build"):
+            if profiler.get(required_stage) is None:
+                profiler.skipped(required_stage, metadata={"reason": "not_applicable"})
+        state["performance"] = profiler.persist()
         save_job_state(job_id, state)
 
     # ---------------- 阶段 1.2：文档画像（长文理解；失败仅警告，不阻断） ----------------
@@ -7353,7 +10320,9 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
             on_status("【阶段1.2】文档画像（分布式采样 + 结构化校验）...")
         from transpraxis.document_profile import profile_document
         profile, profile_warnings = profile_document(
-            state["paras"], provider, api_key, model, target_lang)
+            state["paras"], auxiliary_config["provider"],
+            auxiliary_config["api_key"], auxiliary_config["model"], target_lang,
+            call_llm=auxiliary_call)
         state["document_profile"] = profile
         state["profile_done"] = True
         for w in profile_warnings:
@@ -7372,24 +10341,12 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
             on_status("【阶段1.3】全文语义理解（语义单元摘要 + 全文概要）...")
         if on_caption:
             on_caption("🧭 正在建立全文概要与当前单元摘要...")
-        understanding_call = call_llm
-        understanding_base_url = getattr(_LLM_CTX, "base_url", None)
-        if understanding_base_url:
-            def understanding_call(provider_name, api_key_value, model_name,
-                                   system_prompt, user_prompt, temperature=0.1):
-                try:
-                    return call_llm(
-                        provider_name, api_key_value, model_name, system_prompt,
-                        user_prompt, temperature=temperature,
-                        base_url=understanding_base_url)
-                except TypeError:
-                    return call_llm(provider_name, api_key_value, model_name,
-                                    system_prompt, user_prompt,
-                                    temperature=temperature)
+        understanding_call = auxiliary_call
         units, digests, synopsis, understanding_warnings = \
             _context.build_document_understanding(
-                state["paras"], state.get("document_profile"), provider, api_key,
-                model, target_lang, call_llm=understanding_call,
+                state["paras"], state.get("document_profile"),
+                auxiliary_config["provider"], auxiliary_config["api_key"],
+                auxiliary_config["model"], target_lang, call_llm=understanding_call,
                 checkpoint_dir=job_dir(job_id))
         state["semantic_units"] = units
         state["section_digests"] = digests
@@ -7414,8 +10371,10 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
             on_caption("🤖 正在从全文分布式样本中提取专业术语...")
         from transpraxis.terminology import extract_auto_terms_v2
         entries, extract_warnings = extract_auto_terms_v2(
-            state["paras"], target_lang, provider, api_key, model,
-            document_profile=state.get("document_profile"))
+            state["paras"], target_lang, auxiliary_config["provider"],
+            auxiliary_config["api_key"], auxiliary_config["model"],
+            document_profile=state.get("document_profile"),
+            call_llm=auxiliary_call)
         state["auto_term_entries"] = entries
         state["auto_terms"] = {e["source"]: e["target"] for e in entries}
         if entries:
@@ -7484,13 +10443,21 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
                         document_profile=state.get("document_profile"),
                         translator_config=translator_config,
                         reviewer_config=reviewer_config,
+                        auxiliary_config=auxiliary_config,
                         on_status=on_status, on_caption=on_caption,
                         batch_size=_batch_cfg.get("batch_size", batch_size),
-                        max_batch_chars=_batch_cfg.get("max_batch_chars", max_batch_chars))
+                        max_batch_chars=_batch_cfg.get("max_batch_chars", max_batch_chars),
+                        knowledge_feedback_interval=_batch_cfg.get(
+                            "knowledge_feedback_interval", knowledge_feedback_interval))
         state["p2_done"] = True
         from transpraxis import delivery as _delivery
         state["delivery_status"] = _delivery.compute_delivery_status(state)
         save_job_state(job_id, state)
+
+    if state.get("p2_done"):
+        state = _run_targeted_final_review(
+            job_id, state, reviewer_config, target_lang, style_rules,
+            enable_review=enable_review, on_status=on_status)
 
     # ---------------- 阶段 2.5：三色自动标注 ----------------
     if enable_annotate and state["p2_done"] and not state.get("annotations_done"):
@@ -7520,5 +10487,6 @@ def run_job_pipeline(job_id, filename, file_bytes, *, provider, api_key, model,
         save_job_state(job_id, state)
 
     state["stage"] = _state_migration.derive_stage(state)
+    state["performance"] = persist_performance()
     save_job_state(job_id, state)
     return state

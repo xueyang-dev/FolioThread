@@ -1,7 +1,7 @@
 # Translation Core foundation
 
 Phase 2 adds an additive, domain-neutral contract layer under
-`transpraxis.translation_core`. It reads FolioThread's existing state and produces
+`transpraxis.translation_core`. It reads Folith's existing state and produces
 JSON-serializable views; it does not add an agent loop, persistence store, or
 translation execution path.
 
@@ -29,7 +29,7 @@ translation execution path.
 These are contract ideas, not a port of Localize Anything's protocol, command
 workflow, project adapters, repair loop, or `.localize-anything` state layout.
 
-## FolioThread remains authoritative
+## Folith remains authoritative
 
 - `transpraxis.models.GlossaryEntry`, its
   `candidate`/`provisional`/`locked`/`rejected` lifecycle, and

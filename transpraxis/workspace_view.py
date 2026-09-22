@@ -1,4 +1,4 @@
-"""Read-only human-facing state projections for the FolioThread workspace.
+"""Read-only human-facing state projections for the Folith workspace.
 
 The runtime and Translation Core remain authoritative.  This module only turns
 their persisted values into copy, counts, and next actions shared by pages.
