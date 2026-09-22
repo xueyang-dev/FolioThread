@@ -28,7 +28,7 @@ PENDING = "pending_scroll_segment_id"
 
 
 def _state(count=6):
-    state = core.new_job_state("sensorium-part3.pdf")
+    state = core.new_job_state("technical-paper-part3.pdf")
     pairs = []
     for index in range(count):
         source = f"Segment {index + 1} about aerial view and drones."

@@ -13,20 +13,20 @@ APP_PATH = Path(__file__).resolve().parent.parent / "app.py"
 
 
 def _ui_state(count=6):
-    state = core.new_job_state("sensorium-part3.pdf")
+    state = core.new_job_state("technical-paper-part3.pdf")
     pair_specs = [
-        ("The sensorium of drones is volumetric and multispectral.",
-         "无人机的感知中枢是体积化、多光谱的。"),
-        ("Volumetric sensing and postcarbon communities [1] shift the frame.",
-         "体积感知与后碳社区[1]改变了讨论框架。"),
+        ("The sensorium of autonomous vehicles is volumetric and multispectral.",
+         "自动载具的感知系统是多维且多光谱的。"),
+        ("Volumetric sensing and distributed sensing systems [1] shift the frame.",
+         "体感知与分布式感知系统[1]改变了讨论框架。"),
         ("This chapter analyses the sensorium as a technical milieu.",
-         "本章把感知中枢作为一种技术环境来分析。"),
-        ("Drones flatten the earth with their aerial view from above.",
-         "无人机以其高空俯视视角把地球压平。"),
+         "本章把感知系统作为一种技术环境来分析。"),
+        ("Vehicles map the surface with an aerial view from above.",
+         "载具以俯视视角绘制地表面貌。"),
         ("TODO: replace this placeholder before delivery.",
          "TODO：交付前替换这个占位内容。"),
-        ("Earth-sensing drones monitor the surface and its in-between spaces.",
-         "地球感知无人机监测地表及其间隙空间。"),
+        ("Earth-sensing systems monitor the surface and its in-between spaces.",
+         "对地观测系统持续监测地表及其间隙空间。"),
     ]
     pairs = []
     for index, (source, target) in enumerate(pair_specs[:count]):
@@ -285,7 +285,7 @@ def test_diagnostic_suggestion_never_offers_apply(tmp_path, monkeypatch):
         "诊断结果必须明确说明它不会覆盖译文"
     # 且正文没有被这段诊断文本污染
     assert core.load_job_state(job_id)["pairs"][0]["target"] == \
-        "无人机的感知中枢是体积化、多光谱的。"
+        "自动载具的感知系统是多维且多光谱的。"
 
 
 def test_rewrite_suggestion_still_offers_apply(tmp_path, monkeypatch):

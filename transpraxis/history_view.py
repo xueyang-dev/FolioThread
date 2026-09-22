@@ -84,7 +84,7 @@ _NOISE_PATTERNS = (
 _RUNNING = {"running", "waiting_external", "starting", "queued", "resume_requested"}
 _BROKEN = {"failed", "interrupted", "stalled", "cancelled", "idle_incomplete"}
 
-# 作者/年份这类括号尾注："(Kathrin Maurer)" / "（Kathrin Maurer, 2019）"
+# 作者/年份这类括号尾注："(Author Name)" / "（Author Name, 2024）"
 _PAREN_TAIL = re.compile(r"[（(]\s*([^（()）]{2,60}?)\s*[)）]\s*$")
 
 
@@ -95,8 +95,8 @@ def _text(value: Any) -> str:
 def document_title(state: Mapping[str, Any]) -> str:
     """卡片主标题：来自文档元数据，而不是完整源文件名。
 
-    完整文件名（`Part 3提取The Sensorium Of The Drone And Communities
-    (Kathrin Maurer).docx`）不适合当标题：带工序前缀、带作者、带扩展名。
+    完整文件名（`Part 2提取Neural Machine Interface
+    (Elena Rostova).docx`）不适合当标题：带工序前缀、带作者、带扩展名。
     这里剥掉这些噪声，只留书名。任何一步失败都回落到文件名主体，
     保证卡片永远有标题可显示。
     """
@@ -121,7 +121,7 @@ def document_title(state: Mapping[str, Any]) -> str:
 def document_author(state: Mapping[str, Any]) -> str:
     """作者：优先文件名括号尾注；没有就留空（不编造）。
 
-    必须先剥扩展名再匹配：`(Kathrin Maurer).docx` 的括号不在字符串末尾。
+    必须先剥扩展名再匹配：`(Elena Rostova).docx` 的括号不在字符串末尾。
     """
     raw = _text(state.get("filename"))
     stem = re.sub(r"\.[A-Za-z0-9]{1,6}$", "", raw).strip()

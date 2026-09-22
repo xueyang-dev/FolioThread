@@ -10,7 +10,7 @@ LONG_SOURCE_PREFIX = ("This deliberately long source segment describes the "
 
 
 def _ui_state():
-    state = core.new_job_state("sensorium-part3.pdf")
+    state = core.new_job_state("technical-paper-part3.pdf")
     pairs = []
     for index in range(8):
         source = f"Source segment {index + 1}"

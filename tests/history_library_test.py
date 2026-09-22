@@ -22,10 +22,10 @@ from transpraxis import history_view as hv
 APP_PATH = Path(__file__).resolve().parent.parent / "app.py"
 
 
-def _state(*, filename="Part 3提取The Sensorium Of The Drone And Communities (Kathrin Maurer).docx",
+def _state(*, filename="Part 2提取Neural Machine Interface (Elena Rostova).docx",
            translated=8, total=8, p2_done=True, p3_done=False, report_enabled=False,
            review_required=False, reviewed=None, project_id="default",
-           dependency=None, domain="环境人文学/媒体研究", delivery_validation=None):
+           dependency=None, domain="环境人文学", delivery_validation=None):
     """构造一个"干净"的任务状态。
 
     这里刻意让译文足够长、且术语表里的首选译名真的被使用——否则
@@ -72,8 +72,8 @@ def _noisy(**kwargs):
 def test_title_drops_filename_noise():
     state = _state()
     title = hv.document_title(state)
-    assert title == "The Sensorium Of The Drone And Communities"
-    assert ".docx" not in title and "提取" not in title and "Part 3" not in title
+    assert title == "Neural Machine Interface"
+    assert ".docx" not in title and "提取" not in title and "Part 2" not in title
 
 
 def test_title_falls_back_to_a_usable_name():
@@ -85,7 +85,7 @@ def test_title_falls_back_to_a_usable_name():
 
 def test_secondary_identity_fields():
     state = _state()
-    assert hv.document_author(state) == "Kathrin Maurer"
+    assert hv.document_author(state) == "Elena Rostova"
     assert hv.document_kind(state) == "DOCX"
     assert hv.document_language(state) == "简体中文"
     # 括号里是年份而不是作者时不当作作者
@@ -97,11 +97,11 @@ def test_secondary_identity_fields():
 
 def test_identity_line_is_author_kind_language_domain():
     """卡片第二行固定四项身份；项目归属不混进身份行（那是容器，不是身份）。"""
-    view = _view(_state(), project_name="无人机论文")
+    view = _view(_state(), project_name="开源专著")
     assert view["identity"] == \
-        "Kathrin Maurer · DOCX · 简体中文 · 环境人文学/媒体研究"
-    assert view["project_name"] == "无人机论文"
-    assert "无人机论文" not in view["identity"]
+        "Elena Rostova · DOCX · 简体中文 · 环境人文学"
+    assert view["project_name"] == "开源专著"
+    assert "开源专著" not in view["identity"]
     # 缺失项直接省略，不留空占位
     bare = _view({"filename": "x.docx", "paras": [], "pairs": []})
     assert bare["identity"] == "DOCX · 简体中文"
@@ -110,9 +110,9 @@ def test_identity_line_is_author_kind_language_domain():
 # ---------------- 标题：display_name 优先，内部标识不当标题 ----------------
 
 def test_display_name_prefers_explicit_task_name():
-    assert hv.display_name({"display_name": "无人机与社区：感官研究导论",
+    assert hv.display_name({"display_name": "智能体翻译架构导论",
                             "filename": "internal-slug-name.docx"}) == \
-        "无人机与社区：感官研究导论"
+        "智能体翻译架构导论"
     # 任务没有显式名时用文档画像的名字
     assert hv.display_name({"filename": "x.docx",
                             "document_profile": {"display_name": "画像标题"}}) == "画像标题"
@@ -145,7 +145,7 @@ def test_ordinary_slug_filenames_are_humanized_not_dropped():
     assert hv.display_name({"filename": "mti-practice-report-final.docx"}) == \
         "Mti Practice Report"
     # 已可读的标题原样保留，绝不改写
-    assert hv.display_name(_state()) == "The Sensorium Of The Drone And Communities"
+    assert hv.display_name(_state()) == "Neural Machine Interface"
 
 
 # ---------------- 状态 chip 与 CTA ----------------
@@ -267,8 +267,8 @@ def test_review_pending_uses_active_tone():
 
 def test_search_matches_title_file_and_domain():
     view = _view(_state())
-    assert hv.card_matches(view, query="sensorium")
-    assert hv.card_matches(view, query="kathrin")     # 作者
+    assert hv.card_matches(view, query="interface")
+    assert hv.card_matches(view, query="elena")       # 作者
     assert hv.card_matches(view, query="环境人文学")   # 领域
     assert not hv.card_matches(view, query="完全不相关")
 

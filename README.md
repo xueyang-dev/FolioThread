@@ -1,178 +1,161 @@
-# Folith
+# Folith · 译页
 
 <p align="center">
   <img src="transpraxis/resources/brand/folith-lockup.png" alt="Folith·译页 — Agentic Translation Workspace — 智能体翻译工作台" width="840">
 </p>
 
-<p align="center"><sub>Folith·译页的 logo、字标与配色基准见 <a href="docs/brand.md">docs/brand.md</a>。</sub></p>
+<p align="center">
+  <strong>面向长文档与专业本地化的智能体翻译工作台 (Agentic Translation Workspace)</strong>
+</p>
 
-Folith·译页是一套面向专业本地化工作的 Agentic Workspace：把文档结构、上下文、术语、译文、人工审校和交付资产放在同一条可恢复的工作线上。
+<p align="center">
+  <a href="https://github.com/xueyang-dev/Folith/releases"><img src="https://img.shields.io/badge/release-v0.4.0-blue.svg" alt="Release v0.4.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
+</p>
 
-它适合处理较长的 PDF / DOCX 文档，保持跨章节的一致性，保留人工决策与证据，并在中断后从本地任务状态继续处理。
+---
 
-## Product position
+**Folith · 译页** 是一套专为复杂、长篇幅文献与技术文档设计的本地化智能体工作台。不同于通用对话界面的简单改写，Folith 将**文档结构保真提取**、**全书上下文建模**、**术语与翻译记忆（TM）闭环**、**智能体双语翻译**、**深度人工审校**与**可审计交付资产**整合在一条可中断、可恢复的工程化流水线中。
 
-Folith·译页的品牌定位是 **Agentic Translation Workspace**；中文界面使用 **智能体翻译工作台**。长文档是主场景，主路径是：
+无论是数百页的学术专著、技术白皮书、行业报告还是产品本地化资料，Folith 都能保持全篇概念与用词的高度一致，完整保留译者决策证据链，保障高水准成果交付。
 
-```text
-文档解析 → 文档上下文 → 术语与翻译记忆 → 翻译 → 人工审校 → 交付
-```
+---
 
-“研究与报告”是可选的专用能力，服务于需要过程证据、案例分析或 MTI 翻译实践报告的任务；它不占据普通本地化任务的首屏，也不定义 Folith·译页的唯一使用场景。
+## 📸 界面预览 (Showcase)
 
-## 当前能力与下一步
+### 1. 智能体翻译工作台 (Translation Workbench)
+双语段落平行对齐，右侧集成段落级 Agent 检查面板，即时展示上下文流动、关联术语、语法及格式发现，提供一键保存、快速跳转与状态流转。
 
-当前本地开发已推进项目管理、语言资产、工作台、人工审校与可恢复交付。TM 提供精确/归一化复用和基础 TMX 导入导出；当前 DOCX 导出属于生成式输出，尚不承诺保留原文件 package、复杂结构或全部格式。
+<p align="center">
+  <img src="docs/assets/workbench-preview.png" alt="Folith 智能体翻译工作台" width="1000">
+</p>
 
-当前版本已作为 Folith·译页 v0.4.0 发布。后续优先完成 DOCX 原格式写回闭环，再推进 TM V2 与文档版本更新；这些是路线规划，不是当前版本的能力声明。
+### 2. 任务总览与交付门禁 (Task Overview & Delivery Gate)
+全流程状态看板：清晰可视化「文档解析 → 术语与上下文 → 智能体翻译 → 人工审校 → 交付包构建」五大阶段，严格把关未审校项与质量阻塞点。
 
-- [开发蓝图与当前进度](docs/foliothread-agentic-native-blueprint.md)
-- [近期正式版发布计划](docs/release-plan.md)
-- [DOCX Contract v1：支持范围与验收](docs/docx-contract-v1.md)
+<p align="center">
+  <img src="docs/assets/overview-preview.png" alt="Folith 任务总览与交付门禁" width="1000">
+</p>
 
-## Quick Start
+### 3. 人工深度审校与质量把控 (Human Review Workspace)
+支持按问题类型（如术语冲突、格式异常、漏译风险）快速筛选，段落改动自动联动审校状态失效机制，提供严谨的可追溯审计。
 
-### 安装 v0.4.0
+<p align="center">
+  <img src="docs/assets/review-preview.png" alt="Folith 人工深度审校工作台" width="1000">
+</p>
 
-需要 Python 3.10 或更高版本。
+### 4. 语言资产与术语知识库 (Language Assets & Terminology)
+自动提取候选术语并计算置信度，支持人工确认、锁定、归档与跨任务共享，提供行业标准的 XLSX、TBX 与 TMX 导入导出能力。
 
-从 [Folith Releases](https://github.com/xueyang-dev/Folith/releases) 下载
-`foliothread-0.4.0-py3-none-any.whl`（已发布包的兼容文件名），然后运行：
+<p align="center">
+  <img src="docs/assets/assets-preview.png" alt="Folith 语言资产与术语管理" width="1000">
+</p>
 
-```bash
-python -m pip install ./foliothread-0.4.0-py3-none-any.whl
-folith
-```
+---
 
-首次启动后，在设置中选择 provider、model 并填写 API key。如需检查启动参数：
+## ⚡ 核心特性 (Key Features)
 
-```bash
-folith --help
-```
+- **📚 长文档结构感知与保真提取**：针对 PDF 与 DOCX 进行深度结构解析，支持跨页排版恢复、断词修复、页眉页脚与无意义噪音频段排除，支持本地 Tesseract OCR 离线识别。
+- **🧠 动态上下文与跨章节一致性**：引入滑动上下文窗口与章节摘要索引，翻译当前段落时智能检索前后文与专有名词，杜绝“断章取义”与术语前后矛盾。
+- **💎 语言资产闭环 (TM & Terminology)**：内置精确匹配与归一化翻译记忆复用；支持项目术语抽取、锁定与精准注入，大幅削减大模型 Token 开销与无关幻觉。
+- **🛡️ 状态解耦与人工责任闭环**：保存译文与审校确认严格分离，段落经人工编辑后自动触发重新审校校验；任务状态实时落盘，遭遇浏览器刷新或意外中断可秒级恢复。
+- **📦 标准化交付与过程证据包**：支持纯译文 DOCX、双语对照 DOCX、重点标注版、术语表、TMX 记忆库、结构化 JSONL 数据集以及 `delivery_manifest.json` 交付清单。
+- **🎓 专用研究与报告工作流**：支持将翻译过程、案例对比、理论支持与反思复盘导出为结构化分析与实践报告，满足翻译硕士 (MTI) 等学术与专业评估需求。
 
-### 从源码安装
+---
 
-```bash
-git clone https://github.com/xueyang-dev/Folith.git
-cd Folith
-python -m pip install .
-folith
-```
-
-仓库同时提供启动器：Windows 双击 `start.bat`，macOS 双击
-`start.command`，macOS/Linux 运行 `./start.sh`。如需仅启动本地服务而不自动打开窗口，使用
-`folith --no-browser`。桌面窗口需要安装 `requirements-desktop.txt` 中的可选依赖。
-
-v0.4 的 Python 模块命名空间仍为 `transpraxis`，`foliothread` 与 `transpraxis` console 命令作为兼容别名保留，以便已有本地任务继续运行；新的产品入口统一使用 `folith`。
-
-## 工作流程
+## 🔄 工作流程 (Architecture)
 
 <p align="center">
   <a href="docs/assets/folith-workflow.html">
-    <img src="docs/assets/folith-workflow.svg" alt="Folith 长文档本地化工作流程：文档解析、上下文与术语、翻译、审校、交付和可选研究资产" width="1200">
+    <img src="docs/assets/folith-workflow.svg" alt="Folith 长文档本地化工作流程" width="1000">
   </a>
 </p>
 
-### 1. 文档与上下文
+| 阶段 | 核心任务与工程能力 |
+| :--- | :--- |
+| **1. 文档解析与上下文** | 版面分析、段落提取、噪音频段排除、离线 OCR（无网络隐私泄露）、轻量结构化纠偏与上下文切片 |
+| **2. 术语与资产准备** | 自动化术语候选抽取、置信度评分、人工锁定/冻结、多格式术语导入导出 (XLSX / TBX) |
+| **3. 智能体翻译** | 动态上下文组装、相关术语精准注入、断点缓存保存、多模型并行加速 |
+| **4. 人工审校与质检** | 规则质检（漏译、占位符、标点、术语一致性）、问题定位导航、编辑-重审联动闭环 |
+| **5. 交付与资产沉淀** | 交付门禁校验、多格式成果物导出、已确认译文入库 (TMX)、全生命周期清单落盘 |
 
-PDF 路径支持版面段落恢复及页眉、页脚、页码和断词处理；DOCX 当前主要提取正文段落，不代表复杂结构完整提取或原格式保真写回。**提取范围（本次提取了什么、哪些表格/页眉页脚/文本框/公式/脚注未纳入、导出是重建译文文档而非原格式写回）会在任务里明确列出**，不静默漏内容。长文翻译阶段使用章节、语义单元和相邻段落构建上下文；已确认的译文可用于后续批次的上下文参考。
+---
 
-扫描 PDF 没有文本层时，Folith 会自动调用本机 Tesseract OCR：Step 1 的画像先识别前 / 中 / 后代表页，正式翻译阶段再识别全文，并把 OCR 段落保存为阶段一断点。PDF 的文本层或 OCR 结果随后会经过一次结构化 LLM 原文纠错：只修复明显错字和版面断行，保留每个输入项并记录原始文本，避免把模型当作自由改写器。OCR 在本机执行，不会把页面图片上传到服务商。请先安装 Tesseract 及需要的语言包；例如 macOS Homebrew 可运行：
+## 🚀 快速上手 (Quick Start)
 
-```bash
-brew install tesseract tesseract-lang
-```
+### 系统要求
+- Python 3.10 或更高版本
+- macOS / Windows / Linux
+- （可选）[Tesseract OCR](https://github.com/tesseract-ocr/tesseract)（如需离线识别扫描件 PDF）
 
-如果应用是从桌面图标启动、找不到自定义安装路径，可设置：
-
-```bash
-export FOLIOTHREAD_TESSERACT_CMD="/path/to/tesseract"
-```
-
-缺少 Tesseract 或语言包时，任务会把具体原因显示在界面并写入 `runtime_technical.log`，不会伪装成普通文本解析成功。
-
-### 2. 术语与翻译记忆
-
-支持提取术语候选，并对候选进行编辑、锁定、拒绝和冻结。翻译阶段仅注入当前范围相关的术语，以减少无关术语对模型上下文的占用。术语资产可导出为 XLSX 或 TBX；通过审校的译文可进入 TMX 翻译记忆。
-
-### 3. 翻译与人工审校
-
-审校阶段检查漏译、占位符、URL、引用标记和术语使用，并可关联文档证据。修订候选采用独立评估流程，审校与修订记录保存在任务中，便于追溯。
-
-段落编辑有明确的保存入口和成功反馈，并提供「保存并进入下一段 / 下一未确认段」「复制原文到译文」「翻译当前段落」等连续操作。未保存内容在切换段落、筛选、任务，以及**刷新页面或关闭标签页**之后都不会丢失：草稿落盘在任务目录里，重新打开会恢复并明确告知（草稿不是正式译文，不会因此获得审校结论）。冻结交付前会先检查未保存修改，避免导出修改前的版本；同一任务在别处改过同一段时，保存会先提示两边内容让你选择，而不是静默覆盖。拆分、合并、插入等结构操作可以撤销到操作前内容。导入扫描件产生的 OCR 垃圾行、页码、重复页眉等无效段落可以「排除」：保留原文、随时可恢复、不进入翻译、不计入待完成数量，导出时按明确规则单独列出。
-
-保存与审校确认是两件事：保存只写入译文，**不会**把段落标记为已审校；反过来说，若这一段此前已审校，人工修改后那次审校结论会**作废**并需要重新审校。
-
-### 4. 交付与恢复
-
-任务可按需导出纯译文/双语 DOCX、PDF、重点标注版、术语、翻译记忆、JSONL 双语段落、证据文件和 `delivery_manifest.json`。人工确认后的资产可冻结为可追溯的交付快照；任务状态保存在本地，长文中断后可继续处理。若有被排除的无效段落，交付包会额外包含它们的清单，双语 JSONL 不含其原文。
-
-### 5. 研究与报告（专用能力）
-
-可选的研究工作流把翻译过程、案例、证据、研究问题和提纲组织为写作工作区，并生成翻译实践报告草稿。它适用于 MTI 作业和研究型翻译，但不改变 Folith 的主产品路径；生成的译文、事实说明、引文和理论解释仍需人工核查。
-
-## 三种预设
-
-- **快速**：适合试译和预览；保留 TM 和基础检查，不自动提取术语，也不启用独立审校。
-- **标准**：默认选项；自动提取术语，保留 TM，完成常规翻译和基础检查。
-- **研究与报告（专用）**：适合需要完整过程证据的任务；在标准设置上增加严格术语准备、独立审校和研究报告工作区。
-
-预设只提供默认配置，翻译前仍可按任务调整策略和输出内容。
-
-## 输出
-
-常用输出包括：
-
-- 纯译文/双语 DOCX、PDF、重点标注版 DOCX；
-- 术语表 XLSX、TBX；
-- TMX 翻译记忆、JSONL 双语段落；
-- `delivery_manifest.json`、证据文件、审校发现与审校报告；
-- 可选的研究工作区 ZIP 和翻译实践报告 DOCX/Markdown 草稿。
-
-## Provider 与命令行
-
-界面支持 OpenCode Go、DeepSeek、OpenAI、Gemini、OpenRouter、SiliconFlow、Moonshot/Kimi、Zhipu/GLM、Qwen/DashScope，以及自定义 OpenAI-compatible endpoint。Provider、模型、API Key 和可选 Base URL 均在设置中配置。自定义中转站必须填写有效的 `http(s)://…/v1` 基址；缺少地址时请求会直接提示配置错误，不会把中转站密钥发送到官方 OpenAI 地址。已识别的推理模型会额外提供“推理强度”，默认自动模式不发送额外参数。
-
-脚本化处理可在源码目录运行：
+### 方式 1：通过 Pip 安装发布包（推荐）
 
 ```bash
-export TRANSPRAXIS_API_KEY="your-api-key"
-python scripts/translate_pdf.py "文档.pdf" --target-lang 简体中文 --quality
+# 从 Releases 下载最新 wheel 包
+python -m pip install foliothread-0.4.0-py3-none-any.whl
+
+# 启动工作台
+folith
 ```
 
-`TRANSPRAXIS_API_KEY` 是 v0.4 保留的环境变量名，避免改变核心运行行为；新的用户界面和命令入口使用 Folith / 译页品牌。完整参数见 `python scripts/translate_pdf.py --help`。
-
-## 架构边界
-
-Folith·译页的长期方向是 Agentic Translation Workspace：由 Agent 执行受边界约束的本地化工作，由人类控制语言质量和交付责任。完整的产品与架构蓝图见[Agentic Translation Workspace 开发蓝图](docs/foliothread-agentic-native-blueprint.md)。当前 v0.4 的兼容边界和 MTI 专用能力见[架构边界说明](docs/architecture-boundaries.md)。
-
-## 使用说明与限制
-
-AI 生成的译文和实践报告仅作为工作稿，提交前应人工核对事实、术语、引文和理论判断。`--lan` 当前采用受信任局域网模式，不包含认证层；不应暴露到不受信任的网络。LAN 认证不在 v0.4.0 范围内。
-
-## 文档
-
-- [翻译工作台：Agent Inspector 交互契约](docs/agent-inspector-workspace.md)
-- [历史任务：Translation Task 列表](docs/history-task-list.md)
-- [Project：任务、术语、风格规则与已审校记忆的长期容器](docs/project-memory.md)
-- [翻译吞吐实测](docs/translation-throughput.md)
-- [控制台闭环](docs/console-loop.md)
-- [场景验收门禁](docs/scenario-gate.md)
-- [架构边界说明](docs/architecture-boundaries.md)
-- [学术写作架构](docs/academic-writing-architecture.md)
-- [文献证据链](docs/literature-evidence-spine.md)
-- [变更记录](CHANGELOG.md)
-- [MIT License](LICENSE)
-
-## 开发与发布验证
+### 方式 2：从源码运行与开发
 
 ```bash
-python -m pip install ".[test]" build
-python -m pytest -q
-python -m build
+# 克隆仓库
+git clone https://github.com/xueyang-dev/Folith.git
+cd Folith
+
+# 安装依赖
+python -m pip install -e .
+
+# 启动工作台
+folith
 ```
 
-三个端到端验收场景（20 页 DOCX、100 页 PDF、术语密集文档）由
-`tests/scenario_gate_test.py` 离线验证，随 `python -m pytest -q` 一起运行；
-源文档由 `python scripts/make_scenario_fixtures.py --out tmp/scenarios` 生成。
-详见[场景验收门禁](docs/scenario-gate.md)。
+仓库根目录提供一键启动脚本：
+- **Windows**: 双击运行 `start.bat`
+- **macOS**: 双击运行 `start.command` 或在终端运行 `./start.sh`
+- **Linux**: 运行 `./start.sh`
+
+> **参数说明**：
+> - 仅启动后台服务不打开浏览器：`folith --no-browser`
+> - 局域网协同模式：`folith --lan`
+> - 原生桌面窗口支持：安装可选依赖 `python -m pip install ".[desktop]"` 后启动即可进入原生窗口模式。
+
+---
+
+## ⚙️ 模型与服务商支持 (Providers)
+
+Folith 采用模块化模型接入架构，在系统设置中支持开箱即用配置：
+
+- **主流服务商**：OpenAI、Gemini、DeepSeek、OpenRouter、SiliconFlow (硅基流动)、Moonshot / Kimi、Zhipu / GLM、Qwen / DashScope、OpenCode Go
+- **自定义网关**：支持任何遵循 OpenAI API 规范的第三方兼容网关或本地模型服务 (vLLM / Ollama)
+- **深度思考控制**：支持带思维链的推理模型（如 DeepSeek-R1、OpenAI o-series），可自定义推理强度
+
+---
+
+## 🗺️ 路线图 (Roadmap)
+
+- [x] **v0.4.0**：统一 Folith 品牌体系、交互界面重构、语言资产与术语中心、交付门禁系统与草稿实时容灾
+- [ ] **v0.5.0**：DOCX 原格式保真写回（基于 XML 模板的原位段落替换，保留原始排版、样式与内嵌图表）
+- [ ] **v0.6.0**：TM V2 引擎（支持多语料库检索与模糊匹配评分、增强型 TMX 分段索引）
+- [ ] **v0.7.0**：文档跨版本差分更新与增量翻译同步
+
+---
+
+## 📖 详细文档 (Documentation)
+
+- [智能体交互面板契约 (Agent Inspector)](docs/agent-inspector-workspace.md)
+- [历史任务与状态迁移](docs/history-task-list.md)
+- [项目与长期记忆模型](docs/project-memory.md)
+- [DOCX Contract v1 规范](docs/docx-contract-v1.md)
+- [架构设计与能力边界](docs/architecture-boundaries.md)
+- [变更日志 (Changelog)](CHANGELOG.md)
+
+---
+
+## 📄 开源许可证 (License)
+
+本项目基于 [MIT License](LICENSE) 开源。

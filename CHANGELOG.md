@@ -8,6 +8,15 @@
 > 按时间**倒序**累积了多个工作流（发布正确性硬化 → 侧栏 IA → 工作台视觉）。
 > 该版本已于 2026-09-22 发布；其下 `## [0.3.0] - 2026-08-24` 是上一个版本。
 
+### 包装与发布优化：真实界面佐证、README 去 AI 化与隐私脱敏
+
+- **真实软件界面展示**：补充四组高分辨率 Retina 软件界面截图（智能体翻译工作台 `workbench-preview.png`、任务总览与交付门禁 `overview-preview.png`、人工深度审校 `review-preview.png`、语言资产与术语知识库 `assets-preview.png`），提供直观的可视化操作佐证。
+- **README 全面去 AI 化**：剔除机器味浓厚的辩护式与推脱式表述，重构为专业、清晰、自信的开源技术文档结构，增强工作流架构表与版本路线图 (Roadmap)。
+- **测试用例与工程脱敏**：
+  - 测试套件全量移除个人真实姓名、个人学术专著与测试阶段遗留的真实论文材料，统一替换为合规的中立学术/技术测试用例。
+  - 清理历史调试残留物与本地缓存，新增 `clean_local_artifacts.sh` 工具脚本与高保真用例截图生成脚本 `generate_showcase_screenshots.py`。
+  - 支持 `FOLIOTHREAD_OUTPUT_DIR` 环境变量，实现测试与演示环境的完全沙箱化隔离。
+
 ### Rebrand：Folith·译页
 
 - 用户可见组合字标统一为 `Folith·译页`。
@@ -997,7 +1006,7 @@ Project 是任务、术语、风格规则、人工决定与已审校翻译记忆
 ### 历史任务页：对象语义、卡片布局与导航状态收口
 
 原来的历史页是"任务记录列表"：主标题直接是完整源文件名
-（`Part 3提取The Sensorium Of The Drone And Communities (Kathrin Maurer).docx`），
+（如 `Part 3 提取 Neural Machine Interface (Elena Rostova).docx`），
 右侧按钮既是唯一的选中方式又是导航入口，而且文案由一条独立的 copy 规则决定，
 和状态脱节（纯翻译任务会显示"更新报告"）。
 

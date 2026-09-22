@@ -175,7 +175,7 @@ def test_project_ids_are_uuid_and_never_derived_from_the_name():
     会被哈希成一个 p- 前缀的 id、ASCII 名会直接得到可读 slug。ID 与名称绑定之后，
     改名就等于换项目，命名冲突会静默覆盖另一个项目。
     """
-    names = ["无人机论文", "生态学 / 2026", "论文 / 2026", "Ecology 2026",
+    names = ["学术专著", "生态学 / 2026", "论文 / 2026", "Ecology 2026",
              "Field Notes", "默认项目"]
     with project_env():
         ids = []
@@ -192,10 +192,10 @@ def test_creating_chinese_named_project_does_not_touch_default():
     with project_env():
         core.ensure_default_project()  # 默认项目由变更路径创建，读取不再创建它
         before = core.load_project(core.DEFAULT_PROJECT_ID)
-        created = core.create_project("无人机论文")
+        created = core.create_project("学术专著")
         after = core.load_project(core.DEFAULT_PROJECT_ID)
         assert created["project_id"] != core.DEFAULT_PROJECT_ID
-        assert created["name"] == "无人机论文"
+        assert created["name"] == "学术专著"
         assert after["name"] == before["name"] == core.DEFAULT_PROJECT_NAME
         assert created["project_id"] in [
             p["project_id"] for p in core.list_projects()]
@@ -215,9 +215,9 @@ def test_legacy_job_without_project_falls_back_to_default():
 def test_job_assignment_resolves_by_name_or_id():
     """按名称和按 ID 归档必须命中同一个项目。"""
     with project_env():
-        project = core.create_project("无人机论文")
+        project = core.create_project("学术专著")
         core.save_job_state("j1", core.new_job_state("a.docx"))
-        by_name = core.assign_job_to_project("j1", "无人机论文")
+        by_name = core.assign_job_to_project("j1", "学术专著")
         assert by_name["project_id"] == project["project_id"]
         core.save_job_state("j2", core.new_job_state("b.docx"))
         by_id = core.assign_job_to_project("j2", project["project_id"])
@@ -243,20 +243,20 @@ def test_only_confirmed_knowledge_enters_project_memory():
             {"rule": "待定的风格", "status": "proposed"},
         ]
         state["human_actions"] = [
-            {"record_type": "human_decision", "actor": "xueyang",
+            {"record_type": "human_decision", "actor": "reviewer",
              "actor_type": "human", "decision": "dismiss"},
             {"record_type": "human_decision", "actor": "reviewer-model",
              "actor_type": "model", "decision": "accept_resolution"},
         ]
         core.save_job_state("j", state)
 
-        promoted = core.promote_job_to_project("j", actor="xueyang")
+        promoted = core.promote_job_to_project("j", actor="reviewer")
         assert [e["source"] for e in promoted["glossary"]] == ["canopy closure"], \
             "候选术语不得进入项目记忆"
         assert [r["rule"] for r in promoted["style_rules"]] == ["保持学术书面语"], \
             "未确认风格不得进入项目记忆"
         assert len(promoted["human_decisions"]) == 1, "模型记录不得进入项目审计"
-        assert promoted["human_decisions"][0]["actor"] == "xueyang"
+        assert promoted["human_decisions"][0]["actor"] == "reviewer"
 
 
 def test_promotion_is_idempotent_and_versioned():
@@ -269,8 +269,8 @@ def test_promotion_is_idempotent_and_versioned():
         state["glossary"] = [LOCKED]
         core.save_job_state("j", state)
 
-        first = core.promote_job_to_project("j", actor="xueyang")
-        second = core.promote_job_to_project("j", actor="xueyang")
+        first = core.promote_job_to_project("j", actor="reviewer")
+        second = core.promote_job_to_project("j", actor="reviewer")
         assert len(first["glossary"]) == len(second["glossary"]) == 1
         assert len(second["glossary_versions"]) == 1, "内容未变不应新增版本"
         assert len(second["promotion_log"]) == 1, "内容未变不应新增提升记录"
@@ -279,7 +279,7 @@ def test_promotion_is_idempotent_and_versioned():
         state = core.load_job_state("j")
         state["glossary"] = [{**LOCKED, "target": "冠层郁闭", "preferred": "冠层郁闭"}]
         core.save_job_state("j", state)
-        third = core.promote_job_to_project("j", actor="xueyang")
+        third = core.promote_job_to_project("j", actor="reviewer")
         assert third["glossary"][0]["preferred"] == "冠层郁闭"
         assert len(third["glossary_versions"]) == 2
         # 不变式：一个 source 至多一条锁定条目（人工修正必须就地替换）
@@ -302,7 +302,7 @@ def test_project_memory_is_injected_into_a_new_job(fixtures_dir):
             core.load_project(project["project_id"]),
             glossary=[{**LOCKED, "source": "canopy closure"}],
             style_rules=[{"rule": "保持学术书面语", "status": "confirmed"}],
-            actor="xueyang", source_job_id="earlier")
+            actor="reviewer", source_job_id="earlier")
         core.save_project(seeded)
 
         provider = OfflineProvider(glossary=seeded["glossary"])
@@ -344,7 +344,7 @@ def test_task_owned_terms_win_over_project_memory(fixtures_dir):
         seeded = project_module.merge_confirmed_knowledge(
             core.load_project(project["project_id"]),
             glossary=[{**LOCKED, "target": "项目译名", "preferred": "项目译名"}],
-            actor="xueyang", source_job_id="earlier")
+            actor="reviewer", source_job_id="earlier")
         core.save_project(seeded)
 
         provider = OfflineProvider(
@@ -387,7 +387,7 @@ def test_started_job_is_not_retro_injected(fixtures_dir):
 
         seeded = project_module.merge_confirmed_knowledge(
             core.load_project(project["project_id"]),
-            glossary=[LOCKED], actor="xueyang", source_job_id="other")
+            glossary=[LOCKED], actor="reviewer", source_job_id="other")
         core.save_project(seeded)
 
         provider = OfflineProvider()
@@ -422,12 +422,12 @@ def test_ui_projects_surface_lists_and_opens_a_project(fixtures_dir):
     from streamlit.testing.v1 import AppTest
 
     with project_env():
-        project = core.create_project("无人机论文")
+        project = core.create_project("学术专著")
         seeded = project_module.merge_confirmed_knowledge(
             core.load_project(project["project_id"]),
             glossary=[LOCKED],
             style_rules=[{"rule": "保持学术书面语", "status": "confirmed"}],
-            actor="xueyang", source_job_id="earlier")
+            actor="reviewer", source_job_id="earlier")
         core.save_project(seeded)
         state = core.new_job_state("in-project.docx")
         state["project_id"] = project["project_id"]
@@ -439,7 +439,7 @@ def test_ui_projects_surface_lists_and_opens_a_project(fixtures_dir):
         assert not at.exception, [e.value for e in at.exception]
 
         page = "\n".join(str(m.value) for m in at.markdown)
-        assert "无人机论文" in page, "项目列表必须显示项目名"
+        assert "学术专著" in page, "项目列表必须显示项目名"
         assert "术语 1 · 规则 1" in page, \
             "项目卡片必须显示已积累的记忆摘要"
 
@@ -447,7 +447,7 @@ def test_ui_projects_surface_lists_and_opens_a_project(fixtures_dir):
         at.run()
         assert not at.exception, [e.value for e in at.exception]
         assert at.session_state["active_project_id"] == project["project_id"]
-        assert "无人机论文" in "\n".join(str(m.value) for m in at.markdown)
+        assert "学术专著" in "\n".join(str(m.value) for m in at.markdown)
 
         # 概览是工作中心：给出真实的知识统计；「任务」tab 只列属于本项目的任务。
         overview = "\n".join(str(m.value) for m in at.markdown)
@@ -839,9 +839,9 @@ def _seed_portable_project() -> dict:
         core.load_project(project["project_id"]),
         glossary=[{**LOCKED, "id": "t1"}],
         style_rules=[{"rule": "保持学术书面语", "status": "confirmed"}],
-        human_decisions=[{"record_type": "human_decision", "actor": "xueyang",
+        human_decisions=[{"record_type": "human_decision", "actor": "reviewer",
                           "actor_type": "human", "decision": "dismiss"}],
-        actor="xueyang", source_job_id="j1")
+        actor="reviewer", source_job_id="j1")
     core.save_project(seeded)
     core.save_tm({"The canopy closure index was recomputed.":
                   {"target": "林冠郁闭指数被重新计算。", "reviewed": True}},
@@ -1384,7 +1384,7 @@ def _local_project(*, glossary_target: str = "本地译名",
         core.load_project(project["project_id"]),
         glossary=[{**LOCKED, "target": glossary_target,
                    "preferred": glossary_target}],
-        actor="xueyang", source_job_id="local-job")
+        actor="reviewer", source_job_id="local-job")
     core.save_project(seeded)
     core.save_tm({"Sentence A.": {"target": tm_target, "reviewed": True}},
                  project["project_id"])
@@ -1442,7 +1442,7 @@ def test_adopting_incoming_replaces_glossary_and_translation_memory():
         for conflict in list(core.list_project_conflicts(local["project_id"])):
             core.resolve_project_conflict(local["project_id"],
                                           conflict["conflict_id"],
-                                          adopt_incoming=True, actor="xueyang")
+                                          adopt_incoming=True, actor="reviewer")
 
         assert [e["preferred"] for e in
                 core.load_project(local["project_id"])["glossary"]] == ["协作者译名"]
@@ -1470,7 +1470,7 @@ def test_keeping_local_removes_conflict_without_changing_anything():
         for conflict in list(core.list_project_conflicts(local["project_id"])):
             core.resolve_project_conflict(local["project_id"],
                                           conflict["conflict_id"],
-                                          adopt_incoming=False, actor="xueyang")
+                                          adopt_incoming=False, actor="reviewer")
 
         assert core.list_project_conflicts(local["project_id"]) == []
         assert [e["preferred"] for e in

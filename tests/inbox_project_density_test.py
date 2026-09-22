@@ -214,7 +214,7 @@ def _relative_luminance(hex_color):
 def test_project_center_separates_system_zone_from_my_projects():
     """Project Center 是「系统任务区 → 我的项目」两个区块，未分类不是列表里的一项。"""
     with ia_env():
-        core.create_project("无人机论文")
+        core.create_project("学术专著")
         at = _project_page()
         assert not at.exception, [e.value for e in at.exception]
 
@@ -432,7 +432,7 @@ def test_project_card_with_tasks_swaps_the_cta_verb_in_the_same_slot():
 def test_project_card_is_a_three_zone_layout_with_a_separated_footer():
     """卡片是三段式：head / body / foot；foot 用 hairline 与正文分开。"""
     with ia_env():
-        project = core.create_project("无人机论文", description="教材本地化")
+        project = core.create_project("学术专著", description="教材本地化")
         _seed_job("member", "第一章.docx", project["project_id"])
         at = _project_page()
         card = _markdown_with(at, "tp-pcard-head")
@@ -458,7 +458,7 @@ def test_project_card_is_a_three_zone_layout_with_a_separated_footer():
 def test_project_card_updated_time_is_the_weakest_element():
     """更新时间必须比知识摘要更弱：更小字号 + 更低对比度，且不与 CTA 争行。"""
     with ia_env():
-        core.create_project("无人机论文")
+        core.create_project("学术专著")
         at = _project_page()
 
         updated_rule = _css_rule(at, ".tp-pcard-updated")
@@ -484,7 +484,7 @@ def test_card_zones_stretch_so_footers_align_across_a_row():
     `margin-top:auto` 是不够的（footer 会紧贴正文）。这条断言守住"拉满链"。
     """
     with ia_env():
-        core.create_project("无人机论文")
+        core.create_project("学术专著")
         at = _project_page()
 
         table = _style_text(at)
@@ -504,7 +504,7 @@ def test_card_zones_stretch_so_footers_align_across_a_row():
 def test_project_card_has_breathing_room_and_no_resting_shadow():
     """卡片靠留白分层，而不是靠阴影和更小的 padding 塞信息。"""
     with ia_env():
-        core.create_project("无人机论文")
+        core.create_project("学术专著")
         at = _project_page()
         card_rule = _css_rule(at, '[class*="st-key-project_row_"]')
         assert "padding: 18px 20px" in card_rule, card_rule
@@ -533,7 +533,7 @@ def test_project_row_rule_holds_only_the_overlay_anchor():
     `AppTest` 只读元素树，两件事它都看不见，所以在这里锁住。
     """
     with ia_env():
-        core.create_project("无人机论文")
+        core.create_project("学术专著")
         at = _project_page()
         table = _style_text(at)
         bodies = re.findall(r'(?m)^\[class\*="st-key-project_row_"\]\s*\{(.*?)\}',

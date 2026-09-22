@@ -338,7 +338,7 @@ def test_filters_are_backed_by_real_fields():
         "a", "Book A.docx",
         candidates=[_candidate("point cloud", "点云", confidence=0.86),
                     _candidate("sensorium", "感知域", confidence=0.35),
-                    _candidate("Dr. Maurer", "Maurer 博士", kind="name",
+                    _candidate("Dr. Elena", "Elena 博士", kind="name",
                                confidence=0.35)])}]
     rows = language_assets.build_candidate_rows(jobs)
     assert len(language_assets.filter_candidates(rows, confidence="high")) == 1

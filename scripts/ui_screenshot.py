@@ -48,7 +48,7 @@ const [url, out, section, waitMs] = process.argv.slice(2);
     executablePath: CHROME, args: ['--no-sandbox', '--disable-gpu'],
   });
   const page = await browser.newPage({
-    viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1,
+    viewport: { width: 1440, height: 900 }, deviceScaleFactor: Number(process.env.DEVICE_SCALE_FACTOR || 2),
   });
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -59,7 +59,7 @@ const [url, out, section, waitMs] = process.argv.slice(2);
     const history = page.locator('button', { hasText: '历史任务' }).first();
     if (await history.count()) { await history.click(); await page.waitForTimeout(2500); }
     // 列表按最近更新排序，第一个任务就是最近处理的
-    const action = /打开任务|继续审校|查看交付|继续处理|更新报告|打开/;
+    const action = /打开任务|继续审校|查看交付|准备交付|继续处理|继续翻译|更新报告|查看进度|打开/;
     const firstAction = page.locator('button').filter({ hasText: action }).first();
     if (await firstAction.count()) { await firstAction.click(); await page.waitForTimeout(3500); }
     const navRoot = page.locator('[class*="st-key-workspace_nav"]').first();
@@ -101,6 +101,9 @@ def _resolve_chrome() -> str | None:
         found = shutil.which(name)
         if found:
             return found
+    mac_app = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    if mac_app.is_file():
+        return str(mac_app)
     return None
 
 

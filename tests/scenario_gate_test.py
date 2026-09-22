@@ -527,7 +527,7 @@ def test_delivery_gate_requires_human_decision_for_semantic_blocking(fixtures):
 
         # 人工驳回该发现（真实 HumanDecision 路径）
         reloaded, finding, audit = record_runtime_human_decision(
-            reloaded, finding_id, "dismiss", "xueyang",
+            reloaded, finding_id, "dismiss", "human-reviewer",
             actor_type="human", note="已人工核对，接受当前译文")
         assert audit["record_type"] == "human_decision"
         assert finding["status"] == "dismissed" and finding["resolved"] is True
@@ -540,7 +540,7 @@ def test_delivery_gate_requires_human_decision_for_semantic_blocking(fixtures):
         # 决策必须留在任务里可追溯，而不是被丢弃
         decisions = [item for item in after.get("human_actions") or []
                      if item.get("record_type") == "human_decision"]
-        assert decisions and decisions[-1]["actor"] == "xueyang"
+        assert decisions and decisions[-1]["actor"] == "human-reviewer"
 
         state, ok, errors = core.approve_delivery(job_id, actor="user")
         assert ok is True, errors

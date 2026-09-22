@@ -58,7 +58,7 @@ from transpraxis.textual import has_textual_content, normalize_language
 
 # ================= 常量 =================
 # 任务进度与过程文件的本地存储目录（已加入 .gitignore）
-OUTPUT_DIR = Path("outputs")
+OUTPUT_DIR = Path(os.environ.get("FOLITH_OUTPUT_DIR") or os.environ.get("FOLIOTHREAD_OUTPUT_DIR", "outputs"))
 
 DELIVERY_CONFIG_DEFAULTS = {
     "enable_annotate": False,

@@ -375,11 +375,11 @@ def test_completed_task_has_no_runtime_row(tmp_path, monkeypatch):
 def test_task_details_expose_the_source_filename(tmp_path, monkeypatch):
     """完整文件名必须可读可复制，而不是只活在一个 hover 气泡里。"""
     state = _state(2)
-    state["filename"] = "Part 3 提取自 The Sensorium of Animals.docx"
+    state["filename"] = "Part 3 提取自 Neural Machine Interface.docx"
     at = _open_workspace(tmp_path, monkeypatch, "bannerdetails", state)
 
     code = " ".join(str(item.value) for item in at.code)
-    assert "The Sensorium of Animals.docx" in code
+    assert "Neural Machine Interface.docx" in code
     assert any(expander.label == "任务详情" for expander in at.expander)
     assert not any(expander.label == "项目详情" for expander in at.expander), \
         "同一个「任务详情」不应该以「项目详情」再复制一份"

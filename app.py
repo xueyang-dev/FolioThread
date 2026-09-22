@@ -9101,7 +9101,7 @@ def _workspace_project_title(filename):
 def _workspace_document_title(filename):
     """从文件名里取出"用户认得出这本书"的那一段标题。
 
-    顶栏原来同时显示 `Part 3 提取The Sensorium...` 和文件名整理出的标题，
+    顶栏原来同时显示 `Part 3 提取Machine Learning Systems...` 和文件名整理出的标题，
     两者互为噪声。这里统一成"标题 + 章节"，文件名不再第二次出现。
     """
     stem = Path(str(filename or "")).stem.strip()

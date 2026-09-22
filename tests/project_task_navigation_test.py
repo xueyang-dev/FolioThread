@@ -479,9 +479,9 @@ def test_project_center_entry_returns_to_the_project_list():
     作为 Project Context **原样保留**（需求 B：管理页不得修改当前上下文）。
     """
     with nav_env():
-        project = core.create_project("无人机论文")
+        project = core.create_project("学术专著")
         at = _project_page(state={"active_project_id": project["project_id"]})
-        assert "无人机论文" in _markdown_text(at)
+        assert "学术专著" in _markdown_text(at)
 
         at.button(key="project_section_header_button").click()
         at.run()
@@ -513,10 +513,10 @@ def _keyed_descendants(node):
 def test_project_hub_first_screen_is_a_workspace_not_a_database():
     """首屏 = page header + 统一 toolbar + 未分类任务入口 + 我的项目卡片。"""
     with nav_env():
-        project = core.create_project("无人机论文", description="教材本地化")
+        project = core.create_project("学术专著", description="教材本地化")
         seeded = project_module.merge_confirmed_knowledge(
             core.load_project(project["project_id"]),
-            glossary=[LOCKED], actor="xueyang", source_job_id="earlier")
+            glossary=[LOCKED], actor="reviewer", source_job_id="earlier")
         core.save_project(seeded)
         _seed_job("card-0", "p-0.docx", project["project_id"])
         _seed_job("card-1", "p-1.docx", project["project_id"])
@@ -526,7 +526,7 @@ def test_project_hub_first_screen_is_a_workspace_not_a_database():
         assert not at.exception, [e.value for e in at.exception]
         page = _markdown_text(at)
         assert "我的项目" in page
-        assert "无人机论文" in page
+        assert "学术专著" in page
         # 未分类是轻量入口：说明 + 真实数量（只出现一次），不是项目卡。
         assert "未分类任务" in page
         assert "尚未归入任何项目的任务" in page, page[:1200]
@@ -561,7 +561,7 @@ def test_uncategorized_entry_is_not_a_project_card():
 def test_project_toolbar_is_one_toolbar():
     """搜索 / 状态 / 排序 / 视图切换属于同一个 toolbar 容器。"""
     with nav_env():
-        core.create_project("无人机论文")
+        core.create_project("学术专著")
         at = _project_page()
         toolbar = _find_container(at, "project_toolbar")
         assert toolbar is not None, "必须存在统一的 Project Toolbar"
@@ -608,7 +608,7 @@ def test_new_project_menu_offers_blank_project_and_import():
 def test_grid_and_list_view_share_the_same_projects_and_state():
     """Grid / List 只改变排布，项目集合与动作完全一致。"""
     with nav_env():
-        project = core.create_project("无人机论文", description="教材本地化")
+        project = core.create_project("学术专著", description="教材本地化")
         at = _project_page()
         assert _find_container(at, "project_grid") is not None
         assert at.session_state["project_view_mode"] == "grid", "默认必须是 Grid"
@@ -620,7 +620,7 @@ def test_grid_and_list_view_share_the_same_projects_and_state():
         assert _find_container(at, "project_list") is not None
         assert _find_container(at, "project_grid") is None
         page = _markdown_text(at)
-        assert "无人机论文" in page and "tp-prow" in page
+        assert "学术专著" in page and "tp-prow" in page
         assert _button(at, f"project_open_{project['project_id']}") is not None
 
 
@@ -858,7 +858,7 @@ def test_archived_projects_are_not_offered_as_a_context():
 def test_project_import_lives_in_a_modal_not_on_the_first_screen():
     """JSON 导入是 advanced/migration 动作：入口在菜单里，界面是独立 modal。"""
     with nav_env():
-        core.create_project("无人机论文")
+        core.create_project("学术专著")
         at = _project_page()
         assert not any(_type_name(node) == "file_uploader"
                        for node, _ in _walk(at.main)), \
@@ -1701,7 +1701,7 @@ def test_opening_the_app_from_a_deleted_project_link_falls_back():
 
 def test_new_task_starts_in_the_system_workspace_without_a_context():
     with nav_env():
-        core.create_project("无人机论文")
+        core.create_project("学术专著")
         at = _new_task_page()
         # 没有第二个 Project Selector：归属只有一个来源（侧栏 switcher）。
         assert not any(s.label == "所属项目" for s in at.selectbox), \
@@ -1718,7 +1718,7 @@ def test_new_task_starts_in_the_system_workspace_without_a_context():
 def test_new_task_can_switch_the_context_to_an_existing_project():
     with nav_env() as tmp:
         _write_provider_config(tmp)
-        project = core.create_project("无人机论文")
+        project = core.create_project("学术专著")
         data = b"docx-with-project"
 
         at = _new_task_page()
@@ -1775,7 +1775,7 @@ def test_the_same_file_in_another_context_creates_a_new_task():
     with nav_env() as tmp:
         _write_provider_config(tmp)
         project_a = core.create_project("生态恢复")
-        project_b = core.create_project("无人机论文")
+        project_b = core.create_project("学术专著")
         data = b"docx-shared-across-contexts"
 
         def start(project_id, language):
@@ -1815,7 +1815,7 @@ def test_the_same_file_in_another_context_creates_a_new_task():
 
 
 def _seed_project_task():
-    project = core.create_project("无人机论文")
+    project = core.create_project("学术专著")
     _seed_job("member", "member.docx", project["project_id"])
     return project, "member"
 
@@ -1876,7 +1876,7 @@ def test_existing_tasks_and_projects_survive_the_new_ia():
             core.load_project(project["project_id"]),
             glossary=[LOCKED],
             style_rules=[{"rule": "保持学术书面语", "status": "confirmed"}],
-            actor="xueyang", source_job_id="earlier")
+            actor="reviewer", source_job_id="earlier")
         core.save_project(seeded)
         core.save_tm({"Sentence A.": {"target": "句子 A。", "reviewed": True}},
                      project["project_id"])

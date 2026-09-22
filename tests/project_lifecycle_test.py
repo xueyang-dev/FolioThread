@@ -167,7 +167,7 @@ def test_system_project_owns_its_own_memory_space():
     with project_env():
         system = core.ensure_system_project()
         merged = project_module.merge_confirmed_knowledge(
-            system, glossary=[LOCKED], actor="xueyang", source_job_id="legacy")
+            system, glossary=[LOCKED], actor="reviewer", source_job_id="legacy")
         core.save_project(merged)
         view = core.project_memory_view(core.load_project(system["project_id"]))
         assert view["glossary_count"] == 1
@@ -181,13 +181,13 @@ def test_system_project_owns_its_own_memory_space():
 def test_project_id_is_a_uuid_and_never_derived_from_the_name():
     """新建项目的 ID 是 UUIDv4；同名不能复用同一个 ID，改名不能换 ID。"""
     with project_env():
-        first = core.create_project("无人机论文")
+        first = core.create_project("学术专著")
         assert uuid.UUID(first["project_id"]), first["project_id"]
-        assert first["project_id"] != "无人机论文"
+        assert first["project_id"] != "学术专著"
 
         # 名称仍然唯一（人工入口用名称检索），因此第二个同名项目被拒绝。
         try:
-            core.create_project("无人机论文")
+            core.create_project("学术专著")
         except ValueError as exc:
             assert "同名" in str(exc)
         else:  # pragma: no cover - 防回归
@@ -196,7 +196,7 @@ def test_project_id_is_a_uuid_and_never_derived_from_the_name():
         renamed = core.rename_project(first["project_id"], "沙特的教科书")
         assert renamed["project_id"] == first["project_id"], "改名不得改变 ID"
         assert core.load_project(first["project_id"])["name"] == "沙特的教科书"
-        assert not (core.OUTPUT_DIR / "projects" / "无人机论文").exists(), \
+        assert not (core.OUTPUT_DIR / "projects" / "学术专著").exists(), \
             "显示名称不得出现在磁盘路径里"
 
 
@@ -347,9 +347,9 @@ def test_moving_jobs_out_then_deleting_is_supported_programmatically():
 
 def test_assign_by_name_and_by_id_hit_the_same_project():
     with project_env():
-        project = core.create_project("无人机论文")
+        project = core.create_project("学术专著")
         _job("j1")
-        by_name = core.assign_job_to_project("j1", "无人机论文")
+        by_name = core.assign_job_to_project("j1", "学术专著")
         assert by_name["project_id"] == project["project_id"]
         _job("j2")
         by_id = core.assign_job_to_project("j2", project["project_id"])

@@ -61,7 +61,7 @@ def _import_origin() -> str:
     import core
 
     origin = pathlib.Path(core.__file__).resolve()
-    if str(origin).startswith(str(REPO)):
+    if "site-packages" not in str(origin) and str(origin).startswith(str(REPO)):
         raise AssertionError(
             f"`core` 来自仓库（{origin}）而不是已安装包——"
             "请在装了 wheel 的干净环境里运行本脚本"
