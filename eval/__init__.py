@@ -1,1 +1,1 @@
-"""FolioThread Evaluation Harness（评测工具）。详见 eval/README.md。"""
+"""Folith / 译页 Evaluation Harness（评测工具）。详见 eval/README.md。"""

@@ -73,6 +73,21 @@ def _markdown(at):
     return "\n".join(str(item.value) for item in at.markdown)
 
 
+def _editor(at, base_key):
+    """按段身份取译文输入框：key 尾部可能带"重挂载序号"。
+
+    服务端要在**已经被敲过字**的输入框里换内容时，清 session_state 是无效的
+    （element id 只由 user_key/max_chars 决定，默认值不参与），必须换 key 强制前端
+    重建——见 `app.py: _reset_translation_editor`。所以保存之后 key 会变成
+    `translation_editor_<段身份>#1`。断言关心的是"里面是什么"，不是序号。
+    """
+    area = next((item for item in at.text_area if str(item.key) == base_key), None)
+    if area is not None:
+        return area
+    return next((item for item in at.text_area
+                 if str(item.key).startswith(f"{base_key}#")), None)
+
+
 def test_center_grid_is_the_only_translation_editor(tmp_path, monkeypatch):
     """中间网格即主编辑区：右栏不再出现第二个译文编辑器与"保存修改"。"""
     monkeypatch.setattr(core, "OUTPUT_DIR", tmp_path)
@@ -81,14 +96,21 @@ def test_center_grid_is_the_only_translation_editor(tmp_path, monkeypatch):
     core.save_job_state(job_id, state)
     at = _open_workspace(tmp_path, job_id)
 
-    # 每一行都有可编辑的译文框
-    editor_keys = {area.key for area in at.text_area}
+    # 每一行都有可编辑的译文框。key 尾部可能带一个"重挂载序号"
+    # （`translation_editor_<段身份>#3`，见 app.py 的 _reset_translation_editor），
+    # 所以按前缀认。
+    editor_keys = {str(area.key) for area in at.text_area}
     for index in range(len(state["pairs"])):
-        assert f"translation_editor_{assets.segment_id(job_id, index)}" in editor_keys
-    # 但没有改动时完全不渲染保存操作：正常浏览状态不该有一列重复的"保存"按钮
-    assert not any(str(button.key).startswith(f"cat_save_btn_{job_id}_")
-                   for button in at.button), \
-        "未修改的段落不应常驻保存按钮"
+        base = f"translation_editor_{assets.segment_id(job_id, index)}"
+        assert any(key == base or key.startswith(f"{base}#")
+                   for key in editor_keys), f"缺少第 {index + 1} 段的译文框"
+    # 保存入口只在"当前段落"那一行常驻：它是用户此刻工作的地方，入口必须可见
+    # （此前按钮只在 is_dirty 时渲染，新人打完字找不到保存——那正是要修的问题）。
+    # 但其余段落不常驻——20 段同屏挂一排按钮会把正文压成表单。
+    save_keys = {str(button.key) for button in at.button
+                 if str(button.key).startswith(f"cat_save_btn_{job_id}_")}
+    assert save_keys == {f"cat_save_btn_{job_id}_0"}, \
+        f"未修改时只有当前段落可常驻保存入口，实际：{save_keys}"
     assert "未保存" not in _markdown(at)
 
     # 旧的右栏编辑器与全局保存按钮必须消失
@@ -150,17 +172,30 @@ def test_agent_findings_surface_document_level_issues(tmp_path, monkeypatch):
     assert anchors, "问题抽屉必须提供可点击的段落锚点"
 
 
-def test_progress_reports_four_dimensions_not_one_number(tmp_path, monkeypatch):
-    """进度 = Translation / Terminology / Review / Issues，而不是单一 82/82。"""
+def test_global_progress_lives_in_the_banner_not_the_page_body(tmp_path, monkeypatch):
+    """四维进度属于任务 Banner；翻译正文不再复述同一组全局指标。
+
+    正文曾经有"标题旁进度条 + 四维指标行"两套全局叙述，加上 Banner 就是
+    三遍同一件事。现在是：Banner 常驻一次，正文从搜索/筛选/段落开始。
+    """
     monkeypatch.setattr(core, "OUTPUT_DIR", tmp_path)
     job_id = "agentinspector04"
     core.save_job_state(job_id, _ui_state())
     at = _open_workspace(tmp_path, job_id)
 
-    page = _markdown(at)
-    for metric in ("翻译", "术语已确认", "审校", "发现"):
-        assert metric in page, f"进度缺少维度：{metric}"
-    assert "不适用" in page, "未启用独立审校时必须如实标注不适用"
+    banner = "\n".join(
+        str(item.value) for item in at.markdown
+        if "tp-banner-metric" in str(item.value))
+    for metric in ("翻译", "术语", "审校"):
+        assert metric in banner, f"Banner 缺少全局指标：{metric}"
+    assert "已译" in banner
+
+    body = "\n".join(str(item.value) for item in at.markdown
+                     if "tp-cat-title" in str(item.value))
+    assert "tp-cat-progress-grid" not in body, \
+        "翻译正文不得再渲染第二套全局指标行"
+    assert "术语已确认" not in body, \
+        "术语确认进度只属于 Banner，正文不再复述"
 
 
 def test_header_is_compressed_and_keeps_delivery_verdict(tmp_path, monkeypatch):
@@ -201,11 +236,93 @@ def test_saving_from_the_grid_row_persists_and_clears_the_draft(
     updated = core.load_job_state(job_id)
     assert updated["pairs"][0]["target"] == "保存后的第一段译文"
     assert updated["pairs"][0]["human_edited"] is True
-    assert any("已修改" in item.value for item in at.success)
+    # 保存必须有**用户看得见**的成功反馈（不只是静默写盘）。
+    success_text = " ".join(str(item.value) for item in at.success)
+    assert "已保存" in success_text and "第 1 段" in success_text, \
+        f"保存后必须给出明确的成功反馈，实际：{success_text!r}"
     # 保存后草稿被丢弃、基线重建为新的已保存值：行内状态回到"已翻译"而不是"未保存"
-    refreshed = next(area for area in at.text_area if area.key == editor_key)
+    refreshed = _editor(at, editor_key)
     assert refreshed.value == "保存后的第一段译文"
-    assert at.session_state[f"cat_baseline_{editor_key}"] == "保存后的第一段译文"
+    # 基线键跟着 widget 当前那把 key 走（保存会做一次重挂载）。
+    assert at.session_state[f"cat_baseline_{refreshed.key}"] == "保存后的第一段译文"
     assert "未保存" not in _markdown(at)
-    assert not any(button.key == f"cat_save_btn_{job_id}_0" for button in at.button), \
-        "保存完成后行内操作应当消失"
+    # 第 1 段仍是"当前段落"，所以它的保存入口按设计继续常驻；但**不能**再出现在
+    # 其它行——否则 20 段同屏就会挂出一列重复按钮。
+    save_keys = {str(button.key) for button in at.button
+                 if str(button.key).startswith(f"cat_save_btn_{job_id}_")}
+    assert save_keys <= {f"cat_save_btn_{job_id}_0"}, save_keys
+
+
+# ---------------- Agent 结果的两种性质 ----------------
+
+def test_diagnostic_suggestion_never_offers_apply(tmp_path, monkeypatch):
+    """术语检查/上下文一致性只做诊断：不得提供「应用到译文」。
+
+    回归：这两类动作的 prompt 明确写了"不要输出改写后的译文"，但渲染层对
+    **所有** suggestion 无条件显示「应用到译文」，一旦模型没听话，诊断文本
+    就会被一键写进正文——那是内容安全与信任问题，不是文案问题。
+    """
+    monkeypatch.setattr(core, "OUTPUT_DIR", tmp_path)
+    job_id = "agentinspector07"
+    core.save_job_state(job_id, _ui_state())
+    at = _open_workspace(tmp_path, job_id)
+
+    selected_id = assets.segment_id(job_id, 0)
+    at.session_state[f"translation_agent_suggestion_{selected_id}"] = {
+        "action": "术语检查",
+        "kind": "diagnose",
+        "text": "第 2 句的 “aerial view” 未按项目术语译为“鸟瞰视角”。",
+    }
+    at.run()
+    assert not at.exception, at.exception
+
+    assert not any(button.label == "应用到译文" for button in at.button), \
+        "诊断结果不允许写回译文"
+    assert any(button.key == f"translation_agent_discard_{selected_id}"
+               for button in at.button), "诊断结果必须可以收起"
+    captions = " ".join(str(item.value) for item in at.caption)
+    assert "不会写回译文" in captions, \
+        "诊断结果必须明确说明它不会覆盖译文"
+    # 且正文没有被这段诊断文本污染
+    assert core.load_job_state(job_id)["pairs"][0]["target"] == \
+        "无人机的感知中枢是体积化、多光谱的。"
+
+
+def test_rewrite_suggestion_still_offers_apply(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "OUTPUT_DIR", tmp_path)
+    job_id = "agentinspector08"
+    core.save_job_state(job_id, _ui_state())
+    at = _open_workspace(tmp_path, job_id)
+
+    selected_id = assets.segment_id(job_id, 0)
+    at.session_state[f"translation_agent_suggestion_{selected_id}"] = {
+        "action": "改写",
+        "kind": "rewrite",
+        "text": "无人机的感知中枢呈体积化与多光谱特征。",
+    }
+    at.run()
+    assert not at.exception, at.exception
+    assert any(button.label == "应用到译文" for button in at.button), \
+        "明确的改写候选必须可以应用到译文"
+
+    next(button for button in at.button
+         if button.label == "应用到译文").click()
+    at.run()
+    assert not at.exception, at.exception
+    assert core.load_job_state(job_id)["pairs"][0]["target"] == \
+        "无人机的感知中枢呈体积化与多光谱特征。"
+
+
+def test_custom_instruction_defaults_to_read_only(tmp_path, monkeypatch):
+    """自定义指令的意图服务端判断不了，默认按只诊断处理。"""
+    monkeypatch.setattr(core, "OUTPUT_DIR", tmp_path)
+    job_id = "agentinspector09"
+    core.save_job_state(job_id, _ui_state())
+    at = _open_workspace(tmp_path, job_id)
+
+    selected_id = assets.segment_id(job_id, 0)
+    toggle = next((c for c in at.checkbox
+                   if str(c.key) == f"translation_agent_custom_rewrite_{selected_id}"),
+                  None)
+    assert toggle is not None, "自定义指令必须让人显式声明输出类型"
+    assert toggle.value is False, "默认不得把自定义指令结果当作改写候选"

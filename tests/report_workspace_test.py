@@ -263,7 +263,10 @@ def test_running_report_has_one_overall_card_and_subordinate_cancel(tmp_path, mo
                    for button in at.button)
         cancel = next(button for button in at.button if button.label == "取消任务")
         assert cancel.proto.type == "secondary"
-        assert not any('class="tp-runtime-panel"' in item.value for item in at.markdown)
+        # 运行状态现在由任务 Banner 的运行区统一承载：报告页只能出现**一份**，
+        # 报告正文自己不再画一套并行的运行面板。
+        assert sum('class="tp-banner-runtime is-' in item.value
+                   for item in at.markdown) == 1
         next(button for button in at.button if button.label == "查看运行详情").click().run()
         assert at.session_state["report_tabs_reportui0000001"] == "运行详情"
         assert not at.exception, at.exception

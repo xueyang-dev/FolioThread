@@ -1,10 +1,14 @@
-# FolioThread UI audit pack
+# Folith / 译页 UI audit pack
 
 Baseline commit: `b21ddfbbd1120774251e634cbaa7f8397ada0bdb` (`main`, PR #4)
 
 Capture date: 2026-09-01 · Python 3.11.3 · Streamlit 1.62.0
 
 App under test: the real `app.py` Streamlit application, run locally with deterministic fixtures. Phase 3.5 closure changes are recorded in [`docs/phase3-5-ux-closure.md`](../phase3-5-ux-closure.md).
+
+后续验收包不再改写这份 09-01 基线索引：`24-minimal-workspace/`、
+`25-save-flow/` 和 `26-release-e2e/` 分别记录工作台收敛、保存/并发编辑实测和
+发布前新任务端到端链路；以各目录 README 的日期和验证命令为准。
 
 Primary desktop viewport: 1440 × 780, the closest stable viewport available in the in-app browser to the requested 1440 × 1000.
 

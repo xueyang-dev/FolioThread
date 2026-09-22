@@ -44,16 +44,25 @@ def test_resume_transition_hides_no_worker_copy_and_keeps_technical_details():
         at.session_state["workspace_mode"] = True
         at.run()
         assert not at.exception
+        # 运行状态现在是任务 Banner 内的运行区（概览页已删除）；面板里只放
+        # 状态/进度/动作，引擎细节一律留在按需打开的右侧抽屉里。
         panel = next(item.value for item in at.markdown
-                     if '<div class="tp-runtime-panel">' in item.value)
+                     if 'class="tp-banner-runtime is-' in item.value)
         assert "正在恢复任务" in panel
-        assert "7 / 11" in panel
+        assert "流程进度" in panel and "11" in panel
         assert "当前没有后台 worker" not in panel
         assert "worker" not in panel and "lease" not in panel and "PID" not in panel
         resuming = [button for button in at.button if button.label == "正在恢复…"]
         assert len(resuming) == 1 and resuming[0].disabled
-        assert any(expander.label == "运行详情" for expander in at.expander)
-        assert any("worker_started · worker claimed" in item.value for item in at.markdown)
+        assert not any(expander.label == "运行详情" for expander in at.expander)
+        detail = next(button for button in at.button
+                      if button.label.startswith("运行详情"))
+        detail.click()
+        at.run()
+        assert not at.exception, at.exception
+        technical = next(expander for expander in at.expander
+                         if expander.label == "技术信息")
+        assert technical is not None
         assert sum(event["event"] == "resume_requested" for event in
                    core.read_runtime_events(job_id, visibility="user")) == 1
 
@@ -100,7 +109,7 @@ def test_continue_uses_the_task_saved_configuration(tmp_path, monkeypatch):
         at.session_state["active_job_id"] = job_id
         at.session_state["app_view"] = "workspace"
         at.session_state["workspace_mode"] = True
-        at.session_state["workspace_section"] = "overview"
+        at.session_state["workspace_section"] = "translation"
         at.run()
         next(button for button in at.button if button.label == "继续处理").click()
         at.run()

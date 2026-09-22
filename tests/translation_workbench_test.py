@@ -2,6 +2,7 @@
 import json
 
 import core
+import pytest
 
 
 def _translation_state():
@@ -109,5 +110,76 @@ def test_manual_edit_invalidates_review_and_preserves_frozen_snapshot(tmp_path):
         assert restored["pairs"][0]["reviewed"] is True
         assert "human_edited" not in restored["pairs"][0]
         assert core.delivery_snapshot_assets(job_id, 1)["bilingual.jsonl"] == frozen_bytes
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def _persist_translation_state(tmp_path, job_id="segmentstructure0001"):
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    state = _translation_state()
+    core.save_source(job_id, b"translation source")
+    core.save_job_state(job_id, state)
+    return old_output, job_id
+
+
+def test_segment_structure_edits_keep_pairs_and_paras_aligned(tmp_path):
+    old_output, job_id = _persist_translation_state(tmp_path)
+    try:
+        split = core.mutate_translation_segments(
+            job_id, 1, "split",
+            source_a="Beta source · first", source_b="Beta source · second",
+            target_a="乙（前）", target_b="乙（后）")
+        assert split["paras"] == [
+            "Alpha source",
+            "Beta source · first", "Beta source · second", "Gamma source",
+        ]
+        assert len(split["pairs"]) == len(split["paras"]) == 4
+        assert split["pairs"][1]["target"] == "乙（前）"
+        assert split["pairs"][2]["target"] == "乙（后）"
+        assert all(not pair.get("reviewed") for pair in split["pairs"])
+        assert split["annotations_done"] is False
+
+        merged = core.mutate_translation_segments(job_id, 1, "merge")
+        assert len(merged["pairs"]) == len(merged["paras"]) == 3
+        assert "Beta source · first" in merged["pairs"][1]["source"]
+        assert "Beta source · second" in merged["pairs"][1]["source"]
+        assert merged["pairs"][1]["reviewed"] is False
+
+        inserted = core.mutate_translation_segments(job_id, 1, "insert")
+        assert inserted["paras"][2] == ""
+        assert inserted["pairs"][2]["manual_segment"] is True
+        deleted = core.mutate_translation_segments(job_id, 2, "delete")
+        assert len(deleted["pairs"]) == len(deleted["paras"]) == 3
+
+        inserted = core.mutate_translation_segments(job_id, 1, "insert")
+        assert inserted["pairs"][2]["manual_segment"] is True
+
+        edited = core.mutate_translation_segments(
+            job_id, 2, "source_edit", source_text="译者补充的段落")
+        assert edited["paras"][2] == "译者补充的段落"
+        assert edited["pairs"][2]["source_human_edited"] is True
+        assert edited["pairs"][2]["target"] == ""
+        assert 2 in core.translation_visible_indexes(edited, filter_edited=True)
+
+        assert len(edited["pairs"]) == len(edited["paras"]) == 4
+        assert edited["pairs"][2]["reviewed"] is False
+
+        # Existing content cannot be removed through the structural action.
+        with pytest.raises(ValueError):
+            core.mutate_translation_segments(job_id, 0, "delete")
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def test_segment_structure_edit_is_rejected_while_worker_is_active(tmp_path, monkeypatch):
+    old_output, job_id = _persist_translation_state(tmp_path, "segmentactive0001")
+    try:
+        monkeypatch.setattr(
+            core, "get_job_runtime_status",
+            lambda *_args, **_kwargs: {"status": "running"},
+        )
+        with pytest.raises(RuntimeError, match="正在运行"):
+            core.mutate_translation_segments(job_id, 0, "insert")
     finally:
         core.OUTPUT_DIR = old_output

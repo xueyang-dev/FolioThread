@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import core
-from transpraxis import checkpoint, context, delivery, knowledge, models, repair
+from transpraxis import checkpoint, context, delivery, knowledge, models, repair, usage
 from transpraxis.translation_evidence import (
     TranslationEvidenceIndex,
     build_runtime_review_packet,
@@ -52,6 +52,87 @@ def test_context_understanding_and_target_priority(tmp_path):
     assert "【全文概要】" in context.render_context_packet(packet)
     assert context.context_metadata(packet)["previous_target_levels"] == [
         "reviewed", "human_accepted"]
+
+
+def test_context_packet_deduplicates_neighbors_and_enforces_budget():
+    packet = context.compile_context_packet(
+        {"domain": "领域"},
+        {"summary": "全文概要" * 900},
+        {"summary": "单元摘要" * 900},
+        "locked term -> 锁定术语" * 120,
+        ["重复原文", "重复原文", "前文"],
+        [{"segment_index": 1, "source": "前文", "target": "已接受译文"}],
+        ["重复原文", "后文"],
+        ["当前段落"],
+        context_budget_chars=1800,
+    )
+    rendered = context.render_context_packet(packet)
+    metadata = context.context_metadata(packet)
+    assert "当前段落" in rendered
+    assert metadata["context_budget_chars"] == 1800
+    assert metadata["context_truncated"]
+    assert metadata["dedupe_removed_count"] >= 2
+    assert metadata["context_prefix_chars"] <= 1800
+
+
+def test_knowledge_feedback_due_keeps_first_last_and_adapts_after_candidate():
+    assert knowledge.feedback_due(0, 4, interval=2, existing_candidates=[])
+    candidate = {"source": "x", "observed_target": "译文"}
+    assert knowledge.feedback_due(1, 4, interval=2, existing_candidates=[candidate]) is False
+    assert knowledge.feedback_due(2, 4, interval=2, existing_candidates=[candidate])
+    assert knowledge.feedback_due(3, 4, interval=2, existing_candidates=[candidate])
+
+
+def test_usage_ledger_tracks_estimated_calls_without_prompt_contents():
+    ledger = usage.empty_usage()
+    wrapped = usage.tracked_call(
+        lambda provider, key, model, system, user, **kwargs: "译文",
+        ledger,
+        role="translation",
+    )
+    assert wrapped("p", "k", "m", "系统提示", "用户提示") == "译文"
+    assert ledger["calls"] == 1
+    assert ledger["estimated_total_tokens"] > 0
+    assert ledger["by_role"]["translation"]["calls"] == 1
+    assert "系统提示" not in ledger
+
+
+def test_targeted_final_review_selects_global_risks_and_persists_usage(tmp_path):
+    old_output, old_call = core.OUTPUT_DIR, core.call_llm
+    core.OUTPUT_DIR = tmp_path
+    try:
+        state = core.new_job_state("targeted.docx")
+        state.update(
+            p1_done=True,
+            p2_done=True,
+            target_lang="简体中文",
+            use_tm=False,
+            paras=[f"Source {index}" for index in range(5)],
+            pairs=[{"source": f"Source {index}", "target": f"译文 {index}"}
+                   for index in range(5)],
+            findings=[
+                {"type": "entity_conflict", "severity": "actionable",
+                 "segment_id": 2, "reason": "实体漂移"},
+                {"type": "review", "severity": "actionable",
+                 "segment_id": 4, "reason": "普通审校问题"},
+            ],
+        )
+        core.save_job_state("targeted", state)
+
+        def reviewer(*args, **kwargs):
+            return json.dumps({"findings": [], "evidence_requests": []})
+
+        core.call_llm = reviewer
+        reviewed = core._run_targeted_final_review(
+            "targeted", state,
+            {"provider": "p", "api_key": "k", "model": "m", "base_url": None},
+            "简体中文", "", enable_review=True)
+        assert reviewed["targeted_final_review"]["status"] == "completed"
+        assert reviewed["targeted_final_review"]["segment_ids"] == [2]
+        assert reviewed["llm_usage"]["by_role"]["targeted_final_review"]["calls"] >= 1
+        assert core.load_job_state("targeted")["targeted_final_review"]["segment_ids"] == [2]
+    finally:
+        core.OUTPUT_DIR, core.call_llm = old_output, old_call
 
 
 def test_knowledge_candidate_first_occurrence_and_locked_conflict():

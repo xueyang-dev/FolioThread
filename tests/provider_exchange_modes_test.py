@@ -7,6 +7,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import httpx
+from openai import APIStatusError
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import core
@@ -68,16 +71,67 @@ def test_custom_relay_base_url():
         client_kwargs = next(k for tag, k in calls if tag == "client")
         assert client_kwargs["base_url"] == "https://openrouter.ai/api/v1"
 
-        # 清除线程级地址后，自定义中转站不再注入 base_url
+        # 清除线程级地址后，自定义中转站必须失败闭合，不能静默回退到
+        # OpenAI SDK 默认地址（否则中转站密钥会产生误导性的 401）。
         core.set_llm_base_url(None)
         calls.clear()
-        core.call_llm("自定义中转站", "k", "m", "s", "u")
-        client_kwargs = next(k for tag, k in calls if tag == "client")
-        assert "base_url" not in client_kwargs
+        try:
+            core.call_llm("自定义中转站", "k", "m", "s", "u")
+        except ValueError as exc:
+            assert "API 地址" in str(exc)
+        else:
+            raise AssertionError("custom relay without base URL must fail closed")
+
+        core.set_llm_base_url("https://relay.example.com/v1")
+        core.set_llm_reasoning_effort("medium")
+        calls.clear()
+        core.call_llm("自定义中转站", "k", "deepseek-r1", "s", "u")
+        create_kwargs = next(k for k in calls if not isinstance(k, tuple))
+        assert create_kwargs["reasoning_effort"] == "medium"
+        calls.clear()
+        core.call_llm("自定义中转站", "k", "relay-model", "s", "u")
+        create_kwargs = next(k for k in calls if not isinstance(k, tuple))
+        assert "reasoning_effort" not in create_kwargs
+        core.set_llm_reasoning_effort(None)
     finally:
         core.OpenAI = original
         core.set_llm_base_url(None)
+        core.set_llm_reasoning_effort(None)
     print("  ✓ 自定义中转站 base_url（线程级上下文 + 预设中转站）")
+
+
+def test_reasoning_effort_capability():
+    assert core.reasoning_effort_options("OpenAI", "gpt-5.2") == (
+        "low", "medium", "high")
+    assert core.reasoning_effort_options("OpenAI", "gpt-4.1-mini") == ()
+    assert core.reasoning_effort_options("自定义中转站", "deepseek-v4.1-flash") == ()
+    assert core.reasoning_effort_options("自定义中转站", "deepseek-r1") == (
+        "low", "medium", "high")
+    print("  ✓ 推理强度只对已识别的推理模型开放")
+
+
+def test_provider_config_roundtrip():
+    tmp = Path(tempfile.mkdtemp(prefix="provider-config-"))
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp
+    try:
+        core.save_provider_config(
+            "自定义中转站", "deepseek-r1", "relay-key",
+            "https://relay.example.com/v1/chat/completions",
+            reasoning_effort="medium")
+        saved = core.load_provider_config()
+        assert saved["base_url"] == "https://relay.example.com/v1"
+        assert saved["reasoning_effort"] == "medium"
+        assert (core.provider_config_path().stat().st_mode & 0o077) == 0
+
+        core.save_provider_config(
+            "自定义中转站", "relay-model", "relay-key",
+            "https://relay.example.com/v1", reasoning_effort="unsupported")
+        assert core.load_provider_config()["reasoning_effort"] == ""
+    finally:
+        core.OUTPUT_DIR = old_output
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  ✓ Provider 配置规范化 / 原子保存 / 旧值容错")
 
 
 def test_provider_probe():
@@ -112,6 +166,37 @@ def test_provider_probe():
     print("  ✓ test_provider（成功 / 失败路径）")
 
 
+def test_provider_error_status_is_user_readable():
+    request = httpx.Request("GET", "https://relay.example.com/v1/models")
+    response = httpx.Response(
+        403, request=request,
+        json={"code": "INSUFFICIENT_BALANCE", "message": "余额不足"})
+    error = httpx.HTTPStatusError(
+        "403", request=request, response=response)
+
+    status = core.provider_error_status(error)
+    assert status["status"] == "insufficient_balance"
+    assert status["label"] == "余额不足"
+    assert "余额不足" in status["message"]
+    assert status["http_status"] == 403
+    assert "INSUFFICIENT_BALANCE" == status["provider_code"]
+    assert "INSUFFICIENT_BALANCE" not in core.provider_error_message(error)
+
+    sdk_error = APIStatusError(
+        "Error code: 403", response=response,
+        body={"code": "INSUFFICIENT_BALANCE", "message": "余额不足"})
+    assert core.provider_error_status(sdk_error)["status"] == \
+        "insufficient_balance"
+
+    class RelayError(Exception):
+        status_code = 403
+        body = {"error": {"code": "INSUFFICIENT_BALANCE", "message": "余额不足"}}
+
+    assert core.provider_error_status(RelayError())["status"] == \
+        "insufficient_balance"
+    print("  ✓ Provider 错误归一化（余额不足 / 不泄露原始错误体）")
+
+
 def test_fetch_provider_models():
     calls = []
 
@@ -135,6 +220,26 @@ def test_fetch_provider_models():
         assert ok and models == ["model-a", "model-z"] and "2" in msg
         assert calls[0][0] == "https://relay.example.com/v1/models"
         assert calls[0][1]["Authorization"] == "Bearer k"
+    finally:
+        core.httpx.get = original_get
+
+    request = httpx.Request("GET", "https://relay.example.com/v1/models")
+    response = httpx.Response(
+        403, request=request,
+        json={"code": "INSUFFICIENT_BALANCE", "message": "余额不足"})
+    error = httpx.HTTPStatusError(
+        "403", request=request, response=response)
+
+    def fake_insufficient_balance(url, headers, timeout):
+        raise error
+
+    core.httpx.get = fake_insufficient_balance
+    try:
+        ok, models, msg = core.fetch_provider_models(
+            "自定义中转站", "k", "https://relay.example.com/v1")
+        assert not ok and models == []
+        assert "余额不足" in msg
+        assert "INSUFFICIENT_BALANCE" not in msg
     finally:
         core.httpx.get = original_get
     print("  ✓ 自定义中转站模型目录获取")
@@ -350,7 +455,10 @@ def test_custom_annotation_colors():
 def main():
     test_provider_registry_sane()
     test_custom_relay_base_url()
+    test_reasoning_effort_capability()
+    test_provider_config_roundtrip()
     test_provider_probe()
+    test_provider_error_status_is_user_readable()
     test_fetch_provider_models()
     test_exchange_formats()
     test_mode_semantics()

@@ -1,4 +1,4 @@
-"""Read-only, deterministic findings and progress for the FolioThread agent panel.
+"""Read-only, deterministic findings and progress for the Folith agent panel.
 
 The runtime and Translation Core remain authoritative; this module only reads
 persisted job state and reports what it already says — terminology drift, lost

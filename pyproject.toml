@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "foliothread"
 version = "0.4.0"
-description = "FolioThread — Long-document Translation Workspace"
+description = "Folith — Agentic Localization Workspace"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -16,17 +16,19 @@ authors = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/xueyang-dev/FolioThread"
-Repository = "https://github.com/xueyang-dev/FolioThread"
-Issues = "https://github.com/xueyang-dev/FolioThread/issues"
+Homepage = "https://github.com/xueyang-dev/Folith"
+Repository = "https://github.com/xueyang-dev/Folith"
+Issues = "https://github.com/xueyang-dev/Folith/issues"
 
 [project.optional-dependencies]
 desktop = ["pywebview>=5.0"]
 test = ["pytest>=8,<9"]
 
 [project.scripts]
+folith = "gui:main"
+# Published package and command kept as a compatibility alias for existing installs.
 foliothread = "gui:main"
-# Legacy v0.4 command; the public product command is `foliothread`.
+# Legacy v0.4 command; the public product command is `folith`.
 transpraxis = "gui:main"
 
 [tool.setuptools]

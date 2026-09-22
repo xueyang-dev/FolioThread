@@ -804,6 +804,11 @@ def test_external_evidence_attack_and_prompt_scan():
         # XML 命名空间键（如 xml:lang 的展开形式）不是引用 URL
         if "{http://www.w3.org" in line:
             continue
+        # Clark 记法的命名空间键一律不是引用 URL。OOXML 部件的命名空间
+        # （`{http://schemas.openxmlformats.org/...}`）只是解析 docx 时的标签名，
+        # 既不会出现在 prompt 里，也不指向任何可引用来源。
+        if '"{http://' in line:
+            continue
         # SVG 资源的 xmlns 声明不是 prompt 里的引用 URL
         if 'xmlns="http://www.w3.org' in line:
             continue

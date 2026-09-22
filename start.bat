@@ -2,11 +2,11 @@
 :: 切换终端编码为 UTF-8，彻底解决中文乱码
 chcp 65001 >nul
 
-title FolioThread - 启动器
+title 译页 - 启动器
 color 0b
 
 echo ==========================================
-echo       FolioThread 正在启动...
+echo       译页正在启动...
 echo ==========================================
 echo.
 

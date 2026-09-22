@@ -1,4 +1,4 @@
-"""Domain-neutral contracts layered over FolioThread's existing state."""
+"""Domain-neutral contracts layered over Folith's existing state."""
 
 from .decisions import HumanDecision, record_human_decision
 from .evidence import fingerprint, freshness, mark_stale, review_input_fingerprint

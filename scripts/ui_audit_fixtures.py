@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create deterministic, local-only FolioThread UI audit fixtures."""
+"""Create deterministic, local-only Folith UI audit fixtures."""
 
 from pathlib import Path
 import json
@@ -18,7 +18,7 @@ from transpraxis import translation_evidence
 
 OUTPUT = ROOT / "outputs"
 FIXED_AT = "2026-09-01T08:15:00+03:00"
-PDF_PATH = Path("/tmp/foliothread-ui-audit-source.pdf")
+PDF_PATH = Path("/tmp/folith-ui-audit-source.pdf")
 
 
 def _pairs(job_id, count=3, reviewed=False):
@@ -411,7 +411,7 @@ def _save(job_id, state, *, runtime=None):
     if runtime is None:
         runtime = _runtime_for(state)
     core.save_job_state(job_id, state)
-    core.save_source(job_id, b"FolioThread synthetic UI audit source")
+    core.save_source(job_id, b"Folith synthetic UI audit source")
     core.update_runtime_state(job_id, **runtime)
 
 
@@ -550,7 +550,7 @@ def main():
 
     document = fitz.open()
     page = document.new_page()
-    page.insert_text((72, 90), "FolioThread UI audit fixture", fontsize=16)
+    page.insert_text((72, 90), "Folith UI audit fixture", fontsize=16)
     page.insert_text((72, 130), "The translation workspace preserves source context.", fontsize=11)
     page.insert_text((72, 160), "Terminology decisions remain visible to the reviewer.", fontsize=11)
     document.save(str(PDF_PATH))

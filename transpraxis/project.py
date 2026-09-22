@@ -1,6 +1,6 @@
 """Project：任务、术语、风格规则、人工决定与已审校记忆的长期容器。
 
-蓝图 §3.2 把 Project / Job 的边界定义为 FolioThread 从"单次脚本"成为 Studio 的
+蓝图 §3.2 把 Project / Job 的边界定义为 Folith 从"单次脚本"成为工作台的
 关键边界：
 
 ```text
@@ -28,7 +28,7 @@ Project
 
 - 生成的候选术语、模型解释和一次性 context **不进入**项目记忆；
 - **不在项目文件里另存一份翻译记忆。** 蓝图 §3.2 把 "reviewed translation
-  memory" 列在 Project 之下，但 FolioThread 已有一个受控的已审校译对存储
+memory" 列在 Project 之下，但 Folith 已有一个受控的已审校译对存储
   （按项目隔离的 translation_memory.json，跨任务复用、已过审校门槛）。再存一份
   会产生"两份 TM 真值"，正是本项目在别处已经踩过的坑。因此项目记忆拥有
   **术语 / 风格 / 人工决定审计**；TM 仍由既有存储承担，项目视图以引用方式
@@ -749,7 +749,7 @@ def validate_memory_payload(payload: Any) -> Dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise ValueError("项目记忆文件必须是一个 JSON 对象")
     if str(payload.get("format") or "") != MEMORY_FORMAT:
-        raise ValueError(f"不是 FolioThread 项目记忆文件：{payload.get('format')!r}")
+        raise ValueError(f"不是 Folith 项目记忆文件：{payload.get('format')!r}")
     version = payload.get("format_version")
     if version != MEMORY_FORMAT_VERSION:
         raise ValueError(

@@ -49,6 +49,19 @@ def test_quick_profile_empty_sample():
     assert any("无可用的文本样本" in w for w in warnings)
 
 
+def test_quick_profile_explains_insufficient_balance():
+    paragraphs = ["一段样本。" * 20] * 12
+
+    def balance_error(*args, **kwargs):
+        raise RuntimeError(
+            "Error code: 403 - {'code': 'INSUFFICIENT_BALANCE', 'message': '余额不足'}")
+
+    _, _, warnings = style_profile.quick_profile(
+        paragraphs, "custom", "k", "m", call_llm=balance_error)
+    assert any("余额不足" in warning for warning in warnings)
+    assert not any("INSUFFICIENT_BALANCE" in warning for warning in warnings)
+
+
 def test_profile_to_rules_and_id():
     sel = {"selected": "academic", "adjustments": {"formality": 80}}
     rules = style_profile.profile_to_rules(sel)
@@ -86,6 +99,7 @@ def main():
         test_recommendation_normalization_clamps_unknown_style()
         test_quick_profile_falls_back_deterministically()
         test_quick_profile_empty_sample()
+        test_quick_profile_explains_insufficient_balance()
         test_profile_to_rules_and_id()
         test_core_write_profile_artifacts(Path(tmp))
     print("Style Profile 测试通过 ✅")

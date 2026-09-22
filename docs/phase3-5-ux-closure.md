@@ -1,4 +1,4 @@
-# FolioThread Phase 3.5 — UX State & Workflow Closure
+# Folith / 译页 Phase 3.5 — UX State & Workflow Closure
 
 Phase 3.5 closes the gap between persisted workflow state and what a human can
 understand and act on in the Streamlit workspace. It does not change the
@@ -100,7 +100,7 @@ The branch was verified with:
 - Python 3.10 and 3.12 isolated environments: 434 passed each;
 - Python 3.10/3.11/3.12 critical-module compilation;
 - `python3 -m build`, archive contents/forbidden-runtime-artifact checks;
-- fresh-wheel import/resource smoke test and `foliothread --help`;
+- fresh-wheel import/resource smoke test and `folith --help` (with the old command alias retained);
 - real Streamlit fixtures from `scripts/ui_audit_fixtures.py`;
 - live viewport checks at 1440px, 980px, and 760px with saved screenshot
   evidence under `docs/ui-audit/`.

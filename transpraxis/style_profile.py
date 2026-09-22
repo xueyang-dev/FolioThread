@@ -1,6 +1,6 @@
 """预定义 Style Profiles + Quick Profiling 结构化推荐。
 
-设计约束（FolioThread 工程原则）：
+设计约束（Folith 工程原则）：
 - LLM 不做"自由发明风格"，只在预定义 profile 集合中选择，并允许少量参数微调；
 - 推荐结果必须是结构化 JSON，归一化后成为可版本化 artifact（style_profile_id）；
 - 失败时确定性降级（general + 0 置信度 + warning），绝不静默伪造推荐；
@@ -291,6 +291,7 @@ def quick_profile(
     api_key: str,
     model: str,
     target_lang: str = "",
+    base_url: Optional[str] = None,
     call_llm: Optional[Callable] = None,
 ) -> Tuple[models.DocumentProfile, Dict[str, Any], List[str]]:
     """快速画像 + 风格推荐。
@@ -315,8 +316,11 @@ def quick_profile(
     last_err = "模型未返回内容"
     for _attempt in range(3):
         try:
+            call_kwargs = {"temperature": 0.1}
+            if base_url is not None:
+                call_kwargs["base_url"] = base_url
             res = call_llm(provider, api_key, model, _style_prompt(target_lang),
-                           sample_text, temperature=0.1)
+                           sample_text, **call_kwargs)
             raw = _parse_json_object(res)
             if raw is None:
                 raise ValueError("返回内容不是合法 JSON 对象")
@@ -328,6 +332,17 @@ def quick_profile(
             style_rec = _normalize_style_recommendation(style_raw)
             return doc_profile, style_rec, warnings
         except Exception as exc:  # noqa: BLE001 - LLM 输出不可控，统一降级
-            last_err = str(exc)
+            # Provider failures are surfaced as actionable product copy.  Keep
+            # malformed-model-output diagnostics for local/custom callables,
+            # but never expose a relay's raw error body (which may contain
+            # credentials or an opaque HTTP-only message).
+            try:
+                import core
+                provider_status = core.provider_error_status(exc)
+                last_err = (provider_status["message"]
+                            if provider_status["status"] != "unknown"
+                            else str(exc))
+            except Exception:  # pragma: no cover - defensive import fallback
+                last_err = str(exc)
     warnings.append(f"快速画像失败（{last_err}），已降级为通用风格")
     return models.default_document_profile(), _fallback_recommendation(), warnings

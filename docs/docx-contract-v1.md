@@ -1,4 +1,4 @@
-# FolioThread DOCX Contract v1
+# Folith / 译页 DOCX Contract v1
 
 状态：2026-09-14 已确定的设计方向，尚未实现或验收。本文定义近期 UI 打磨与正式发布之后的首个 CAT 内核里程碑，不能作为当前版本已支持能力的说明。当前进度与优先级见[开发蓝图](foliothread-agentic-native-blueprint.md#7-当前进度与开发路线)。
 

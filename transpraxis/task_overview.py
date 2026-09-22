@@ -1,4 +1,4 @@
-"""Canonical task-overview state for the FolioThread workspace.
+"""Canonical task-overview state for the Folith workspace.
 
 The Task Overview answers exactly three questions:
 
@@ -507,7 +507,9 @@ def derive_task_overview_state(task: Any, *, facts: Any = None) -> Dict[str, Any
             reason = "runtime_failed"
             label = "运行失败"
             detail = runtime_label or "上次运行失败，已保存的进度不会丢失。"
-            primary = _action("resume", "继续处理", "overview", primary=True)
+            # 概览页已经取消：运行恢复的落点是翻译工作台，那里 Banner 的运行区
+            # 承载恢复/重试动作。绝不指向 `overview`——它不再是合法路由。
+            primary = _action("resume", "继续处理", "translation", primary=True)
         else:
             reason = "delivery_gate"
             label = "交付门禁未通过"
@@ -519,7 +521,7 @@ def derive_task_overview_state(task: Any, *, facts: Any = None) -> Dict[str, Any
         tone = AMBER
         label = "处理中断"
         detail = runtime_label or "已保存的进度不会丢失；继续处理后可以恢复。"
-        primary = _action("resume", "继续处理", "overview", primary=True)
+        primary = _action("resume", "继续处理", "translation", primary=True)
     elif not translation_complete:
         if not segments["started"]:
             lifecycle = DRAFT

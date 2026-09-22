@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -43,7 +44,8 @@ MODEL = "offline-fixture"
 TARGET_LANG = "简体中文"
 
 # 工作区导航：蓝图 Phase 3 要求的 Projects → Job → Translate → Review → Deliver。
-WORKSPACE_SECTIONS = ("概览", "翻译", "术语", "审校", "交付")
+# 任务工作台没有「概览」一级页面：全局摘要由任务 Banner 承担，打开任务即落到翻译。
+WORKSPACE_SECTIONS = ("翻译", "术语", "审校", "交付")
 
 
 @pytest.fixture(scope="module")
@@ -86,7 +88,7 @@ def run_pipeline(job_id: str, docx: Path, provider: OfflineProvider,
         enable_annotate=False, use_tm=True, delivery_config={"deliver_report": False})
 
 
-def open_workspace(job_id: str, section: str = "overview"):
+def open_workspace(job_id: str, section: str = "translation"):
     """打开真实应用的任务工作区；返回 AppTest（已 run 一次）。"""
     from streamlit.testing.v1 import AppTest
 
@@ -128,7 +130,7 @@ def test_ui_workspace_shows_the_closed_loop_navigation(source_doc):
         asset_panels = [e.label for e in at.expander
                         if str(e.label).startswith("资产与交付")]
         assert asset_panels == [], \
-            f"概览不应内联其它任务的资产面板：{asset_panels[:4]}"
+            f"任务工作区不应内联其它任务的资产面板：{asset_panels[:4]}"
 
 
 def test_ui_delivery_freezes_a_final_snapshot(source_doc):
@@ -168,11 +170,11 @@ def test_ui_review_gate_blocks_delivery_then_human_decision_unblocks(source_doc)
     with offline_console(provider):
         run_pipeline("ui-gate", source_doc["docx"], provider, source_doc["glossary"])
 
-        # --- 概览：必须把"必须处理的问题"作为下一步动作呈现 ---
-        overview = open_workspace("ui-gate")
-        assert not overview.exception, [e.value for e in overview.exception]
-        primary = [b for b in overview.button if "问题" in b.label]
-        assert primary, f"概览必须给出处理阻塞的下一步动作：{labels(overview)}"
+        # --- 任务 Banner：必须把"必须处理的问题"作为下一步动作呈现 ---
+        opened = open_workspace("ui-gate")
+        assert not opened.exception, [e.value for e in opened.exception]
+        primary = [b for b in opened.button if "问题" in b.label]
+        assert primary, f"Banner 必须给出处理阻塞的下一步动作：{labels(opened)}"
 
         # --- 交付：未决时不得提供冻结动作 ---
         delivery = open_workspace("ui-gate", section="delivery")
@@ -500,9 +502,9 @@ def test_ui_delivery_does_not_invent_downstream_work(source_doc):
             "纯翻译任务不应要求重建报告产物"
         assert "回到冻结操作" in page or "生成冻结交付" in page, page[:300]
 
-        # 概览同样不应声称"报告需要更新"
-        overview = open_workspace("no-downstream")
-        page = "\n".join(str(m.value) for m in overview.markdown)
+        # 任务 Banner 同样不应声称"报告需要更新"
+        banner = open_workspace("no-downstream")
+        page = "\n".join(str(m.value) for m in banner.markdown)
         assert "报告需要更新" not in page, page[:300]
 
 
@@ -514,7 +516,7 @@ def test_ui_audit_fixtures_match_real_job_state(tmp_path):
 
     `scripts/ui_audit_fixtures.py` 生成的合成任务过去完全不写 runtime_state.json、
     也缺少 `enable_annotate` 等真实任务一定有的字段，于是**已完成**的任务会被
-    判定为未完成，概览随之渲染运行面板（worker / lease / checkpoint）并出现
+    判定为未完成，任务 Banner 随之渲染运行区（worker / lease / checkpoint）并出现
     「继续处理」——审计截图因此比真实情况杂乱。
     """
     import importlib.util
@@ -557,7 +559,7 @@ def test_ui_audit_fixtures_match_real_job_state(tmp_path):
             f"进行中的 fixture 必须记录真实进度：{runtime.get('completed_units')}/" \
             f"{runtime.get('total_units')}"
 
-        # 端到端：已完成任务的概览不得出现运行面板与「继续处理」
+        # 端到端：已完成任务的任务 Banner 不得出现运行区与「继续处理」
         at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60)
         at.session_state["active_job_id"] = "ui-audit-clean"
         at.session_state["app_view"] = "workspace"
@@ -565,8 +567,34 @@ def test_ui_audit_fixtures_match_real_job_state(tmp_path):
         at.run()
         assert not at.exception, [e.value for e in at.exception]
         assert not any("worker id" in str(c.value) for c in at.caption), \
-            "已完成任务不应在概览渲染运行面板"
+            "已完成任务不应在 Banner 渲染运行详情"
         assert not any(b.label == "继续处理" for b in at.button), \
             "已完成任务不应出现「继续处理」"
+        assert not any(e.label == "运行详情" for e in at.expander), \
+            "已完成任务不应出现运行详情面板"
     finally:
         core.OUTPUT_DIR = old_output
+
+
+# ================= 工作台 shell 的响应式契约 =================
+
+def test_workspace_responsive_rules_anchor_on_a_rendered_column():
+    """工作台的响应式规则必须锚在**真实存在**的容器上。
+
+    回归：`@media (max-width: 900px)` 里"正文与 Inspector 改为堆叠"的规则原来
+    写的是 `:has(.st-key-workspace_nav_col)`，而 `st-key-workspace_nav_col`
+    **只存在于 CSS**——页面导航早已改成 Banner 下的横向工具条，渲染代码从不产出
+    这个 key。于是"窄屏改为堆叠"从来没有生效过：720 CSS px（≈1440×900 的 200%
+    缩放）下正文只剩 ~500px，搜索框与「筛选 ▾」的标签被截断成 `筛..`（实测见
+    `docs/ui-audit/24-minimal-workspace/phase1/06-workbench-zoom200.png`）。
+
+    钉两件事：死锚点不得再出现在任何选择器里；堆叠规则锚在当前真实渲染的
+    Inspector 列上。注释里说明这段历史是允许的，所以比对前先剥掉 CSS 注释。
+    """
+    source = (ROOT / "app.py").read_text(encoding="utf-8")
+    without_comments = re.sub(r"/\*[\s\S]*?\*/", "", source)
+
+    assert "st-key-workspace_nav_col" not in without_comments, \
+        "响应式规则又挂在了渲染代码里不存在的容器上（这类规则是静默失效的）"
+    assert ":has(.st-key-workspace_context_col)" in source, \
+        "窄屏堆叠规则必须锚在真实渲染的 Inspector 列上"

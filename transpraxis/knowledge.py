@@ -78,7 +78,15 @@ def extract_observations(
         parsed = _parse_array(_call(
             call_llm, provider, api_key, model, system_prompt, numbered))
     except Exception as exc:
-        return [], f"知识反馈调用失败：{str(exc)[:160]}"
+        try:
+            import core
+            provider_status = core.provider_error_status(exc)
+            detail = (provider_status["message"]
+                      if provider_status["status"] != "unknown"
+                      else str(exc)[:160])
+        except Exception:  # pragma: no cover - defensive import fallback
+            detail = str(exc)[:160]
+        return [], f"知识反馈调用失败：{detail}"
     if parsed is None:
         return [], "知识反馈返回不是 JSON 数组"
     source_by_id = dict(zip(segment_ids, sources))
@@ -398,6 +406,39 @@ def provisional_hints(
             entry["confidence"] = candidate.get("confidence", 0.35)
             hints.append(entry)
     return hints
+
+
+def feedback_due(batch_index: int, batch_count: int, *, interval: int = 1,
+                 existing_candidates: Optional[Sequence[Dict[str, Any]]] = None,
+                 force_every_batch: bool = False) -> bool:
+    """Decide whether a batch should invoke the expensive knowledge extractor.
+
+    The first batch and the final batch are always observed.  While no
+    candidate exists, every batch is observed so continuity can start early.
+    Once a candidate queue exists, ``interval`` bounds extractor calls.  This
+    keeps generated observations available to later batches without paying for
+    an identical extraction request after every batch.
+    """
+    try:
+        index = max(0, int(batch_index))
+        total = max(0, int(batch_count))
+        every = max(1, int(interval or 1))
+    except (TypeError, ValueError):
+        index, total, every = 0, 0, 1
+    if force_every_batch or every <= 1:
+        return True
+    if index == 0 or (total > 0 and index == total - 1):
+        return True
+    active_candidates = [
+        item for item in (existing_candidates or [])
+        if isinstance(item, dict)
+        and str(item.get("decision") or "") not in {"project_term", "rejected"}
+        and str(item.get("source") or item.get("source_expression") or "").strip()
+        and str(item.get("observed_target") or item.get("target") or "").strip()
+    ]
+    if not active_candidates:
+        return True
+    return index % every == 0
 
 
 def discard_candidates_for_segments(

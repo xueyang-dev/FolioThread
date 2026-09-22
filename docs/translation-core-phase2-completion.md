@@ -1,6 +1,6 @@
 # Translation Core Phase 2 runtime closure
 
-Phase 2 closes FolioThread's first production Translation Core loop without
+Phase 2 closes Folith's first production Translation Core loop without
 replacing the long-document translation product or its persistence model:
 
 ```text
@@ -11,14 +11,14 @@ translation -> deterministic QA -> self-contained review packet
 
 Translation execution, Provider routing, checkpoints and recovery, PDF/DOCX
 handling, academic reporting, MTI workflow, exports, and delivery snapshots remain
-FolioThread-specific. Translation Core supplies domain-neutral contracts and
+Folith-specific. Translation Core supplies domain-neutral contracts and
 adapters around the existing runtime.
 
 ## Authoritative state
 
 There is no second database or parallel truth:
 
-- canonical terminology remains FolioThread `GlossaryEntry` state, including
+- canonical terminology remains Folith `GlossaryEntry` state, including
   candidate/provisional/locked/rejected, translate/preserve, evidence, frozen
   versions, and glossary hashes;
 - translation memory remains the existing reviewed pair/TM store;

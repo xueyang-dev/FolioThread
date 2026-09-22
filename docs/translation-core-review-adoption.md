@@ -5,7 +5,7 @@
 > readiness were added by the subsequent
 > [Phase 2 runtime closure](translation-core-phase2-completion.md).
 
-Phase 2B is a narrow runtime vertical slice: FolioThread's existing long-document
+Phase 2B is a narrow runtime vertical slice: Folith's existing long-document
 translation review now crosses the Translation Core boundary without redesigning
 translation execution or persistence.
 
@@ -35,7 +35,7 @@ authoritative.
 ## Ephemeral current-batch projection
 
 Review occurs before the current batch is committed to `state["pairs"]`. The
-FolioThread adapter therefore copies the committed pair list and overlays copied
+Folith adapter therefore copies the committed pair list and overlays copied
 current-batch pairs at their explicit document-global segment IDs. Packet
 construction reads this temporary projection only; it does not mutate the caller's
 state or batch and does not save a checkpoint. The same projection works after a
@@ -49,7 +49,7 @@ The runtime packet carries only review-relevant confirmed knowledge:
 - the canonical full glossary hash;
 - confirmed style knowledge when a future caller has an explicit confirmed source.
 
-Phase 2B deliberately supplies no translation-memory entries. FolioThread has no
+Phase 2B deliberately supplies no translation-memory entries. Folith has no
 review-time TM retrieval layer yet, and hashing the continually growing project TM
 would make unrelated earlier reviews stale. Audit history is also absent from both
 the reviewer-visible packet and the freshness fingerprint. Current runtime style

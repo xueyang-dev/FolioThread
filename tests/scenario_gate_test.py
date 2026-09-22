@@ -292,7 +292,11 @@ def test_scenario_100_page_pdf_translate_and_resume(fixtures):
 
         assert state["p2_done"] is True
         assert_all_segments_translated(state)
-        assert len(state["paras"]) == 600
+        # PDF source paragraphs are retained separately; translation uses the
+        # sentence-sized CAT units introduced by the scanned-PDF segmentation
+        # contract.
+        assert len(state["source_paragraphs"]) == 600
+        assert len(state["paras"]) > len(state["source_paragraphs"])
         readiness = translation_review_readiness(state)
         assert readiness["ready"] is True, readiness
         # 已提交的批次必须原样复用，而不是从零重译

@@ -34,6 +34,7 @@ _CATEGORY_LABELS = {
     "translation_completion": "翻译完成度",
     "format_integrity": "格式完整性",
     "source_language_residue": "源语残留",
+    "source_quality": "原文质量",
     "deterministic_qa": "确定性检查",
     "review_finding": "审校发现",
     "fluency": "语言表达",

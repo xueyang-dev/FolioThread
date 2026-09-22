@@ -176,16 +176,21 @@ def test_blocking_maps_to_danger_chip_and_review_cta():
     assert view["cta"]["destination"] == "review"
 
 
-def test_cta_destinations_never_route_review_through_overview():
-    """CTA 是"去哪里做事"，不是"打开哪一页"。"""
+def test_cta_destinations_never_route_through_a_removed_page():
+    """CTA 是"去哪里做事"，不是"打开哪一页"。
+
+    任务工作台已经没有「概览」这一级：默认落点是翻译工作台，续跑/重试由
+    该页 Banner 的运行区提供，所以任何 CTA 都不允许再指向 `overview`。
+    """
     assert hv.CTA_DESTINATIONS["继续审校"] == "review"
     assert hv.CTA_DESTINATIONS["更新报告"] == "report"
     assert hv.CTA_DESTINATIONS["查看交付"] == "delivery"
     assert hv.CTA_DESTINATIONS["继续翻译"] == "translation"
-    assert hv.CTA_DESTINATIONS["继续处理"] == "overview"
-    assert hv.CTA_DESTINATIONS["查看进度"] == "overview"
+    assert hv.CTA_DESTINATIONS["继续处理"] == "translation"
+    assert hv.CTA_DESTINATIONS["查看进度"] == "translation"
     # 兜底 CTA 是「打开任务」：任务卡片不能用「打开项目」（实体不同）
-    assert hv.CTA_DESTINATIONS["打开任务"] == "overview"
+    assert hv.CTA_DESTINATIONS["打开任务"] == "translation"
+    assert "overview" not in set(hv.CTA_DESTINATIONS.values())
 
 
 def test_running_job_offers_progress_cta():
@@ -324,7 +329,7 @@ def test_history_card_navigation_contract():
             assert not at.exception, at.exception
             return at
 
-        # 卡片整块可点 → Overview
+        # 卡片整块可点 → 翻译工作台（打开任务不再是"打开概览页"）
         at = open_history()
         card_open = next(button for button in at.button
                          if button.key == f"history_card_{job_id}")
@@ -334,7 +339,7 @@ def test_history_card_navigation_contract():
         assert at.session_state["active_job_id"] == job_id
         assert at.session_state["app_view"] == "workspace"
         assert at.session_state["workspace_mode"] is True
-        assert at.session_state["workspace_section"] == "overview"
+        assert at.session_state["workspace_section"] == "translation"
 
         # 历史页可以反复进入：卡片与 CTA 都在（不依赖"最近打开过"的残留状态）
         at = open_history()

@@ -430,3 +430,46 @@ def test_lifecycle_rank_orders_states():
     ranks = [to.lifecycle_rank(state) for state in to.LIFECYCLE_STATES]
     assert ranks == sorted(ranks)
     assert to.lifecycle_rank("nonsense") == -1
+
+
+# ---------------- 已删除的「概览」路由不再是任何动作的落点 ----------------
+
+@pytest.mark.parametrize("facts", [
+    {"runtime_status": "interrupted", "runtime_label": "上次运行已中断"},
+    {"runtime_status": "failed", "runtime_label": "当前步骤失败"},
+    {"runtime_status": "stalled", "runtime_label": "暂无运行信号"},
+])
+def test_runtime_actions_target_the_translation_workbench(facts):
+    """中断/失败/停滞的恢复动作必须在翻译工作台上可达。
+
+    任务工作台已经没有 `overview` 这一级；恢复动作由该页 Banner 的运行区提供，
+    所以 canonical 状态不允许再把用户送进一个不存在的页面。
+
+    前置条件：任务尚未业务完成（否则运行状态不参与判定）——用"有段落但译文为空"
+    的真实形态，而不是已译完的 state。
+    """
+    incomplete = {
+        "p1_done": True,
+        "p2_done": False,
+        "stage": "TRANSLATING",
+        "paras": ["Source 0", "Source 1"],
+        "pairs": [{"source": "Source 0", "target": ""},
+                  {"source": "Source 1", "target": ""}],
+        "findings": [],
+        "review_evidence": [],
+        "human_actions": [],
+    }
+    overview = to.derive_task_overview_state(incomplete, facts=facts)
+
+    assert overview["reason"] in {"runtime_failed", "runtime_stopped"}
+    assert overview["primary_action"]["destination"] == "translation"
+
+
+def test_no_surface_targets_the_removed_overview_route():
+    overview = to.derive_task_overview_state(_state(1))
+
+    destinations = {overview["primary_action"].get("destination")}
+    destinations.update(action.get("destination")
+                        for action in overview["secondary_actions"])
+    destinations.update(stage.get("destination") for stage in overview["stages"])
+    assert "overview" not in destinations
