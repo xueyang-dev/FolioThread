@@ -137,7 +137,7 @@ if _saved_provider_cfg:
         st.session_state.reviewer_model = _saved_reviewer.get("model", "")
         st.session_state.reviewer_api_key = _saved_reviewer.get("api_key", "")
         st.session_state.reviewer_base_url = _saved_reviewer.get("base_url", "")
-# ================= 设计系统（Folith Agentic Localization Workspace） =================
+# ================= 设计系统（Folith·译页 Agentic Translation Workspace） =================
 _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
 
@@ -17860,9 +17860,9 @@ workspace_mode = st.session_state.get("workspace_mode", False)
 
 with st.sidebar:
     st.markdown(
-            '<div class="tp-brand" aria-label="译页 Agentic 本地化工作台">'
+            '<div class="tp-brand" aria-label="译页 智能体翻译工作台">'
             f'<img class="tp-brand-logo" src="{_BRAND_LOGO_URI}" '
-            'alt="译页 Agentic 本地化工作台"></div>',
+            'alt="译页 智能体翻译工作台"></div>',
             unsafe_allow_html=True)
     new_task_in_flow = app_view == "new" and not workspace_mode
     # Project Detail 的页面级 Primary CTA 是 Header 的「+ 新建任务」：侧栏这一颗

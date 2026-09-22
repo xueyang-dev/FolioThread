@@ -1,6 +1,6 @@
 # Folith / 译页：由 MTI 论文实践驱动的专用能力路线
 
-> 本路线是 Folith 的 legacy / specialized 研究与报告能力，不是 Agentic 本地化工作台的默认入口。整体边界见[架构边界说明](architecture-boundaries.md)。
+> 本路线是 Folith·译页的 legacy / specialized 研究与报告能力，不是 Agentic Translation Workspace / 智能体翻译工作台的默认入口。整体边界见[架构边界说明](architecture-boundaries.md)。
 
 > 2026-09-14：以下版本划分保留为历史专用路线，不决定下一正式版的版本号或主线优先级。近期先 UI 打磨与发布，随后推进 DOCX / CAT 内核，见[当前蓝图](foliothread-agentic-native-blueprint.md#7-当前进度与开发路线)。
 

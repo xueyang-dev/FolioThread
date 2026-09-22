@@ -1,4 +1,4 @@
-# Folith / 译页：Agentic Localization Workspace 开发蓝图
+# Folith·译页：Agentic Translation Workspace 开发蓝图
 
 本文定义 Folith 的产品方向、整体架构和开发顺序。2026-09-14 更新：近期先完成 UI 全面打磨并正式发布；发布后转向 CAT 内核，首先完成 [DOCX Contract v1](docx-contract-v1.md) 的端到端闭环。
 
@@ -6,7 +6,7 @@
 
 它不是一次重写计划，也不是把“Agent”包装成一个新的聊天窗口。它的目标是把现有的长文档翻译能力重新组织成一个更明确的产品：
 
-> Folith 是一个由 Agent 执行本地化工作、由人类控制语言质量和交付责任的 Agentic Localization Workspace。
+> Folith·译页是一个由 Agent 执行本地化工作、由人类控制语言质量和交付责任的 Agentic Translation Workspace。
 
 Folith 的核心对象不再是“翻译实践报告”，而是一个可恢复、可审查、可交付的本地化工作台项目。
 

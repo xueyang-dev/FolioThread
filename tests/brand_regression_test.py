@@ -122,19 +122,21 @@ def _legacy_hits() -> list[str]:
 def test_public_brand_constants_are_canonical():
     assert brand.APP_NAME == "Folith"
     assert brand.APP_NAME_ZH == "译页"
-    assert brand.TAGLINE == "Agentic Localization Workspace"
-    assert brand.TAGLINE_ZH == "Agentic 本地化工作台"
+    assert brand.WORDMARK == "Folith·译页"
+    assert brand.TAGLINE == "Agentic Translation Workspace"
+    assert brand.TAGLINE_ZH == "智能体翻译工作台"
 
     app = (ROOT / "app.py").read_text(encoding="utf-8")
     gui = (ROOT / "gui.py").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "folith-logo-zh.png" in app and "folith-favicon.png" in app
-    assert "译页 Agentic 本地化工作台" in app
+    assert "译页 智能体翻译工作台" in app
     assert "brand.APP_TITLE_ZH" in gui
-    assert 'description = "Folith — Agentic Localization Workspace"' in pyproject
-    assert "Agentic Localization Workspace" in readme
-    assert "Agentic 本地化工作台" in readme
+    assert 'description = "Folith·译页 — Agentic Translation Workspace"' in pyproject
+    assert "Folith·译页" in readme
+    assert "Agentic Translation Workspace" in readme
+    assert "智能体翻译工作台" in readme
 
 
 def test_legacy_brand_hits_are_allowlisted():

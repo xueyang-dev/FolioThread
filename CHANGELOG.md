@@ -8,10 +8,10 @@
 > 按时间**倒序**累积了多个工作流（发布正确性硬化 → 侧栏 IA → 工作台视觉）。
 > 该版本已于 2026-09-22 发布；其下 `## [0.3.0] - 2026-08-24` 是上一个版本。
 
-### Rebrand：Folith / 译页
+### Rebrand：Folith·译页
 
-- 用户可见品牌统一为 `Folith`，中文品牌为 `译页`。
-- 产品定位统一为 `Agentic Localization Workspace` / `Agentic 本地化工作台`。
+- 用户可见组合字标统一为 `Folith·译页`。
+- 产品定位统一为 `Agentic Translation Workspace` / `智能体翻译工作台`。
 - 新的 logo、favicon、窗口标题、页面标题、导出署名、README 和发布门禁使用新品牌；
   旧包名、console 别名、环境变量、项目格式与历史资源继续保留以兼容现有用户数据。
 

@@ -27,7 +27,7 @@ _UNREACHABLE = {errno.ECONNREFUSED, errno.EHOSTUNREACH}
 
 
 def test_brand_title():
-    assert gui.APP_TITLE == "译页 · Agentic 本地化工作台"
+    assert gui.APP_TITLE == "译页 · 智能体翻译工作台"
     print("  ✓ 桌面窗口品牌标题")
 
 

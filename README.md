@@ -1,30 +1,30 @@
 # Folith
 
 <p align="center">
-  <img src="transpraxis/resources/brand/folith-logo.png" alt="Folith — Agentic Localization Workspace 译页 Agentic 本地化工作台" width="420">
+  <img src="docs/assets/folith-brand-standard.png" alt="Folith·译页 — Agentic Translation Workspace — 智能体翻译工作台" width="840">
 </p>
 
-<p align="center"><sub>Folith / 译页的 logo 与配色基准见 <a href="docs/brand.md">docs/brand.md</a>；本轮更新文字品牌与副标题，保留原有 icon mark 与视觉系统。</sub></p>
+<p align="center"><sub>Folith·译页的 logo、字标与配色基准见 <a href="docs/brand.md">docs/brand.md</a>。</sub></p>
 
-Folith（中文品牌：译页）是一套面向专业本地化工作的 Agentic Workspace：把文档结构、上下文、术语、译文、人工审校和交付资产放在同一条可恢复的工作线上。
+Folith·译页是一套面向专业本地化工作的 Agentic Workspace：把文档结构、上下文、术语、译文、人工审校和交付资产放在同一条可恢复的工作线上。
 
 它适合处理较长的 PDF / DOCX 文档，保持跨章节的一致性，保留人工决策与证据，并在中断后从本地任务状态继续处理。
 
 ## Product position
 
-Folith 的产品定位是 **Agentic Localization Workspace**；中文界面使用 **Agentic 本地化工作台**。长文档是主场景，主路径是：
+Folith·译页的品牌定位是 **Agentic Translation Workspace**；中文界面使用 **智能体翻译工作台**。长文档是主场景，主路径是：
 
 ```text
 文档解析 → 文档上下文 → 术语与翻译记忆 → 翻译 → 人工审校 → 交付
 ```
 
-“研究与报告”是可选的专用能力，服务于需要过程证据、案例分析或 MTI 翻译实践报告的任务；它不占据普通本地化任务的首屏，也不定义 Folith 的唯一使用场景。
+“研究与报告”是可选的专用能力，服务于需要过程证据、案例分析或 MTI 翻译实践报告的任务；它不占据普通本地化任务的首屏，也不定义 Folith·译页的唯一使用场景。
 
 ## 当前能力与下一步
 
 当前本地开发已推进项目管理、语言资产、工作台、人工审校与可恢复交付。TM 提供精确/归一化复用和基础 TMX 导入导出；当前 DOCX 导出属于生成式输出，尚不承诺保留原文件 package、复杂结构或全部格式。
 
-当前版本已作为 Folith v0.4.0 发布。后续优先完成 DOCX 原格式写回闭环，再推进 TM V2 与文档版本更新；这些是路线规划，不是当前版本的能力声明。
+当前版本已作为 Folith·译页 v0.4.0 发布。后续优先完成 DOCX 原格式写回闭环，再推进 TM V2 与文档版本更新；这些是路线规划，不是当前版本的能力声明。
 
 - [开发蓝图与当前进度](docs/foliothread-agentic-native-blueprint.md)
 - [近期正式版发布计划](docs/release-plan.md)
@@ -144,7 +144,7 @@ python scripts/translate_pdf.py "文档.pdf" --target-lang 简体中文 --qualit
 
 ## 架构边界
 
-Folith 的长期方向是 Agentic Localization Workspace：由 Agent 执行受边界约束的本地化工作，由人类控制语言质量和交付责任。完整的产品与架构蓝图见[Agentic 本地化工作台开发蓝图](docs/foliothread-agentic-native-blueprint.md)。当前 v0.4 的兼容边界和 MTI 专用能力见[架构边界说明](docs/architecture-boundaries.md)。
+Folith·译页的长期方向是 Agentic Translation Workspace：由 Agent 执行受边界约束的本地化工作，由人类控制语言质量和交付责任。完整的产品与架构蓝图见[Agentic Translation Workspace 开发蓝图](docs/foliothread-agentic-native-blueprint.md)。当前 v0.4 的兼容边界和 MTI 专用能力见[架构边界说明](docs/architecture-boundaries.md)。
 
 ## 使用说明与限制
 

@@ -6,7 +6,7 @@
     app.py 的 :root 品牌 token，然后重新生成位图。
   -->
   <title id="title">Folith mark</title>
-  <desc id="desc">Two stacked document pages marked 文 and A, crossed by a pointer cursor: agentic localization.</desc>
+  <desc id="desc">Two stacked document pages marked 文 and A, crossed by a pointer cursor: an agentic translation workspace.</desc>
   <defs>
     <linearGradient id="ftPage" x1="72" y1="146" x2="292" y2="112" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#0052FE"/>

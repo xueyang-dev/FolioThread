@@ -2,13 +2,14 @@
 
 APP_NAME = "Folith"
 APP_NAME_ZH = "译页"
-TAGLINE = "Agentic Localization Workspace"
-TAGLINE_ZH = "Agentic 本地化工作台"
+WORDMARK = "Folith·译页"
+TAGLINE = "Agentic Translation Workspace"
+TAGLINE_ZH = "智能体翻译工作台"
 
 # These are public-facing compositions used by the Chinese-first UI and the
 # English console/help surfaces.  Keep the individual names available so
 # documents can choose one language without duplicating literals.
-APP_TITLE = f"{APP_NAME} · {TAGLINE}"
+APP_TITLE = f"{WORDMARK} · {TAGLINE}"
 APP_TITLE_ZH = f"{APP_NAME_ZH} · {TAGLINE_ZH}"
 
 # Persisted projects, package publication, and environment variables still

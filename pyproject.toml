@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "foliothread"
 version = "0.4.0"
-description = "Folith — Agentic Localization Workspace"
+description = "Folith·译页 — Agentic Translation Workspace"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

@@ -1,7 +1,7 @@
-"""重新生成 Folith 的**向量版**品牌位图（SVG 源 → 各尺寸 PNG）。
+"""重新生成 Folith·译页的**向量版**品牌位图（SVG 源 → 各尺寸 PNG）。
 
 旧的原图裁切资产不由本脚本管理，也不要在这里覆盖；它们作为兼容素材保留，
-当前界面与 README 使用本脚本生成的 Folith lockup。
+当前界面使用本脚本生成的 Folith·译页 lockup；README 使用用户提供的品牌标准 PNG。
 
 本脚本负责同一 logo 的向量派生版本——源文件是
 `transpraxis/resources/brand/` 下的两个 SVG（`folith-mark.svg` 彩色图标、
@@ -23,7 +23,7 @@
 
 产物（全部是向量派生，不含 source-*.png 裁切资产）：
 
-    folith-logo.png         English 横向组合（图标 + 字标 + 双语副标题）
+    folith-logo.png         English 横向组合（图标 + Folith·译页 字标 + 双语副标题）
     folith-logo-zh.png      中文横向组合（图标 + 中文字标 + 中文副标题）
     folith-logo-dark.png    深色底横向组合
     folith-logo-stacked.png 竖向组合（窄栏 / 方形版位）
@@ -69,10 +69,10 @@ FONT_STACK = ("Manrope, 'Helvetica Neue', Helvetica, Arial, "
 FONT_CSS = ("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800"
             "&display=swap")
 
-WORDMARK_EN = "Folith"
+WORDMARK_EN = "Folith·译页"
 WORDMARK_ZH = "译页"
-TAGLINE_EN = "Agentic Localization Workspace"
-TAGLINE_ZH = "Agentic 本地化工作台"
+TAGLINE_EN = "Agentic Translation Workspace"
+TAGLINE_ZH = "智能体翻译工作台"
 
 # 横向组合的版式，单位是「图标高度 = 268」，可无级缩放。
 LOCKUP = {"gap": 44, "size": 76, "tag_en": 40, "tag_zh": 38,

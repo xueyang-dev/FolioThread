@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 ROOT = Path(__file__).resolve().parent.parent
 BRAND = ROOT / "transpraxis" / "resources" / "brand"
+BRAND_STANDARD = ROOT / "docs" / "assets" / "folith-brand-standard.png"
 MARK = BRAND / "folith-mark.svg"
 MARK_MONO = BRAND / "folith-mark-mono.svg"
 FAVICON = BRAND / "folith-favicon.svg"
@@ -132,6 +133,12 @@ def test_brand_bitmaps_exist_and_are_real():
             f"{name} 尺寸为 {width}x{height}，期望 {want_w}x{want_h}"
 
 
+def test_reference_brand_standard_is_the_readme_source():
+    assert BRAND_STANDARD.is_file(), "README 品牌标准 PNG 缺失"
+    assert BRAND_STANDARD.stat().st_size > 100_000, "品牌标准 PNG 不是完整参考图"
+    assert _png_size(BRAND_STANDARD) == (1448, 1086)
+
+
 def test_app_tokens_match_brand_palette():
     """app.py 的 :root 品牌 token 必须等于品牌源文件的取色。"""
     app = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -166,7 +173,7 @@ def test_sidebar_uses_formal_lockup():
     """侧栏使用正式 Folith lockup，避免回退到旧品牌裁切图。"""
     app = (ROOT / "app.py").read_text(encoding="utf-8")
     assert 'folith-logo-zh.png' in app, "中文侧栏品牌位应使用正式译页 lockup"
-    assert '译页 Agentic 本地化工作台' in app, \
+    assert '译页 智能体翻译工作台' in app, \
         "品牌位的替代文本要与新定位一致"
 
 
@@ -183,8 +190,8 @@ def test_legacy_source_crops_are_retained_but_not_current_entries():
 
 def test_readme_references_existing_logo():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "transpraxis/resources/brand/folith-logo.png" in readme, \
-        "README 首屏必须展示唯一 logo"
+    assert "docs/assets/folith-brand-standard.png" in readme, \
+        "README 首屏必须展示用户提供的品牌标准 PNG"
     for rel in re.findall(r'src="(transpraxis/resources/brand/[^"]+)"', readme):
         assert (ROOT / rel).is_file(), f"README 引用了不存在的资产：{rel}"
 
