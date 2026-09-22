@@ -41,7 +41,7 @@ _SCRIPT = r"""
 const PW = process.env.FOLIO_PLAYWRIGHT_CORE;
 const CHROME = process.env.FOLIO_CHROME;
 const { chromium } = require(PW);
-const [url, out, section, waitMs] = process.argv.slice(2);
+const [url, out, section, waitMs, view] = process.argv.slice(2);
 
 (async () => {
   const browser = await chromium.launch({
@@ -53,15 +53,41 @@ const [url, out, section, waitMs] = process.argv.slice(2);
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForSelector('[data-testid="stAppViewContainer"]', { timeout: 30000 });
-  await page.waitForTimeout(4000);
+  await page.waitForTimeout(3500);
 
-  if (section) {
-    const history = page.locator('button', { hasText: '历史任务' }).first();
+  const sidebar = page.locator('[data-testid="stSidebar"]');
+
+  if (view) {
+    if (view === 'projects') {
+      const btn = sidebar.locator('[class*="st-key-project_section_header_button"] button, button:has-text("项目")').first();
+      if (await btn.count()) { await btn.click(); await page.waitForTimeout(3000); }
+      else console.error('[warn] 未找到项目中心按钮');
+    } else if (view === 'new') {
+      const btn = sidebar.locator('[class*="st-key-new_task_action"] button, button:has-text("新建任务")').first();
+      if (await btn.count()) { await btn.click(); await page.waitForTimeout(3000); }
+      else console.error('[warn] 未找到新建任务按钮');
+    } else if (view === 'history') {
+      const btn = sidebar.locator('button:has-text("历史任务")').first();
+      if (await btn.count()) { await btn.click(); await page.waitForTimeout(3000); }
+      else console.error('[warn] 未找到历史任务按钮');
+    } else if (view === 'library') {
+      const btn = sidebar.locator('button:has-text("术语与翻译记忆")').first();
+      if (await btn.count()) { await btn.click(); await page.waitForTimeout(3000); }
+      else console.error('[warn] 未找到语言资产按钮');
+    } else if (view === 'settings') {
+      const btn = sidebar.locator('[class*="st-key-manage_provider"] button, button:has-text("管理")').first();
+      if (await btn.count()) { await btn.click(); await page.waitForTimeout(3000); }
+      else console.error('[warn] 未找到设置管理按钮');
+    }
+  } else if (section) {
+    const history = sidebar.locator('button:has-text("历史任务")').first();
     if (await history.count()) { await history.click(); await page.waitForTimeout(2500); }
-    // 列表按最近更新排序，第一个任务就是最近处理的
+    const showcaseBtn = page.locator('[class*="st-key-history_card_showcase-job"] button, [class*="st-key-history_cta_showcase-job"] button').first();
     const action = /打开任务|继续审校|查看交付|准备交付|继续处理|继续翻译|更新报告|查看进度|打开/;
-    const firstAction = page.locator('button').filter({ hasText: action }).first();
-    if (await firstAction.count()) { await firstAction.click(); await page.waitForTimeout(3500); }
+    const actionBtn = (await showcaseBtn.count())
+      ? showcaseBtn
+      : page.locator('button').filter({ hasText: action }).first();
+    if (await actionBtn.count()) { await actionBtn.click(); await page.waitForTimeout(3500); }
     const navRoot = page.locator('[class*="st-key-workspace_nav"]').first();
     const nav = (await navRoot.count())
       ? navRoot.locator('button').filter({ hasText: section }).first()
@@ -110,6 +136,8 @@ def _resolve_chrome() -> str | None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", type=Path, required=True, help="输出 PNG 路径")
+    parser.add_argument("--view", default="",
+                        help="系统主页面视图 (projects/new/history/library/settings)")
     parser.add_argument("--section", default="",
                         help="工作区页面（概览/翻译/术语/审校/交付）；留空则截首屏")
     parser.add_argument("--url", default=os.environ.get("FOLIO_URL",
@@ -139,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = subprocess.run(
             ["node", script_path, args.url, str(args.out), args.section,
-             str(args.wait_ms)],
+             str(args.wait_ms), args.view],
             env=env, capture_output=True, text=True)
     finally:
         Path(script_path).unlink(missing_ok=True)

@@ -3071,8 +3071,8 @@ _WORKSPACE_CSS = """
 }
 .tp-workspace-topbar {
  display:flex; align-items:center; justify-content:space-between; gap:16px;
- padding: 12px 16px; border:1px solid var(--tp-hairline-strong);
- border-top:3px solid var(--tp-primary); border-radius:var(--tp-radius-lg);
+ padding: 12px 18px; border:1px solid var(--tp-hairline-strong);
+ border-radius:var(--tp-radius-lg);
  background:var(--tp-surface); box-shadow:var(--tp-shadow-sm);
 }
 .tp-workspace-topbar h1 { margin:0; padding:0 !important; font-size:16px !important; line-height:1.25 !important; }
@@ -4044,8 +4044,8 @@ _WORKSPACE_CSS = """
    workbench owns the first screen, while the same section buttons stay
    available in a horizontal tool rail instead of consuming a sidebar. */
 .st-key-workspace_topbar {
- margin-top:0; padding:0 16px 10px; border:1px solid var(--tp-hairline-strong);
- border-top:3px solid var(--tp-primary); border-radius:var(--tp-radius-lg);
+ margin-top:0; padding:10px 18px 10px; border:1px solid var(--tp-hairline-strong);
+ border-radius:var(--tp-radius-lg);
  background:var(--tp-surface); box-shadow:var(--tp-shadow-sm);
 }
 .st-key-workspace_topbar [data-testid="stHorizontalBlock"] {
@@ -4201,10 +4201,12 @@ _WORKSPACE_CSS = """
 .tp-source-preview-row b { color:var(--tp-faint); font-size:11px; font-weight:650; text-align:right; }
 .tp-source-preview-row p { margin:0; color:var(--tp-ink); font-size:12.5px; line-height:1.55; white-space:pre-wrap; }
 .st-key-workspace_topbar .stButton > button {
- min-height:32px; margin-top:0; border-radius:8px; font-size:12px; font-weight:700;
+ min-height:34px; margin-top:0; border-radius:8px; font-size:12px; font-weight:700;
+ white-space:nowrap !important;
 }
-.st-key-workspace_topbar [data-testid="column"]:last-child {
- min-width:142px;
+.st-key-workspace_topbar [data-testid="column"]:last-child,
+.st-key-workspace_topbar [data-testid="stColumn"]:last-child {
+ min-width:185px !important;
 }
 /* ---- 工具栏右端：任务详情（与页面导航同高的按需 chip）----
    它在折叠态是 38px 的展开器摘要 + 一圈边框。收成 30px 的 chip 之后，工具栏
@@ -4212,12 +4214,16 @@ _WORKSPACE_CSS = """
    摘要右对齐且贴合文字宽度：展开时面板用满整列，收起时只留一枚小 chip。
    注意 Streamlit 1.63 的展开器结构是 `stExpander > details > summary`，
    摘要在 `details` 里，不是 `stExpander` 的第一个 div。 */
-.st-key-workspace_task_details [data-testid="stExpander"] { border:0; background:transparent; }
-.st-key-workspace_task_details [data-testid="stExpander"] > details { border:0; }
+.st-key-workspace_task_details [data-testid="stExpander"],
+.st-key-workspace_task_details [data-testid="stExpander"] > details,
+.st-key-workspace_task_details details {
+ border:none !important; background:transparent !important; box-shadow:none !important;
+}
 .st-key-workspace_task_details [data-testid="stExpander"] summary {
- width:fit-content; margin-left:auto;
- min-height:30px; padding:0 10px; border:1px solid var(--tp-hairline-strong);
- border-radius:8px; background:var(--tp-surface);
+ width:fit-content !important; margin-left:auto !important;
+ min-height:30px !important; padding:0 12px !important; border:1px solid var(--tp-hairline-strong) !important;
+ border-radius:8px !important; background:var(--tp-surface) !important;
+ box-shadow:var(--tp-shadow-sm) !important;
 }
 /* 摘要里的标签是 <p>：全局 `p { font-size:14px !important }` 会盖过摘要上的
    字号，必须写在 p 这一层并带 !important。 */
@@ -9242,7 +9248,7 @@ def _render_workspace_topbar(job_id, state, overview=None, *, has_job=True):
                       f'{title_html}')
     st.markdown('<div class="tp-workspace-shell"></div>', unsafe_allow_html=True)
     with st.container(key="workspace_topbar"):
-        title_col, status_col, action_col = st.columns([4.7, 2.5, 1.1], gap="medium")
+        title_col, status_col, action_col = st.columns([4.2, 2.2, 1.8], gap="medium")
         with title_col:
             # 第一行标题、第二行指标：指标跟着身份走，不另起一行占位。
             st.markdown(

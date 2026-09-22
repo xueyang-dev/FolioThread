@@ -24,32 +24,53 @@
 
 ## 📸 界面预览 (Showcase)
 
-### 1. 智能体翻译工作台 (Translation Workbench)
-双语段落平行对齐，右侧集成段落级 Agent 检查面板，即时展示上下文流动、关联术语、语法及格式发现，提供一键保存、快速跳转与状态流转。
+### 1. 多项目管理中心 (Project Center)
+集中管理不同领域的本地化项目，各项目独立沉淀术语规范与翻译记忆；支持按状态快速检索、任务归档与资产汇总。
 
 <p align="center">
-  <img src="docs/assets/workbench-preview.png" alt="Folith 智能体翻译工作台" width="1000">
+  <img src="docs/assets/01-projects-preview.png" alt="Folith 多项目管理中心" width="1000">
 </p>
 
-### 2. 任务总览与交付门禁 (Task Overview & Delivery Gate)
-全流程状态看板：清晰可视化「文档解析 → 术语与上下文 → 智能体翻译 → 人工审校 → 交付包构建」五大阶段，严格把关未审校项与质量阻塞点。
+### 2. 新建任务向导与上下文配置 (New Task Wizard)
+结构化四步创建向导（文档与画像 → 翻译策略 → 交付内容 → 确认运行），支持 PDF / DOCX 拖拽上传、目标语言选择、项目上下文关联与智能画像识别。
 
 <p align="center">
-  <img src="docs/assets/overview-preview.png" alt="Folith 任务总览与交付门禁" width="1000">
+  <img src="docs/assets/02-new-task-preview.png" alt="Folith 新建任务向导" width="1000">
 </p>
 
-### 3. 人工深度审校与质量把控 (Human Review Workspace)
-支持按问题类型（如术语冲突、格式异常、漏译风险）快速筛选，段落改动自动联动审校状态失效机制，提供严谨的可追溯审计。
+### 3. 智能体翻译工作台 (Translation Workbench)
+双语段落平行对齐，顶部横幅清晰展示进度、术语数与阻断状态；右侧实时提供段落事实、Agent 智能改写、术语核验与快捷编辑动作。
 
 <p align="center">
-  <img src="docs/assets/review-preview.png" alt="Folith 人工深度审校工作台" width="1000">
+  <img src="docs/assets/03-workbench-preview.png" alt="Folith 智能体翻译工作台" width="1000">
 </p>
 
-### 4. 语言资产与术语知识库 (Language Assets & Terminology)
-自动提取候选术语并计算置信度，支持人工确认、锁定、归档与跨任务共享，提供行业标准的 XLSX、TBX 与 TMX 导入导出能力。
+### 4. 智能体审校与质检工作区 (Review & Quality Gate)
+结构化审校队列与问题分类（术语冲突、句式偏离、格式异常），即时展现上下文解释与建议译文，支持采纳、修正与决策归档。
 
 <p align="center">
-  <img src="docs/assets/assets-preview.png" alt="Folith 语言资产与术语管理" width="1000">
+  <img src="docs/assets/04-review-preview.png" alt="Folith 人工深度审校工作台" width="1000">
+</p>
+
+### 5. 交付门禁与成果导出 (Delivery & Quality Verification)
+在正式导出前对翻译完整性、独立审校、合规状态与结构保真进行全景门禁核验；阻断项未解决前严格防护，支持生成双语对照与交付清单。
+
+<p align="center">
+  <img src="docs/assets/05-delivery-preview.png" alt="Folith 交付门禁与成果导出" width="1000">
+</p>
+
+### 6. 任务流水线与历史看板 (Task History & Resume)
+统一展示所有执行中的翻译任务与历史归档，提供状态流转标签、进度读数与快捷恢复动作；意外中断的任务可秒级接续断点。
+
+<p align="center">
+  <img src="docs/assets/06-history-preview.png" alt="Folith 任务流水线与历史看板" width="1000">
+</p>
+
+### 7. 语言资产库：术语与翻译记忆 (Language Assets & Terminology)
+跨任务沉淀高价值语料，支持术语锁定、作用域隔离、推荐译法与多格式（XLSX / TBX / TMX）导入导出，形成越用越准的资产飞轮。
+
+<p align="center">
+  <img src="docs/assets/07-language-assets.png" alt="Folith 语言资产与术语管理" width="1000">
 </p>
 
 ---

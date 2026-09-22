@@ -28,11 +28,16 @@ def setup_showcase_fixtures():
     OUTPUT.mkdir(parents=True, exist_ok=True)
     (OUTPUT / ".onboarded").touch()
 
-    # Create a clean project
-    project = core.create_project("技术专著本地化", description="面向大模型与开源体系的专业翻译工作区")
-    project_id = project["project_id"]
+    # 1. Project 1: 技术专著本地化
+    proj1 = core.create_project("技术专著本地化", description="面向大模型、系统工程与开源生态的专业翻译工作区")
+    proj1_id = proj1["project_id"]
 
-    pairs = [
+    # 2. Project 2: 金融科技白皮书
+    proj2 = core.create_project("金融科技白皮书", description="国际金融架构与监管科技白皮书本地化")
+    proj2_id = proj2["project_id"]
+
+    # 3. Job 1 in Project 1: Agentic Translation Workspace Architecture
+    pairs1 = [
         {
             "segment_id": "seg-001",
             "source": "The translation workspace preserves source context, terminology rules, and human review history.",
@@ -71,7 +76,7 @@ def setup_showcase_fixtures():
         },
     ]
 
-    glossary = [
+    glossary1 = [
         {
             "id": "term-01",
             "source": "translation workspace",
@@ -107,18 +112,20 @@ def setup_showcase_fixtures():
         },
     ]
 
-    state = core.new_job_state("Agentic Translation Workspace Architecture.docx")
-    state.update({
+    core.save_provider_config("DeepSeek", "deepseek-v4-flash", "sk-folio-demo-mock-key")
+
+    state1 = core.new_job_state("Agentic Translation Workspace Architecture.docx")
+    state1.update({
         "p1_done": True,
         "p2_done": True,
         "p3_done": False,
         "report_enabled": False,
         "target_lang": "简体中文",
-        "project_id": project_id,
-        "paras": [p["source"] for p in pairs],
-        "pairs": pairs,
-        "glossary": glossary,
-        "glossary_frozen": {"version": 1, "entries": glossary, "frozen_at": "2026-09-22T10:00:00+08:00"},
+        "project_id": proj1_id,
+        "paras": [p["source"] for p in pairs1],
+        "pairs": pairs1,
+        "glossary": glossary1,
+        "glossary_frozen": {"version": 1, "entries": glossary1, "frozen_at": "2026-09-22T10:00:00+08:00"},
         "document_profile": {
             "display_name": "Agentic Translation Architecture Guide",
             "domain": "计算机科学与人工智能",
@@ -130,7 +137,16 @@ def setup_showcase_fixtures():
         },
         "profile_done": True,
         "translation_core_review_required": True,
-        "review_evidence": [],
+        "review_evidence": [{
+            "review_event_id": "rev-showcase-01",
+            "review_scope": "current_translation",
+            "segment_ids": [0, 1, 2, 3],
+            "created_at": "2026-09-22T10:00:00+08:00",
+            "completion_receipt": {
+                "status": "completed",
+                "reviewed_segment_ids": [0, 1, 2, 3],
+            },
+        }],
         "findings": [],
         "human_actions": [],
         "review_stats": {
@@ -156,7 +172,7 @@ def setup_showcase_fixtures():
     })
 
     # Add a realistic review finding on segment 4
-    fp = translation_core.fingerprint({"segment": 3, "target": pairs[3]["target"]})
+    fp = translation_core.fingerprint({"segment": 3, "target": pairs1[3]["target"]})
     raw_finding = {
         "type": "review",
         "category": "terminology",
@@ -185,18 +201,202 @@ def setup_showcase_fixtures():
         "review_event_id": "rev-showcase-01",
         "created_at": "2026-09-22T10:00:00+08:00",
     })
-    state["findings"].append(normalized)
+    state1["findings"].append(normalized)
 
-    core.save_job_state("showcase-job", state)
+    core.save_job_state("showcase-job", state1)
     core.save_source("showcase-job", b"Folith Architecture Guide Mock Source")
     core.update_runtime_state("showcase-job",
                               status="completed",
                               phase="completed",
-                              phase_label="已完成",
+                              phase_label="待审校",
                               started_at="2026-09-22T10:00:00+08:00",
                               last_heartbeat_at="2026-09-22T10:00:00+08:00",
                               last_progress_at="2026-09-22T10:00:00+08:00",
                               last_event="showcase")
+    # Touch mtime to ensure showcase-job is the most recently updated task
+    showcase_file = core.job_dir("showcase-job") / "state.json"
+    future_time = time.time() + 300
+    os.utime(showcase_file, (future_time, future_time))
+
+    # 4. Job 2 in Project 1: Cloud-Native Service Mesh Architecture (Completed)
+    pairs2 = [
+        {
+            "segment_id": "seg-001",
+            "source": "A service mesh manages east-west traffic between microservices with mutual TLS encryption.",
+            "target": "服务网格通过双向 TLS 加密管理微服务之间的东西向流量。",
+            "initial_target": "初译：服务网格管理服务间流量并加密。",
+            "reviewed": True,
+            "review_status": "reviewed_clean",
+            "target_provenance": "reviewed",
+        },
+        {
+            "segment_id": "seg-002",
+            "source": "Decoupling observability and traffic routing from application code simplifies operations.",
+            "target": "将可观测性与流量路由从业务代码中解耦，能够显著简化运维复杂度。",
+            "initial_target": "初译：解耦可观测性和路由简化运维。",
+            "reviewed": True,
+            "review_status": "reviewed_clean",
+            "target_provenance": "reviewed",
+        },
+    ]
+    state2 = core.new_job_state("Cloud-Native Service Mesh Architecture.docx")
+    state2.update({
+        "p1_done": True,
+        "p2_done": True,
+        "p3_done": False,
+        "report_enabled": False,
+        "target_lang": "简体中文",
+        "project_id": proj1_id,
+        "paras": [p["source"] for p in pairs2],
+        "pairs": pairs2,
+        "glossary": glossary1,
+        "profile_done": True,
+        "document_profile": {
+            "display_name": "Cloud-Native Service Mesh Architecture",
+            "domain": "云计算与系统架构",
+            "subdomain": "分布式基础设施",
+            "genre": "工程架构指南",
+            "audience": "架构师与云原生工程师",
+            "register": "技术工程规范",
+        },
+        "review_stats": {
+            "reviewed_segments": 2,
+            "batches_reviewed": 1,
+            "blocking": 0,
+            "actionable": 0,
+            "informational": 0,
+            "review_failed": 0,
+        },
+        "has_blocking": False,
+        "provider": "DeepSeek",
+        "model": "deepseek-v4-flash",
+        "stage": "TRANSLATED",
+        "delivery_config": core.default_delivery_config(),
+    })
+    core.save_job_state("service-mesh-job", state2)
+    core.save_source("service-mesh-job", b"Service Mesh Architecture Mock Source")
+    core.update_runtime_state("service-mesh-job",
+                              status="completed",
+                              phase="completed",
+                              phase_label="已完成",
+                              started_at="2026-09-22T09:00:00+08:00",
+                              last_heartbeat_at="2026-09-22T09:30:00+08:00",
+                              last_progress_at="2026-09-22T09:30:00+08:00",
+                              last_event="completed")
+
+    # 5. Job 3 in Project 2: Global Financial Data Governance Standard
+    pairs3 = [
+        {
+            "segment_id": "seg-001",
+            "source": "Cross-border financial transactions require rigorous data governance and continuous regulatory compliance.",
+            "target": "跨境金融交易需要严格的数据治理与持续的监管合规。",
+            "initial_target": "初译：跨境金融交易需要数据治理与合规。",
+            "reviewed": True,
+            "review_status": "reviewed_clean",
+            "target_provenance": "reviewed",
+        },
+        {
+            "segment_id": "seg-002",
+            "source": "Every administrative operation is permanently recorded in the immutable audit trail.",
+            "target": "每项管理操作均永久记录在不可篡改的审计追踪中。",
+            "initial_target": "初译：管理操作记录在审计追踪中。",
+            "reviewed": True,
+            "review_status": "reviewed_clean",
+            "target_provenance": "reviewed",
+        },
+    ]
+    glossary2 = [
+        {
+            "id": "term-fin-01",
+            "source": "data governance",
+            "target": "数据治理",
+            "preferred": "数据治理",
+            "status": "locked",
+            "domain": "金融科技",
+            "scope": "项目",
+            "occurrences": [0],
+            "note": "合规核心概念",
+        },
+        {
+            "id": "term-fin-02",
+            "source": "audit trail",
+            "target": "审计追踪",
+            "preferred": "审计追踪",
+            "status": "locked",
+            "domain": "监管合规",
+            "scope": "项目",
+            "occurrences": [1],
+            "note": "监管强制要求",
+        },
+    ]
+    state3 = core.new_job_state("Global Financial Data Governance Standard.docx")
+    state3.update({
+        "p1_done": True,
+        "p2_done": True,
+        "p3_done": False,
+        "report_enabled": False,
+        "target_lang": "简体中文",
+        "project_id": proj2_id,
+        "paras": [p["source"] for p in pairs3],
+        "pairs": pairs3,
+        "glossary": glossary2,
+        "profile_done": True,
+        "document_profile": {
+            "display_name": "Global Financial Data Governance Standard",
+            "domain": "金融科技与合规",
+            "subdomain": "国际银行监管标准",
+            "genre": "监管合规白皮书",
+            "audience": "合规官与风控总监",
+            "register": "法律法规书面语",
+        },
+        "review_stats": {
+            "reviewed_segments": 2,
+            "batches_reviewed": 1,
+            "blocking": 0,
+            "actionable": 0,
+            "informational": 0,
+            "review_failed": 0,
+        },
+        "has_blocking": False,
+        "provider": "DeepSeek",
+        "model": "deepseek-v4-flash",
+        "stage": "TRANSLATED",
+        "delivery_config": core.default_delivery_config(),
+    })
+    core.save_job_state("fintech-job", state3)
+    core.save_source("fintech-job", b"Fintech Governance Mock Source")
+    core.update_runtime_state("fintech-job",
+                              status="completed",
+                              phase="completed",
+                              phase_label="已完成",
+                              started_at="2026-09-22T08:00:00+08:00",
+                              last_heartbeat_at="2026-09-22T08:45:00+08:00",
+                              last_progress_at="2026-09-22T08:45:00+08:00",
+                              last_event="completed")
+
+    # 6. Save Project Knowledge (Glossary & Translation Memory)
+    proj1["glossary"] = glossary1
+    core.save_project(proj1)
+
+    proj2["glossary"] = glossary2
+    core.save_project(proj2)
+
+    tm1 = {}
+    for p in pairs1[:3]:
+        core.tm_put(tm1, p["source"], p["target"], "简体中文")
+    for p in pairs2:
+        core.tm_put(tm1, p["source"], p["target"], "简体中文")
+    core.save_tm(tm1, project_id=proj1_id)
+
+    tm2 = {}
+    for p in pairs3:
+        core.tm_put(tm2, p["source"], p["target"], "简体中文")
+    core.save_tm(tm2, project_id=proj2_id)
+
+    # Touch mtime to ensure showcase-job is the most recently updated task
+    showcase_file = core.job_dir("showcase-job") / "state.json"
+    future_time = time.time() + 300
+    os.utime(showcase_file, (future_time, future_time))
 
     print("[OK] Showcase fixtures created in", OUTPUT)
 
@@ -214,13 +414,14 @@ def wait_port(port: int, timeout: float = 30.0) -> bool:
     return False
 
 
-def run_screenshot(url: str, out_path: Path, section: str = ""):
+def run_screenshot(url: str, out_path: Path, section: str = "", view: str = ""):
     cmd = [
         str(ROOT / "venv" / "bin" / "python"),
         str(ROOT / "scripts" / "ui_screenshot.py"),
         "--url", url,
         "--out", str(out_path),
         "--section", section,
+        "--view", view,
         "--wait-ms", "3500",
     ]
     env = {
@@ -257,29 +458,45 @@ def main():
             return 1
         print("Streamlit ready! Capturing screenshots...")
 
-        # 1. Workbench Preview
-        wb_path = ASSETS / "workbench-preview.png"
-        run_screenshot(url, wb_path, "翻译")
+        # 1. Projects Hub / Project Center
+        p1 = ASSETS / "01-projects-preview.png"
+        run_screenshot(url, p1, view="projects")
 
-        # 2. Overview Preview
-        ov_path = ASSETS / "overview-preview.png"
-        run_screenshot(url, ov_path, "概览")
+        # 2. New Task Wizard / Pipeline Setup
+        p2 = ASSETS / "02-new-task-preview.png"
+        run_screenshot(url, p2, view="new")
 
-        # 3. Review Preview
-        rev_path = ASSETS / "review-preview.png"
-        run_screenshot(url, rev_path, "审校")
+        # 3. Translation Workbench
+        p3 = ASSETS / "03-workbench-preview.png"
+        run_screenshot(url, p3, section="翻译")
+        shutil.copyfile(p3, ASSETS / "workbench-preview.png")
 
-        # 4. Terms Preview
-        terms_path = ASSETS / "assets-preview.png"
-        run_screenshot(url, terms_path, "术语")
+        # 4. Review & Quality Gate
+        p4 = ASSETS / "04-review-preview.png"
+        run_screenshot(url, p4, section="审校")
+        shutil.copyfile(p4, ASSETS / "review-preview.png")
 
-        # Also replace the leaked audit images in docs/ui-audit/24-minimal-workspace
+        # 5. Delivery & Manifest
+        p5 = ASSETS / "05-delivery-preview.png"
+        run_screenshot(url, p5, section="交付")
+        shutil.copyfile(p5, ASSETS / "delivery-preview.png")
+
+        # 6. Task History / Jobs Archive
+        p6 = ASSETS / "06-history-preview.png"
+        run_screenshot(url, p6, view="history")
+
+        # 7. Language Assets / Glossary & TM
+        p7 = ASSETS / "07-language-assets.png"
+        run_screenshot(url, p7, view="library")
+        shutil.copyfile(p7, ASSETS / "assets-preview.png")
+
+        # Also replace the legacy audit images in docs/ui-audit/24-minimal-workspace
         audit_dir = ROOT / "docs" / "ui-audit" / "24-minimal-workspace"
         if audit_dir.exists():
-            shutil.copyfile(wb_path, audit_dir / "03-workbench-current.png")
-            shutil.copyfile(ov_path, audit_dir / "04-overview-current.png")
-            shutil.copyfile(terms_path, audit_dir / "05-terms-workbench.png")
-            shutil.copyfile(rev_path, audit_dir / "13-review-blocker-workbench.png")
+            shutil.copyfile(p3, audit_dir / "03-workbench-current.png")
+            shutil.copyfile(p5, audit_dir / "04-overview-current.png")
+            shutil.copyfile(p7, audit_dir / "05-terms-workbench.png")
+            shutil.copyfile(p4, audit_dir / "13-review-blocker-workbench.png")
             print("[OK] Replaced legacy leaked audit images in 24-minimal-workspace")
 
         print("All showcase screenshots successfully generated!")
