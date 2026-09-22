@@ -14,6 +14,10 @@
 - 产品定位统一为 `Agentic Translation Workspace` / `智能体翻译工作台`。
 - 新的 logo、favicon、窗口标题、页面标题、导出署名、README 和发布门禁使用新品牌；
   旧包名、console 别名、环境变量、项目格式与历史资源继续保留以兼容现有用户数据。
+- **正式品牌素材改用用户提供的三份 PNG**：`folith-lockup.png`（主横向组合）、
+  `folith-mark.png`（图标）、`folith-app-icon.png`（App 图标）。README 首屏、侧栏品牌位
+  与页面图标直接使用它们，不再经过 SVG 派生；渲染脚本只保留 kit 未覆盖的深色底横向组合
+  与竖向组合，并用测试锁死"同一版位只有一个真源"。
 
 ### 修复：Provider 错误状态可读化
 

@@ -1,13 +1,16 @@
-"""重新生成 Folith·译页的**向量版**品牌位图（SVG 源 → 各尺寸 PNG）。
+"""重新生成 Folith·译页的**补充**品牌变体（SVG 源 → PNG）。
 
-旧的原图裁切资产不由本脚本管理，也不要在这里覆盖；它们作为兼容素材保留，
-当前界面使用本脚本生成的 Folith·译页 lockup；README 使用用户提供的品牌标准 PNG。
+正式品牌素材由用户提供、**不由本脚本管理，也不要在这里覆盖**：
 
-本脚本负责同一 logo 的向量派生版本——源文件是
+    folith-lockup.png     主横向组合（README 首屏、侧栏品牌位）
+    folith-mark.png       图标（透明底，页面图标）
+    folith-app-icon.png   App 图标（海军蓝圆角方块）
+
+本脚本只负责 kit 没覆盖的补充变体——源文件是
 `transpraxis/resources/brand/` 下的两个 SVG（`folith-mark.svg` 彩色图标、
 `folith-mark-mono.svg` 单色图标）。改了 SVG 之后必须能一条命令重新生成：
-手工导出的位图会漂移，很快就不再等于向量源，而深色底材料、App 图标、
-需要任意缩放的场景又都在引用这些 PNG。
+手工导出的位图会漂移，很快就不再等于向量源，而深色底材料、窄栏版位、
+单色场景又都在引用这些 PNG。
 
 渲染走本机已有的 Chromium（与 `scripts/ui_screenshot.py` 同一套依赖），
 不引入额外的图像库：
@@ -17,18 +20,14 @@
 
 用法：
 
-    python scripts/render_brand_assets.py            # 重新生成全部向量版位图
+    python scripts/render_brand_assets.py            # 重新生成补充变体
     python scripts/render_brand_assets.py --extra    # 附带单色版预览
     python scripts/render_brand_assets.py --check    # 只校验产物是否比向量源新
 
-产物（全部是向量派生，不含 source-*.png 裁切资产）：
+产物（全部是向量派生）：
 
-    folith-logo.png         English 横向组合（图标 + Folith·译页 字标 + 双语副标题）
-    folith-logo-zh.png      中文横向组合（图标 + 中文字标 + 中文副标题）
     folith-logo-dark.png    深色底横向组合
     folith-logo-stacked.png 竖向组合（窄栏 / 方形版位）
-    folith-app-icon.png     App 图标（海军蓝圆角方块 + 图标）
-    folith-favicon.png      标签页图标位图
 """
 from __future__ import annotations
 
@@ -70,7 +69,6 @@ FONT_CSS = ("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;7
             "&display=swap")
 
 WORDMARK_EN = "Folith·译页"
-WORDMARK_ZH = "译页"
 TAGLINE_EN = "Agentic Translation Workspace"
 TAGLINE_ZH = "智能体翻译工作台"
 
@@ -228,31 +226,14 @@ def _jobs(extra: bool) -> list[dict]:
 
     english_tags = ((TAGLINE_EN, LOCKUP["tag_en"], "-.01em"),
                     (TAGLINE_ZH, LOCKUP["tag_zh"], ".14em"))
-    chinese_tags = ((TAGLINE_ZH, LOCKUP["tag_en"], ".14em"),)
-    for on_dark, name in ((False, "folith-logo.png"),
-                          (True, "folith-logo-dark.png")):
-        html, w, h = _lockup(href, on_dark=on_dark, wordmark=WORDMARK_EN,
-                              taglines=english_tags)
-        jobs.append({"html": html, "w": w, "h": h,
-                     "selector": "#stage", "out": str(BRAND / name)})
-
-    html, w, h = _lockup(href, on_dark=False, wordmark=WORDMARK_ZH,
-                          taglines=chinese_tags)
+    html, w, h = _lockup(href, on_dark=True, wordmark=WORDMARK_EN,
+                          taglines=english_tags)
     jobs.append({"html": html, "w": w, "h": h, "selector": "#stage",
-                 "out": str(BRAND / "folith-logo-zh.png")})
+                 "out": str(BRAND / "folith-logo-dark.png")})
 
     html, w, h = _stacked(href, on_dark=False)
     jobs.append({"html": html, "w": w, "h": h, "selector": "#stage",
                  "out": str(BRAND / "folith-logo-stacked.png")})
-
-    html, w, h = _mark_block(_inline_svg(color_mark), 512,
-                             tile=PALETTE["navy"], radius=115, inner=0.74)
-    jobs.append({"html": html, "w": w, "h": h, "selector": "#stage",
-                 "out": str(BRAND / "folith-app-icon.png")})
-
-    html, w, h = _mark_block(_inline_svg(color_mark), 512)
-    jobs.append({"html": html, "w": w, "h": h, "selector": "#stage",
-                 "out": str(BRAND / "folith-favicon.png")})
 
     if extra:
         # 单色版：深色底用白色、浅色底用品牌深蓝（字形是背景色镂空）
@@ -294,9 +275,7 @@ def _render(jobs: list[dict]) -> int:
     return 0
 
 
-OUTPUTS = ("folith-logo.png", "folith-logo-zh.png", "folith-logo-dark.png",
-           "folith-logo-stacked.png", "folith-app-icon.png",
-           "folith-favicon.png")
+OUTPUTS = ("folith-logo-dark.png", "folith-logo-stacked.png")
 
 
 def main(argv: list[str] | None = None) -> int:

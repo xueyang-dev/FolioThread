@@ -1,7 +1,7 @@
 # Folith
 
 <p align="center">
-  <img src="docs/assets/folith-brand-standard.png" alt="Folith·译页 — Agentic Translation Workspace — 智能体翻译工作台" width="840">
+  <img src="transpraxis/resources/brand/folith-lockup.png" alt="Folith·译页 — Agentic Translation Workspace — 智能体翻译工作台" width="840">
 </p>
 
 <p align="center"><sub>Folith·译页的 logo、字标与配色基准见 <a href="docs/brand.md">docs/brand.md</a>。</sub></p>

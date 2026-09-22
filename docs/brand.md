@@ -1,8 +1,10 @@
 # Folith·译页 品牌与视觉基准
 
 本文以用户提供的品牌标准图 `docs/assets/folith-brand-standard.png` 为唯一视觉标准。
-它定义组合字标、英文/中文副标题、icon、App icon、横向小版和深浅单色版；代码只负责
-在不同产品版位复用这些内容，保留既有 icon mark、色板与工作台视觉系统。
+它定义组合字标、英文/中文副标题、icon、App icon、横向小版和深浅单色版。
+
+在此基础上，正式素材单独提供三份（主横向组合、图标、App 图标），由界面与 README
+直接使用，**不由渲染脚本生成**；脚本只补 kit 未覆盖的版位。
 
 ## 0. 正式品牌
 
@@ -24,9 +26,9 @@ logo 继续使用两页、文/A 字形和白色指针组成的 icon mark：
 | 页面上的 **文** 和 **A** | 中文 ↔ 英文的本地化工作 |
 | 覆盖两页的白色指针光标 | Agent 在文档上执行工作 |
 
-本轮不重绘、不换色、不加阴影，也不重新设计图形。品牌标准 PNG 是 README 的
-展示真源；`folith-*` 是产品界面使用的派生资源。原有 `foliothread-*` 资源作为
-历史/兼容素材保留，但不再由当前 UI 或 README 引用。
+本轮不重绘、不换色、不加阴影，也不重新设计图形。产品界面与 README 直接使用
+用户提供的正式素材；向量派生只用于 kit 未覆盖的补充版位。原有 `foliothread-*`
+资源作为历史/兼容素材保留，但不再由当前 UI 或 README 引用。
 
 ### 品牌标准图
 
@@ -34,21 +36,22 @@ logo 继续使用两页、文/A 字形和白色指针组成的 icon mark：
 
 ### 资产矩阵
 
-| 版本 | 文件 | 用在哪里 |
-| --- | --- | --- |
-| 品牌标准图（PNG） | `docs/assets/folith-brand-standard.png` | README 首屏与本规范 |
-| 彩色图标（向量） | `folith-mark.svg` | SVG 图标源 |
-| 单色图标（向量） | `folith-mark-mono.svg` | 单色、需跟随 `currentColor` 的场景 |
-| 横向组合 | `folith-logo.png` | 浅色材料与需要透明背景的英文版位 |
-| 中文横向组合 | `folith-logo-zh.png` | 中文界面侧栏品牌位 |
-| 深色底横向组合 | `folith-logo-dark.png` | 深色背景材料 |
-| 竖向组合 | `folith-logo-stacked.png` | 窄栏或正方形版位 |
-| App 图标 | `folith-app-icon.png` | 桌面/应用入口 |
-| 标签页图标 | `folith-favicon.svg` / `folith-favicon.png` | 浏览器与安装入口 |
+| 版本 | 文件 | 来源 | 用在哪里 |
+| --- | --- | --- | --- |
+| 品牌标准图 | `docs/assets/folith-brand-standard.png` | 用户提供 | 本规范的完整参考 |
+| 主横向组合 | `folith-lockup.png` | 用户提供 | README 首屏、侧栏品牌位 |
+| 图标（透明底） | `folith-mark.png` | 用户提供 | 页面图标（浏览器标签页、安装入口） |
+| App 图标 | `folith-app-icon.png` | 用户提供 | 桌面与应用入口 |
+| 深色底横向组合 | `folith-logo-dark.png` | SVG 派生 | 深色背景材料 |
+| 竖向组合 | `folith-logo-stacked.png` | SVG 派生 | 窄栏或正方形版位 |
+| 彩色图标（向量） | `folith-mark.svg` | 向量源 | 派生渲染与单色底稿 |
+| 单色图标（向量） | `folith-mark-mono.svg` | 向量源 | 单色、需跟随 `currentColor` 的场景 |
+| 标签页图标（向量） | `folith-favicon.svg` | 向量源 | 需要矢量缩放时 |
 
-产品位图都由 `scripts/render_brand_assets.py` 从 SVG 源生成，禁止手工替换为不同
-比例或不同字标的图片；README 使用上面的品牌标准 PNG。旧的 `foliothread-source-lockup.png` 与
-`foliothread-source-icon.png` 仍随包保留，供历史数据或旧文档读取。
+标注「用户提供」的是正式品牌文件，禁止手工替换为不同比例或不同字标的图片，
+也**不要**用渲染脚本覆盖它们；标注「SVG 派生」的位图在改完 SVG 源后重跑脚本即可。
+旧的 `foliothread-source-lockup.png` 与 `foliothread-source-icon.png` 仍随包保留，
+供历史数据或旧文档读取。
 
 ## 2. 色板
 
@@ -77,7 +80,7 @@ hover 和 active 只使用 Cobalt 的更深阶；语义色继续使用既有绿�
 
 ## 4. 资源生成与回归
 
-只修改 SVG 源，然后生成全部位图并运行检查：
+补充变体由脚本生成：只修改 SVG 源，然后重跑并检查。
 
 ```bash
 $EDITOR transpraxis/resources/brand/folith-mark.svg
@@ -86,13 +89,16 @@ python scripts/render_brand_assets.py --check
 python -m pytest tests/brand_assets_test.py -q
 ```
 
-脚本只管理 `folith-*` 向量派生位图，不覆盖旧的 `foliothread-source-*.png`。
+脚本只写自己的产物（`folith-logo-dark.png`、`folith-logo-stacked.png`，外加可选的
+单色预览），**不碰**用户提供的正式素材，也不覆盖旧的 `foliothread-source-*.png`。
+正式素材被替换或删除时，`tests/brand_assets_test.py` 会立刻失败。
 
 ## 5. 工作台应用
 
-侧栏、浏览器标题、启动器和导出署名使用当前品牌；中文界面优先显示
-`译页`，组合 lockup 使用 `Folith·译页`。README 展示品牌标准 PNG。页面仍保持既有侧栏、任务步骤、内容面、圆角、
-间距和颜色，不借 rebrand 之机改动导航或交互流程。
+侧栏、页面图标、启动器和导出署名使用正式品牌素材：侧栏品牌位 = `folith-lockup.png`，
+页面图标 = `folith-mark.png`，App 图标 = `folith-app-icon.png`；组合字标统一为
+`Folith·译页`。README 首屏展示同一份主 lockup。页面仍保持既有侧栏、任务步骤、
+内容面、圆角、间距和颜色，不借 rebrand 之机改动导航或交互流程。
 
 ## 6. 兼容边界
 

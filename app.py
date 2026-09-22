@@ -64,9 +64,10 @@ _PERSIST_STATE = (
 # ================= 页面全局设置 =================
 _APP_ROOT = Path(__file__).resolve().parent
 _BRAND_DIR = Path(_assets.__file__).resolve().parent / "resources" / "brand"
-# 当前 UI 使用由 Folith 向量源生成的 lockup；旧的原图裁切资源仅作兼容保留。
-_BRAND_LOGO = _BRAND_DIR / "folith-logo-zh.png"
-_BRAND_FAVICON = _BRAND_DIR / "folith-favicon.png"
+# 界面使用用户提供的正式品牌素材（lockup / 图标 / App 图标）；
+# 向量源只负责生成 kit 未覆盖的补充变体（深色底、竖向、单色）。
+_BRAND_LOGO = _BRAND_DIR / "folith-lockup.png"
+_BRAND_FAVICON = _BRAND_DIR / "folith-mark.png"
 _BRAND_LOGO_URI = "data:image/png;base64," + base64.b64encode(
     _BRAND_LOGO.read_bytes()).decode("ascii")
 

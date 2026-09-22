@@ -39,23 +39,30 @@ PALETTE = {
     "cyan": "#00e8fe",     # 渐变亮端
 }
 
+# 正式品牌素材：由用户提供，界面与 README 直接使用，不由渲染脚本生成。
+OFFICIAL_PNG = (
+    "folith-lockup.png",    # 主横向组合（README 首屏、侧栏品牌位）
+    "folith-mark.png",      # 图标（透明底，页面图标）
+    "folith-app-icon.png",  # App 图标
+)
+# 补充变体：由 scripts/render_brand_assets.py 从 SVG 源渲染（kit 未覆盖的版位）。
 DERIVED_PNG = (
-    "folith-logo.png",
-    "folith-logo-zh.png",
     "folith-logo-dark.png",
     "folith-logo-stacked.png",
-    "folith-app-icon.png",
+)
+# 已被正式素材取代的派生文件必须消失——同一版位不允许两个真源。
+RETIRED_PNG = (
+    "folith-logo.png",
+    "folith-logo-zh.png",
     "folith-favicon.png",
 )
-# 期望尺寸：这些是向量派生位图，界面与 README 使用横向 lockup，浏览器使用 favicon。
 # 尺寸写死是为了让"有人手工换了一张别的图"立刻失败。
-DERIVED_PNG_SIZE = {
-    "folith-logo.png": (1498, 268),
-    "folith-logo-zh.png": (1498, 268),
+BRAND_PNG_SIZE = {
+    "folith-lockup.png": (1187, 328),
+    "folith-mark.png": (278, 248),
+    "folith-app-icon.png": (273, 257),
     "folith-logo-dark.png": (1498, 268),
     "folith-logo-stacked.png": (560, 372),
-    "folith-app-icon.png": (512, 512),
-    "folith-favicon.png": (512, 512),
 }
 
 
@@ -115,16 +122,18 @@ def test_favicon_matches_mark_palette():
 
 
 def test_brand_bitmaps_exist_and_are_real():
-    """向量派生位图必须存在，且是尺寸正确的真实 PNG。
+    """正式素材与补充变体都必须存在，且是尺寸正确的真实 PNG。
 
     刻意不比较 mtime：CI 从 git 检出时所有文件时间戳相同，按时间判"是否过期"
     会变成随机失败。真正的重生成检查是 `python scripts/render_brand_assets.py
     --check`（需要 Chromium，不进 CI）。
     """
+    missing = [n for n in OFFICIAL_PNG if not (BRAND / n).is_file()]
+    assert not missing, f"缺少用户提供的正式品牌素材：{missing}"
     missing = [n for n in DERIVED_PNG if not (BRAND / n).is_file()]
     assert not missing, (f"缺少品牌位图 {missing}；"
                          f"运行 python scripts/render_brand_assets.py")
-    for name, (want_w, want_h) in DERIVED_PNG_SIZE.items():
+    for name, (want_w, want_h) in BRAND_PNG_SIZE.items():
         path = BRAND / name
         assert path.stat().st_size > 4_000, \
             f"{name} 只有 {path.stat().st_size} 字节，像是占位文件"
@@ -133,8 +142,19 @@ def test_brand_bitmaps_exist_and_are_real():
             f"{name} 尺寸为 {width}x{height}，期望 {want_w}x{want_h}"
 
 
-def test_reference_brand_standard_is_the_readme_source():
-    assert BRAND_STANDARD.is_file(), "README 品牌标准 PNG 缺失"
+def test_superseded_derived_assets_are_retired():
+    """正式素材取代的派生文件不得留下，渲染脚本也不得再产出它们。"""
+    for name in RETIRED_PNG:
+        assert not (BRAND / name).exists(), \
+            f"{name} 已被正式品牌素材取代，不应再存在（同一版位不能有两个真源）"
+    from scripts.render_brand_assets import OUTPUTS
+    assert set(OUTPUTS) == set(DERIVED_PNG), \
+        f"渲染脚本产物 {sorted(OUTPUTS)} 与期望的补充变体 {sorted(DERIVED_PNG)} 不一致"
+
+
+def test_brand_standard_reference_is_preserved():
+    """用户提供的品牌标准板是规范参考（docs/brand.md 引用），必须保留原图。"""
+    assert BRAND_STANDARD.is_file(), "品牌标准 PNG 缺失"
     assert BRAND_STANDARD.stat().st_size > 100_000, "品牌标准 PNG 不是完整参考图"
     assert _png_size(BRAND_STANDARD) == (1448, 1086)
 
@@ -170,9 +190,10 @@ def test_streamlit_theme_matches_primary():
 
 
 def test_sidebar_uses_formal_lockup():
-    """侧栏使用正式 Folith lockup，避免回退到旧品牌裁切图。"""
+    """侧栏与页面图标使用用户提供的正式素材，避免回退到派生图或旧裁切图。"""
     app = (ROOT / "app.py").read_text(encoding="utf-8")
-    assert 'folith-logo-zh.png' in app, "中文侧栏品牌位应使用正式译页 lockup"
+    assert '"folith-lockup.png"' in app, "侧栏品牌位应使用正式主 lockup"
+    assert '"folith-mark.png"' in app, "页面图标应使用正式图标素材"
     assert '译页 智能体翻译工作台' in app, \
         "品牌位的替代文本要与新定位一致"
 
@@ -190,8 +211,8 @@ def test_legacy_source_crops_are_retained_but_not_current_entries():
 
 def test_readme_references_existing_logo():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "docs/assets/folith-brand-standard.png" in readme, \
-        "README 首屏必须展示用户提供的品牌标准 PNG"
+    assert "transpraxis/resources/brand/folith-lockup.png" in readme, \
+        "README 首屏必须展示用户提供的正式主 lockup"
     for rel in re.findall(r'src="(transpraxis/resources/brand/[^"]+)"', readme):
         assert (ROOT / rel).is_file(), f"README 引用了不存在的资产：{rel}"
 
