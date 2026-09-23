@@ -90,7 +90,7 @@
 
 <p align="center">
   <a href="docs/assets/folith-workflow.html">
-    <img src="docs/assets/folith-workflow.svg" alt="Folith 长文档本地化工作流程" width="1000">
+    <img src="docs/assets/folith-workflow.svg" alt="Folith · 译页 长文档本地化与资产工作流程" width="1000">
   </a>
 </p>
 
