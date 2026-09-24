@@ -550,12 +550,195 @@ def test_css_targets_the_card_frame_with_a_distinct_prefix():
 
     `[class*="st-key-history_card_"]` 是子串匹配；容器若以该前缀开头，会被同一条
     绝对定位规则一起铺满整页，CTA 就会锚到页面底部而不是卡片右下角。
+
+    样式断言取**真正被注入的那份 CSS**：样式表已整体迁出 app.py（见
+    `transpraxis.ui.styles`），继续在 app.py 源码里找规则会随迁移静默变红。
     """
+    from transpraxis.ui import styles as ui_styles
+
     source = APP_PATH.read_text(encoding="utf-8")
-    assert '[class*="st-key-history_cardframe_"] { position:relative' in source
+    css = ui_styles.get_combined_css()
+    assert '[class*="st-key-history_cardframe_"] { position:relative' in css
     assert "history_cardframe_{job_id}" in source
     # 契约：前缀不同，所以子串规则不会命中容器
     assert not "history_cardframe_".startswith("history_card_") or True
-    assert "st-key-history_card_box_" not in source, \
+    assert "st-key-history_card_box_" not in css, \
         "history_card_box_ 会被 st-key-history_card_ 子串规则命中"
+
+
+# ---------------- 归属失效：项目的容器被删掉之后 ----------------
+
+def test_orphan_task_is_labelled_instead_of_looking_unassigned():
+    """`project_id` 指向已删除的项目记录 → 卡片如实标注，不混进「未分类」。
+
+    「未分类」是用户主动选择的"没有长期归属"；孤儿是**容器被删掉了**。两者必须
+    在卡上区分，否则卡片看上去只是"没有项目"（一个正常状态），用户永远猜不到
+    这些条目为什么悬空、为什么在项目侧也找不到。
+    """
+    state = _state(project_id="35c5a77d-e4ee-4120-83f4-1578af2ad2e5")
+    view = hv.history_card_view(state, job_id="orphan01",
+                                project_name="原项目已删除", project_orphan=True)
+    assert view["project_orphan"] is True
+    assert view["project_name"] == "原项目已删除"
+    # 状态要能被搜到，否则用户无从知道它为什么悬空
+    assert hv.card_matches(view, query="原项目已删除")
+    # 默认（未分类）不得被标成孤儿
+    assert hv.history_card_view(_state(), job_id="ok01")["project_orphan"] is False
+
+
+def test_history_card_renders_the_orphan_project_state():
+    """卡片的第 3 行要真的写出「项目 原项目已删除」，并带上标记类。"""
+    import tempfile
+
+    from streamlit.testing.v1 import AppTest
+
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = Path(tempfile.mkdtemp())
+    try:
+        core.save_job_state("histor01", _state(
+            project_id="35c5a77d-e4ee-4120-83f4-1578af2ad2e5"))
+        at = AppTest.from_file(str(APP_PATH), default_timeout=40)
+        at.run()
+        at.session_state["app_view"] = "history"
+        at.run()
+        assert not at.exception, at.exception
+
+        html = "\n".join(str(m.value) for m in at.markdown)
+        assert "原项目已删除" in html, "已失效的项目归属必须如实显示"
+        assert "is-orphan" in html, "未分类与孤儿必须在视觉上区分开"
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+# ---------------- 移除：唯一能触达孤儿任务的删除入口 ----------------
+
+def test_remove_action_lives_inside_the_card_and_avoids_the_click_prefix():
+    """每张卡片有一个「移除」按钮，key 前缀**不是** `history_card_*`。
+
+    整卡点击层靠 `[class*="st-key-history_card_"]` 子串匹配来绝对定位：移除按钮
+    若叫 `history_card_del_*`，它会被那条规则一起铺满整张卡片。
+    """
+    import ast
+
+    fn = _render_history_ast()
+    frames = [node for node in ast.walk(fn) if isinstance(node, ast.With)]
+    frame = next(
+        (w for w in frames
+         if any(_key_source(call) == "f'history_cardframe_{job_id}'"
+                for call in _calls(w.items[0].context_expr))),
+        None)
+    assert frame is not None, "必须有一个 history_cardframe_ 定位容器包住卡片"
+
+    keys = {_key_source(call) for call in _calls(frame)}
+    assert "f'history_del_{job_id}'" in keys, "移除按钮必须在卡片容器内部"
+    assert not any(key.strip("f'").startswith("history_card_")
+                   for key in keys if "history_del_" in key), \
+        "移除按钮不得使用 history_card_ 前缀"
+
+
+def test_remove_modal_is_wired_into_the_history_branch():
+    """移除弹窗由历史页渲染，且底行给「移除 + CTA」两个按钮都留了位置。
+
+    样式断言取**真正被注入的那一份 CSS**（`transpraxis.ui.styles.get_combined_css()`），
+    而不是某个文件里的字符串——样式表已整体迁出 app.py，绑文件路径的断言会随迁移
+    静默变红，且无法证明用户真的看到了这条规则。
+    """
+    from transpraxis.ui import styles as ui_styles
+
+    source = APP_PATH.read_text(encoding="utf-8")
+    # 必须锚定行首：`elif app_view == "history":` 里也含有 `if app_view == …`
+    # 这段子串，裸 split 会先命中那个渲染 `_page_title` 的分支。
+    branch = source.split('\nif app_view == "history":', 1)[1] \
+        .split("st.stop()", 1)[0]
+    assert "_render_history_delete_modal()" in branch, "历史页必须渲染移除确认弹窗"
+
+    css = ui_styles.get_combined_css()
+    assert '[class*="st-key-history_del_"] {' in css, "缺少移除按钮的定位规则"
+    del_rule = css.split('[class*="st-key-history_del_"] {', 1)[1] \
+        .split("}", 1)[0]
+    assert "position:absolute" in del_rule, \
+        "移除按钮必须绝对定位在卡片内部（与 CTA 同一套层叠）"
+    foot = css.split(".tp-hcard-foot {", 1)[1].split("}", 1)[0]
+    padding = int(foot.split("padding-right:", 1)[1].split("px", 1)[0])
+    assert padding >= 160, f"底行必须为两个按钮预留空间，实际 {padding}px"
+
+
+def test_removing_a_task_needs_a_typed_confirmation_then_deletes_it():
+    """移除必须逐字输入任务名才能确认，确认后任务目录真的消失。"""
+    import tempfile
+
+    from streamlit.testing.v1 import AppTest
+
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = Path(tempfile.mkdtemp())
+    try:
+        job_id = "histdel01"
+        state = _state()
+        core.save_job_state(job_id, state)
+        title = hv.display_name(state) or hv.document_title(state)
+
+        at = AppTest.from_file(str(APP_PATH), default_timeout=40)
+        at.run()
+        at.session_state["app_view"] = "history"
+        at.run()
+        assert not at.exception, at.exception
+
+        at.button(key=f"history_del_{job_id}").click()
+        at.run()
+        assert not at.exception, at.exception
+        assert at.button(key="history_delete_confirm").disabled, \
+            "没输入任务名称之前不得可点"
+
+        at.text_input(key="history_delete_confirm_name").set_value(title)
+        at.run()
+        assert not at.button(key="history_delete_confirm").disabled
+
+        at.button(key="history_delete_confirm").click()
+        at.run()
+        assert not at.exception, at.exception
+        assert core.load_job_state(job_id) is None, "任务目录必须真的被删除"
+        assert job_id not in [job["job_id"] for job in core.list_jobs()]
+        assert not core.job_dir(job_id).exists()
+    finally:
+        core.OUTPUT_DIR = old_output
+
+
+def test_removing_a_running_task_is_refused():
+    """正在运行的任务不给确认按钮：worker 还在写目录，删掉会留下半写状态。"""
+    import os
+    import tempfile
+    from datetime import datetime, timedelta, timezone
+
+    from streamlit.testing.v1 import AppTest
+
+    old_output = core.OUTPUT_DIR
+    core.OUTPUT_DIR = Path(tempfile.mkdtemp())
+    try:
+        job_id = "histdelrun01"
+        core.save_job_state(job_id, _state())
+        now = datetime.now(timezone.utc)
+        core.update_runtime_state(
+            job_id, status="running",
+            worker={"owner_pid": os.getpid(), "worker_id": "hist-del-test",
+                    "lease_expires_at": (now + timedelta(hours=1)).isoformat()},
+            last_heartbeat_at=now.isoformat(), last_progress_at=now.isoformat(),
+            event="开始运行")
+        assert core.job_is_active(job_id), "前提：这个任务被判定为正在运行"
+
+        at = AppTest.from_file(str(APP_PATH), default_timeout=40)
+        at.run()
+        at.session_state["app_view"] = "history"
+        at.run()
+        assert not at.exception, at.exception
+
+        at.button(key=f"history_del_{job_id}").click()
+        at.run()
+        assert not at.exception, at.exception
+        assert any("正在运行" in str(item.value) for item in at.error), \
+            [str(item.value) for item in at.error]
+        assert core.load_job_state(job_id) is not None, "运行中的任务不得被删除"
+        assert not [b for b in at.button if str(b.key) == "history_delete_confirm"], \
+            "运行中的任务不该给出确认删除按钮"
+    finally:
+        core.OUTPUT_DIR = old_output
 

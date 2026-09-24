@@ -384,3 +384,20 @@ def test_project_for_job_always_returns_a_real_container():
             assert project["project_id"] == core.system_project_id()
             assert project["is_system"] is True
         assert core.project_for_job("no-such-job") is None
+
+
+def test_delete_project_cascade_removes_jobs_and_project():
+    """支持用户承担风险并级联删除项目及其任务。"""
+    with project_env():
+        project = core.create_project("带任务的项目")
+        _job("j1", project_id=project["project_id"])
+        _job("j2", project_id=project["project_id"])
+        assert len(core.list_project_jobs(project["project_id"])) == 2
+
+        result = core.delete_project(project["project_id"],
+                                     confirm_name="带任务的项目",
+                                     cascade=True)
+        assert result["backup"].is_file()
+        assert core.load_project(project["project_id"]) is None
+        assert core.load_job_state("j1") is None
+        assert core.load_job_state("j2") is None

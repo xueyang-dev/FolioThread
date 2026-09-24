@@ -162,6 +162,8 @@ def test_brand_standard_reference_is_preserved():
 def test_app_tokens_match_brand_palette():
     """app.py 的 :root 品牌 token 必须等于品牌源文件的取色。"""
     app = (ROOT / "app.py").read_text(encoding="utf-8")
+    if ":root {" not in app:
+        app = (ROOT / "transpraxis" / "ui" / "styles.py").read_text(encoding="utf-8")
     block = app.split(":root {", 1)[1].split("}", 1)[0]
 
     def token(name: str) -> str:

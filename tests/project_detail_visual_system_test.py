@@ -82,6 +82,20 @@ def _walk(node, ancestors=()):
         yield from _walk(child, ancestors + (child,))
 
 
+def _node_key(node):
+    k = getattr(node, "key", None)
+    if k:
+        return k
+    proto_id = getattr(getattr(node, "proto", None), "id", "") or ""
+    if proto_id.startswith("$$ID-"):
+        parts = proto_id.split("-", 2)
+        if len(parts) > 2:
+            return parts[2]
+    if "-" in proto_id:
+        return proto_id.rsplit("-", 1)[-1]
+    return proto_id or None
+
+
 def _find_container(node, key):
     """按 key 取容器 Block（可以传整页 AppTest、`at.main` 或 `at.sidebar`）。
 
@@ -89,15 +103,29 @@ def _find_container(node, key):
     `project_modal_*` 只在 AppTest 的扁平 container 列表里出现）。因此
     在 main 子树里找不到时，回退到那份扁平列表。
     """
-    root = getattr(node, "main", node)
-    if getattr(root, "key", None) == key:
-        return root
-    for child, _ancestors in _walk(root):
-        if getattr(child, "key", None) == key:
-            return child
+    roots = []
+    if hasattr(node, "main"):
+        roots.append(node.main)
+    if hasattr(node, "sidebar"):
+        roots.append(node.sidebar)
+    if not roots:
+        roots.append(node)
+
+    candidates = []
+    for root in roots:
+        candidates.append(root)
+        for child, _ in _walk(root):
+            candidates.append(child)
     for element in getattr(node, "container", None) or []:
-        if getattr(element, "key", None) == key:
-            return element
+        candidates.append(element)
+        for child, _ in _walk(element):
+            candidates.append(child)
+    for c in candidates:
+        if _node_key(c) == key:
+            return c
+        proto_id = getattr(getattr(c, "proto", None), "id", "") or ""
+        if proto_id == key or proto_id.endswith(f"-{key}"):
+            return c
     return None
 
 
@@ -106,7 +134,12 @@ def _keyed_descendants(node):
 
     必须排除 `None`：没有 key 的控件（侧栏导航等）会让 `b.key in keys` 恒为真。
     """
-    return {getattr(child, "key", None) for child, _ in _walk(node)} - {None}
+    keys = set()
+    for child, _ in _walk(node):
+        k = _node_key(child)
+        if k:
+            keys.add(k)
+    return keys - {None, ""}
 
 
 def _markdown_text(at):
@@ -591,10 +624,13 @@ def test_project_list_renders_many_projects_without_duplicate_keys():
         at = _project_page(None)
         assert not at.exception, [e.value for e in at.exception]
         # 每张卡都有自己的 menu body：3 个项目 → 3 个独立 key。
-        bodies = [c for c in at.container if str(c.key or "").startswith(
-            "pd_menu_body_")]
-        assert len(bodies) == 3, [c.key for c in at.container]
-        assert len({c.key for c in bodies}) == 3, "菜单 key 必须两两不同"
+        bodies = []
+        for c, _ in _walk(at.main):
+            k = _node_key(c)
+            if k and str(k).startswith("pd_menu_body_"):
+                bodies.append(c)
+        assert len(bodies) == 3, [_node_key(c) for c, _ in _walk(at.main)]
+        assert len({_node_key(c) for c in bodies}) == 3, "菜单 key 必须两两不同"
 
 
 def test_menu_and_switcher_share_the_same_row_language():

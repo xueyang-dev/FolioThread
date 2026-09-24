@@ -96,3 +96,20 @@ def test_research_outputs_follow_step2_strategy_visibility():
     assert any(item.label == "理论框架" and item.value == "自动推荐（建议）"
                for item in research.selectbox)
     assert any("翻译实践报告" in item.label for item in research.checkbox)
+
+
+def test_switching_delivery_preset_does_not_raise_keyerror_on_outputs():
+    """切换交付方案与单独切换输出勾选（如 deliver_tmx）不抛出任何 KeyError。"""
+    at = _step3_app()
+    preset = next(item for item in at.selectbox if item.label == "交付方案")
+    for choice in ("complete", "compact", "standard", "complete"):
+        preset.select(choice)
+        at.run()
+        assert not at.exception, [e.value for e in at.exception]
+        tmx = next(item for item in at.checkbox if item.key == "deliver_tmx")
+        if tmx.value:
+            tmx.uncheck()
+        else:
+            tmx.check()
+        at.run()
+        assert not at.exception, [e.value for e in at.exception]

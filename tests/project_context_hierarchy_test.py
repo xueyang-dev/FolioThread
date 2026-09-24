@@ -474,6 +474,65 @@ def test_creating_a_task_inherits_the_selected_project_context():
                 core.list_project_jobs(project["project_id"])] == [job_id]
 
 
+def test_task_project_id_for_new_job_never_accepts_a_missing_project():
+    """落盘校验：上下文里的项目已不存在 → 归属归一为「未分类」，并如实报告失效。"""
+    with ctx_env() as tmp:
+        _write_provider_config(tmp)
+        project = core.create_project("仍然存在的项目")
+
+        assert core.task_project_id_for_new_job(project["project_id"]) == \
+            (project["project_id"], False)
+        assert core.task_project_id_for_new_job("") == (None, False)
+        assert core.task_project_id_for_new_job(None) == (None, False)
+        assert core.task_project_id_for_new_job(core.SYSTEM_PROJECT_ID) == \
+            (None, False), "系统工作区写入显式 null"
+
+        dead = "35c5a77d-e4ee-4120-83f4-1578af2ad2e5"
+        assert core.load_project(dead) is None, "前提：磁盘上没有这个项目"
+        assert core.task_project_id_for_new_job(dead) == (None, True), \
+            "项目记录不存在时必须归一为未分类，并把「失效」这一事实报给调用方"
+
+
+def test_a_deleted_project_context_never_leaks_into_a_new_task():
+    """上下文里的项目已被删除时，新任务必须落到「未分类」，不得留下孤儿任务。
+
+    删除可能发生在**另一个会话**：`_reload_project_state` 只清理执行删除的那一个
+    会话，所以 session 里可能留着一个指向已删除项目的 `task_project_id`。以前它被
+    直接写进 `state["project_id"]`，任务于是变成历史页上一张"不在任何项目下"的
+    孤儿卡片——项目侧任务列表与未分类 Inbox 都按 `resolved_project_id` **精确匹配**，
+    孤儿两边都不属于，两条删除入口都够不着（实测发生过两次：任务目录创建时间分别
+    在其项目被删之后 29 秒与 13 秒）。
+    """
+    with ctx_env() as tmp:
+        _write_provider_config(tmp)
+        project = core.create_project("稍后会被删掉的项目")
+        at = _switch_to(_new_task_page(), project["project_id"])
+        assert _state(at, "task_project_id") == project["project_id"]
+
+        # 绕过 UI 直接删项目：模拟"删除发生在另一个会话"，本会话的上下文没被清理。
+        core.delete_project(project["project_id"], confirm_name="稍后会被删掉的项目")
+        assert core.load_project(project["project_id"]) is None
+        assert _state(at, "task_project_id") == project["project_id"], \
+            "前提不成立：这个会话的上下文已经不是那个已删除的项目了"
+
+        with _stubbed_worker():
+            at.session_state["task_files"] = [
+                {"name": "orphan.docx", "bytes": b"orphan-bytes"}]
+            at.session_state["task_step"] = 4
+            at.run()
+            next(b for b in at.button if b.label == "开始任务").click()
+            at.run()
+            assert not at.exception, [e.value for e in at.exception]
+
+        created = _job_created_for("orphan.docx")
+        loaded = core.load_job_state(created["job_id"])
+        assert loaded["project_id"] is None, \
+            "已失效的项目不得被写进任务归属"
+        assert core.resolved_project_id(loaded) == core.system_project_id()
+        assert [job["job_id"] for job in core.list_unassigned_jobs()] == \
+            [created["job_id"]], "任务必须能在「未分类」里被找到，不能悬空"
+
+
 def test_switching_context_inside_the_task_flow_keeps_you_in_the_flow():
     """在新建任务里切换 Project：归属跟着变，但不被拽去项目详情页。"""
     with ctx_env():

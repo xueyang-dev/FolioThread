@@ -76,17 +76,35 @@ def _walk(node, ancestors=()):
 
 def _find_container(node, key):
     """按 key 取容器 Block（可以传整页 AppTest、`at.main` 或 `at.sidebar`）。"""
-    node = getattr(node, "main", node)
-    if getattr(node, "key", None) == key:
-        return node
-    for child, _ancestors in _walk(node):
-        if getattr(child, "key", None) == key:
-            return child
+    root = getattr(node, "main", node)
+    candidates = [root]
+    for child, _ in _walk(root):
+        candidates.append(child)
+    for element in getattr(node, "container", None) or []:
+        candidates.append(element)
+        for child, _ in _walk(element):
+            candidates.append(child)
+    for c in candidates:
+        if getattr(c, "key", None) == key:
+            return c
+        proto_id = getattr(getattr(c, "proto", None), "id", "") or ""
+        if proto_id == key or proto_id.endswith(f"-{key}"):
+            return c
     return None
 
 
 def _keyed_descendants(node):
-    return {getattr(child, "key", None) for child, _ in _walk(node)}
+    keys = set()
+    for child, _ in _walk(node):
+        k = getattr(child, "key", None)
+        if k:
+            keys.add(k)
+        proto_id = getattr(getattr(child, "proto", None), "id", "") or ""
+        if "-" in proto_id:
+            keys.add(proto_id.rsplit("-", 1)[-1])
+        elif proto_id:
+            keys.add(proto_id)
+    return keys - {None, ""}
 
 
 def _markdown_text(at):

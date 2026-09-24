@@ -19,6 +19,9 @@ def main():
     core.OUTPUT_DIR = tmp
     try:
         app_source = (root / "app.py").read_text(encoding="utf-8")
+        styles_file = root / "transpraxis" / "ui" / "styles.py"
+        if styles_file.is_file():
+            app_source += "\n" + styles_file.read_text(encoding="utf-8")
         assert ':has([data-testid="stFileChip"]) .tp-upload-copy' in app_source \
             and 'animation: tp-upload-bar' in app_source \
             and '[data-testid="stFileChipName"]::before' in app_source, \

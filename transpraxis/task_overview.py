@@ -465,10 +465,17 @@ def derive_task_overview_state(task: Any, *, facts: Any = None) -> Dict[str, Any
 
     runtime_status = _text(fact.get("runtime_status"))
     runtime_label = _text(fact.get("runtime_label"))
+    runtime_stage = _text(fact.get("runtime_stage"))
+    runtime_operation = _text(fact.get("runtime_operation"))
+    runtime_detail = _text(fact.get("runtime_detail"))
     business_complete = translation_complete and (not report_enabled or p3_done)
     runtime_failed = runtime_status == "failed" and not business_complete
     runtime_stopped = runtime_status in {"interrupted", "stalled", "waiting_manual",
                                          "cancelled"} and not business_complete
+    runtime_active = runtime_status in {
+        "resume_requested", "queued", "starting", "running",
+        "waiting_external", "cancelling",
+    } and not business_complete
     gate_labels = _blocking_gate_labels(
         fact, state, qa, report_enabled=report_enabled, case_gate=case_gate)
 
@@ -524,17 +531,25 @@ def derive_task_overview_state(task: Any, *, facts: Any = None) -> Dict[str, Any
         primary = _action("resume", "继续处理", "translation", primary=True)
     elif not translation_complete:
         if not segments["started"]:
-            lifecycle = DRAFT
-            reason = "draft"
-            tone = GRAY
-            label = "尚未开始"
-            detail = "还没有可用于翻译的段落。"
-            primary = _action("start_translation", "开始翻译", "translation", primary=True)
+            if runtime_active:
+                lifecycle = TRANSLATING
+                reason = "translating"
+                tone = AMBER if runtime_status == "cancelling" else BLUE
+                label = "正在取消" if runtime_status == "cancelling" else (runtime_label or "正在运行")
+                detail = runtime_stage or runtime_operation or runtime_detail or "正在处理原文并准备翻译…"
+                primary = _action("continue_translation", "查看进度", "translation", primary=True)
+            else:
+                lifecycle = DRAFT
+                reason = "draft"
+                tone = GRAY
+                label = "尚未开始"
+                detail = "还没有可用于翻译的段落。"
+                primary = _action("start_translation", "开始翻译", "translation", primary=True)
         else:
             lifecycle = TRANSLATING
             reason = "translating"
-            tone = BLUE
-            label = "正在翻译"
+            tone = AMBER if runtime_status == "cancelling" else BLUE
+            label = "正在取消" if runtime_status == "cancelling" else ("正在运行" if runtime_active else "正在翻译")
             detail = f"{translated} / {total} 段已翻译。"
             primary = _action("continue_translation", "继续翻译", "translation", primary=True)
     elif review_required and not review_ready:
@@ -617,7 +632,7 @@ def derive_task_overview_state(task: Any, *, facts: Any = None) -> Dict[str, Any
     p1_done = bool(_flag(state.get("p1_done")))
     if p1_done or translation_complete or translated:
         document_state = COMPLETED
-    elif total:
+    elif total or runtime_active:
         document_state = CURRENT
     else:
         document_state = PENDING
@@ -663,7 +678,8 @@ def derive_task_overview_state(task: Any, *, facts: Any = None) -> Dict[str, Any
 
     stages = [
         _stage(STAGE_DOCUMENT, "原文处理", document_state,
-               "原文与结构已就绪" if document_state == COMPLETED else "等待解析原文",
+               "原文与结构已就绪" if document_state == COMPLETED
+               else ("正在解析原文" if document_state == CURRENT else "等待解析原文"),
                "translation"),
         _stage(STAGE_TRANSLATION, "翻译", translation_state,
                f"{translated} / {total} 段已翻译" if total else "等待原文",

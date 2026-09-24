@@ -246,6 +246,34 @@ def test_runtime_failure_and_interruption():
     assert stopped["primary_action"]["label"] == "继续处理"
 
 
+def test_runtime_active_before_segments_started():
+    state = {}  # fresh task, 0 segments, p1_done not set
+    running = to.derive_task_overview_state(
+        state, facts={
+            "runtime_status": "running",
+            "runtime_label": "正在运行",
+            "runtime_stage": "LLM 原文纠错与断行整理",
+        })
+    assert running["lifecycle"] == to.TRANSLATING
+    assert running["tone"] == to.BLUE
+    assert running["label"] == "正在运行"
+    assert "LLM 原文纠错与断行整理" in running["detail"]
+    assert running["stages"][0]["state"] == to.CURRENT
+    assert running["stages"][0]["detail"] == "正在解析原文"
+
+
+def test_runtime_cancelling_state():
+    state = {}
+    cancelling = to.derive_task_overview_state(
+        state, facts={
+            "runtime_status": "cancelling",
+            "runtime_label": "正在取消",
+        })
+    assert cancelling["lifecycle"] == to.TRANSLATING
+    assert cancelling["tone"] == to.AMBER
+    assert cancelling["label"] == "正在取消"
+
+
 def test_lifecycle_labels_never_use_delivery_ready_wording_for_preparation():
     preparation = to.derive_task_overview_state(_state(1))
     ready = to.derive_task_overview_state(

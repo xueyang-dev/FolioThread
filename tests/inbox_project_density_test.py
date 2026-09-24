@@ -152,13 +152,24 @@ def _find_container(at, key):
     for node, _ancestors in _walk(at.main):
         if getattr(node, "key", None) == key:
             return node
+        proto_id = getattr(getattr(node, "proto", None), "id", "") or ""
+        if proto_id == key or proto_id.endswith(f"-{key}"):
+            return node
     return None
 
 
 def _container_order(at):
     """主区域里带 key 的容器出现顺序。"""
-    return [getattr(node, "key", None) for node, _ in _walk(at.main)
-            if getattr(node, "key", None)]
+    res = []
+    for node, _ in _walk(at.main):
+        k = getattr(node, "key", None)
+        if not k:
+            proto_id = getattr(getattr(node, "proto", None), "id", "") or ""
+            if "-" in proto_id:
+                k = proto_id.rsplit("-", 1)[-1]
+        if k:
+            res.append(k)
+    return res
 
 
 def _state(at, key, default=None):

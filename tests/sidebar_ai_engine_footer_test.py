@@ -133,6 +133,9 @@ def test_manage_action_has_no_tooltip_wrapper():
     assert not any(kw.arg == "help" for kw in manage[0].keywords), \
         "「管理」带 tooltip 会让 `.stButton > button` 直接子选择器静默失效"
     css = APP_PATH.read_text(encoding="utf-8")
+    styles_file = ROOT / "transpraxis" / "ui" / "styles.py"
+    if styles_file.is_file():
+        css += "\n" + styles_file.read_text(encoding="utf-8")
     assert ".st-key-provider_status .stButton > button {" in css, \
         "这条直接子选择器仍然存在，所以上面的约束是必需的"
 
@@ -177,6 +180,9 @@ def test_ai_engine_footer_still_renders_as_a_status_module():
         assert 'tp-nav-label">AI引擎' not in markup, \
             "AI Engine 区不能伪装成「工作区」分组里的一个分组标题"
         source = APP_PATH.read_text(encoding="utf-8")
+        styles_file = ROOT / "transpraxis" / "ui" / "styles.py"
+        if styles_file.is_file():
+            source += "\n" + styles_file.read_text(encoding="utf-8")
         assert 'st-key-provider_status' in source, "status module 的容器 key 必须保留"
         assert '.st-key-library_nav .stButton > button' in source, \
             "「工作区」导航行样式仍服务于 历史任务 / 术语与翻译记忆"

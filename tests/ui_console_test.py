@@ -592,6 +592,9 @@ def test_workspace_responsive_rules_anchor_on_a_rendered_column():
     Inspector 列上。注释里说明这段历史是允许的，所以比对前先剥掉 CSS 注释。
     """
     source = (ROOT / "app.py").read_text(encoding="utf-8")
+    styles_file = ROOT / "transpraxis" / "ui" / "styles.py"
+    if styles_file.is_file():
+        source += "\n" + styles_file.read_text(encoding="utf-8")
     without_comments = re.sub(r"/\*[\s\S]*?\*/", "", source)
 
     assert "st-key-workspace_nav_col" not in without_comments, \

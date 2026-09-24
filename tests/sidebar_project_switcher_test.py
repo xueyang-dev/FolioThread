@@ -109,6 +109,9 @@ def _find_in(node, key):
     for child, _ancestors in _walk(node):
         if getattr(child, "key", None) == key:
             return child
+        proto_id = getattr(getattr(child, "proto", None), "id", "") or ""
+        if proto_id == key or proto_id.endswith(f"-{key}"):
+            return child
     return None
 
 
@@ -245,8 +248,8 @@ def test_selector_opens_a_light_switcher_panel_not_a_modal():
 
         # 旧的大型「切换项目」Modal 必须彻底退休。
         assert not _has_key(at, "project_switcher_open")
-        assert not any(str(c.key or "").startswith("project_switcher_dialog")
-                       for c in at.container)
+        assert not any(str(getattr(c, "key", "") or "").startswith("project_switcher_dialog")
+                       for c, _ in _walk(at.main))
         css = _markdown_text(at)
         assert 'section[role="dialog"]:has(.st-key-project_switcher' not in css, \
             "切换项目不该再有 dialog 规则"

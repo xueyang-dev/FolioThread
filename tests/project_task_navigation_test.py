@@ -499,15 +499,26 @@ def test_project_center_entry_returns_to_the_project_list():
 
 
 def _find_container(at, key):
-    """按 key 取容器 Block（AppTest 的容器也带 key）。"""
+    """按 key 取容器 Block（AppTest 的容器也带 key，Streamlit 1.62+ 挂在 proto.id 上）。"""
     for node, _ancestors in _walk(at.main):
         if getattr(node, "key", None) == key:
+            return node
+        proto_id = getattr(getattr(node, "proto", None), "id", "") or ""
+        if proto_id == key or proto_id.endswith(f"-{key}"):
             return node
     return None
 
 
 def _keyed_descendants(node):
-    return {getattr(child, "key", None) for child, _ in _walk(node)}
+    res = set()
+    for child, _ in _walk(node):
+        k = getattr(child, "key", None)
+        if k:
+            res.add(k)
+        proto_id = getattr(getattr(child, "proto", None), "id", "") or ""
+        if proto_id:
+            res.add(proto_id.rsplit("-", 1)[-1])
+    return res
 
 
 def test_project_hub_first_screen_is_a_workspace_not_a_database():

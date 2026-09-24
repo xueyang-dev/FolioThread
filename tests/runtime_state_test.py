@@ -492,3 +492,63 @@ def test_interrupted_message_explains_what_was_running(tmp_path):
         assert "断点继续" in message, message
     finally:
         core.OUTPUT_DIR = old_dir
+
+
+def test_job_cancel_finds_thread_when_runtime_workers_cleared(tmp_path, monkeypatch):
+    """当 _RUNTIME_WORKERS 字典丢失时，通过 threading.enumerate 仍能发现 worker 并触发取消。"""
+    old_dir = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    entered = threading.Event()
+    release = threading.Event()
+    original = core.run_job_pipeline
+
+    def slow_pipeline(*args, **kwargs):
+        entered.set()
+        release.wait(2)
+        return core.load_job_state(args[0])
+
+    monkeypatch.setattr(core, "run_job_pipeline", slow_pipeline)
+    job_id = "threadrecover01"
+    try:
+        core.start_job_worker(job_id, "fixture.docx", None, {"enable_report": False})
+        assert _wait_for(entered.is_set)
+        # 模拟 Streamlit 模块重载清空内存字典
+        core._RUNTIME_WORKERS.clear()
+        assert core.is_job_worker_alive(job_id), "必须通过线程枚举找到仍活着的 worker 线程"
+        assert core.request_job_cancel(job_id)
+        release.set()
+        assert _wait_for(lambda: core.get_job_runtime_status(job_id)["status"] == "cancelled")
+    finally:
+        release.set()
+        monkeypatch.setattr(core, "run_job_pipeline", original)
+        core._RUNTIME_WORKERS.clear()
+        core.OUTPUT_DIR = old_dir
+
+
+def test_job_cancel_force_immediately_marks_cancelled(tmp_path, monkeypatch):
+    """force=True 时无论 worker 是否退出，立刻将状态置为 cancelled。"""
+    old_dir = core.OUTPUT_DIR
+    core.OUTPUT_DIR = tmp_path
+    entered = threading.Event()
+    release = threading.Event()
+    original = core.run_job_pipeline
+
+    def slow_pipeline(*args, **kwargs):
+        entered.set()
+        release.wait(5)
+        return core.load_job_state(args[0])
+
+    monkeypatch.setattr(core, "run_job_pipeline", slow_pipeline)
+    job_id = "forcecancel01"
+    try:
+        core.start_job_worker(job_id, "fixture.docx", None, {"enable_report": False})
+        assert _wait_for(entered.is_set)
+        # 强制终止
+        assert core.request_job_cancel(job_id, force=True)
+        runtime = core.get_job_runtime_status(job_id)
+        assert runtime["status"] == "cancelled"
+    finally:
+        release.set()
+        monkeypatch.setattr(core, "run_job_pipeline", original)
+        core._RUNTIME_WORKERS.clear()
+        core.OUTPUT_DIR = old_dir

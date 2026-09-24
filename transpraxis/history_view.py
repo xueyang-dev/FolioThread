@@ -358,8 +358,15 @@ def history_card_view(
     state: Mapping[str, Any], *, job_id: str = "", runtime_status: str = "",
     delivery_label: str = "", delivery_current: bool = False,
     saved_at: str = "", now: Any = None, project_name: str = "",
+    project_orphan: bool = False,
 ) -> Dict[str, Any]:
-    """把持久状态投影成一张历史卡片。只读，不改 state。"""
+    """把持久状态投影成一张历史卡片。只读，不改 state。
+
+    `project_orphan=True` 表示任务的 `project_id` 指向一个**已经不存在的项目
+    记录**（容器被删了），而不是"用户主动选择没有长期归属"（那是未分类）。
+    调用方负责给出相应的 `project_name` 文案；这里只把它透传出来，让卡片能把
+    两者画得不一样。
+    """
     state = state or {}
     counts = _counts(state, job_id)
     chip = _status_chip(state, job_id, _text(runtime_status), counts,
@@ -390,6 +397,7 @@ def history_card_view(
         "identity": " · ".join(identity),
         "domain": domain,
         "project_name": _text(project_name),
+        "project_orphan": bool(project_orphan),
         "chip": chip,
         "cta": cta,
         "updated_at": _text(saved_at),
